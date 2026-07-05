@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google Meet Bot Visualizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0b0f19;
+      --card-bg: rgba(17, 24, 39, 0.7);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent-primary: #3b82f6;
+      --accent-success: #10b981;
+      --accent-danger: #ef4444;
+      --accent-purple: #8b5cf6;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-dark);
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.1) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(139, 92, 246, 0.15) 0px, transparent 50%);
+      color: var(--text-main);
+      font-family: 'Inter', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: 2rem;
+    }
+
+    h1, h2, h3 {
+      font-family: 'Outfit', sans-serif;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 2rem;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 1.5rem;
+    }
+
+    .logo-container {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .logo-icon {
+      width: 2.5rem;
+      height: 2.5rem;
+      background: linear-gradient(135deg, var(--accent-primary), var(--accent-purple));
+      border-radius: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 1.25rem;
+      box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+    }
+
+    .title-area h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+    }
+
+    .title-area p {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+    }
+
+    .connection-panel {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      padding: 0.5rem 1rem;
+      border-radius: 1rem;
+      backdrop-filter: blur(12px);
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+    }
+
+    .status-dot {
+      width: 0.625rem;
+      height: 0.625rem;
+      border-radius: 50%;
+      background-color: var(--accent-danger);
+      box-shadow: 0 0 8px var(--accent-danger);
+    }
+
+    .status-dot.connected {
+      background-color: var(--accent-success);
+      box-shadow: 0 0 8px var(--accent-success);
+      animation: pulse 2s infinite;
+    }
+
+    .status-dot.connecting {
+      background-color: #f59e0b;
+      box-shadow: 0 0 8px #f59e0b;
+      animation: pulse 1s infinite;
+    }
+
+    @keyframes pulse {
+      0% { opacity: 0.5; }
+      50% { opacity: 1; }
+      100% { opacity: 0.5; }
+    }
+
+    .input-group {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .ws-input {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--card-border);
+      border-radius: 0.5rem;
+      padding: 0.35rem 0.75rem;
+      color: white;
+      font-family: monospace;
+      font-size: 0.875rem;
+      outline: none;
+      width: 200px;
+    }
+
+    .ws-input:focus {
+      border-color: var(--accent-primary);
+    }
+
+    .btn {
+      background: linear-gradient(135deg, var(--accent-primary), #2563eb);
+      color: white;
+      border: none;
+      border-radius: 0.5rem;
+      padding: 0.4rem 1rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .btn:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--card-border);
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .btn-danger {
+      background: linear-gradient(135deg, var(--accent-danger), #dc2626);
+    }
+
+    .main-grid {
+      display: grid;
+      grid-template-columns: 350px 1fr;
+      gap: 2rem;
+      flex-grow: 1;
+    }
+
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 2rem;
+    }
+
+    .glass-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 1.5rem;
+      padding: 1.5rem;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    }
+
+    .speaker-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 2rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .speaker-avatar {
+      width: 6rem;
+      height: 6rem;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #4f46e5, var(--accent-purple));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2.5rem;
+      font-weight: bold;
+      margin-bottom: 1rem;
+      border: 3px solid rgba(255,255,255,0.1);
+      box-shadow: 0 0 20px rgba(139, 92, 246, 0.2);
+      transition: all 0.3s ease;
+    }
+
+    .speaker-avatar.active {
+      box-shadow: 0 0 30px rgba(16, 185, 129, 0.4);
+      border-color: var(--accent-success);
+      transform: scale(1.05);
+    }
+
+    .speaker-name {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+    }
+
+    .speaker-status {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+    }
+
+    .visualizer-container {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      height: 40px;
+      margin-top: 1.5rem;
+    }
+
+    .vis-bar {
+      width: 4px;
+      height: 8px;
+      background-color: var(--accent-primary);
+      border-radius: 2px;
+      transition: height 0.1s ease;
+    }
+
+    .vis-bar.active {
+      background-color: var(--accent-success);
+      animation: bounce 0.8s ease infinite alternate;
+    }
+
+    .vis-bar:nth-child(2) { animation-delay: 0.1s; }
+    .vis-bar:nth-child(3) { animation-delay: 0.2s; }
+    .vis-bar:nth-child(4) { animation-delay: 0.3s; }
+    .vis-bar:nth-child(5) { animation-delay: 0.4s; }
+    .vis-bar:nth-child(6) { animation-delay: 0.5s; }
+    .vis-bar:nth-child(7) { animation-delay: 0.6s; }
+
+    @keyframes bounce {
+      0% { height: 8px; }
+      100% { height: 35px; }
+    }
+
+    .stats-card h3 {
+      font-size: 1rem;
+      color: var(--text-muted);
+      margin-bottom: 1rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.75rem 0;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+
+    .stat-row:last-child {
+      border-bottom: none;
+    }
+
+    .stat-label {
+      color: var(--text-muted);
+      font-size: 0.875rem;
+    }
+
+    .stat-val {
+      font-weight: 600;
+      font-size: 0.875rem;
+    }
+
+    .content-area {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .card-header-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+    }
+
+    .transcript-container {
+      flex-grow: 1;
+      overflow-y: auto;
+      max-height: calc(100vh - 200px);
+      padding-right: 0.5rem;
+    }
+
+    .transcript-container::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .transcript-container::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 3px;
+    }
+
+    .chunk-row {
+      display: flex;
+      gap: 1rem;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.03);
+      padding: 1rem;
+      border-radius: 1rem;
+      margin-bottom: 0.75rem;
+      transition: all 0.2s ease;
+      align-items: center;
+    }
+
+    .chunk-row:hover {
+      background: rgba(255,255,255,0.04);
+      border-color: rgba(255,255,255,0.06);
+    }
+
+    .chunk-time {
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .chunk-speaker-badge {
+      padding: 0.25rem 0.75rem;
+      border-radius: 2rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background-color: rgba(59, 130, 246, 0.15);
+      color: #93c5fd;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      text-align: center;
+      min-width: 100px;
+      max-width: 120px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .chunk-speaker-badge.silence {
+      background-color: rgba(156, 163, 175, 0.1);
+      color: var(--text-muted);
+      border-color: rgba(156, 163, 175, 0.2);
+    }
+
+    .chunk-speaker-badge.active-talker {
+      background-color: rgba(16, 185, 129, 0.15);
+      color: #a7f3d0;
+      border-color: rgba(16, 185, 129, 0.3);
+    }
+
+    .chunk-data-info {
+      flex-grow: 1;
+      font-size: 0.875rem;
+    }
+
+    .chunk-play-btn {
+      width: 2.25rem;
+      height: 2.25rem;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--card-border);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .chunk-play-btn:hover {
+      background: var(--accent-primary);
+      border-color: var(--accent-primary);
+      transform: scale(1.05);
+    }
+
+    .chunk-play-btn svg {
+      width: 1rem;
+      height: 1rem;
+      fill: currentColor;
+    }
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 300px;
+      color: var(--text-muted);
+      text-align: center;
+      gap: 0.5rem;
+    }
+
+    .empty-state svg {
+      width: 3.5rem;
+      height: 3.5rem;
+      opacity: 0.3;
+      margin-bottom: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo-container">
+      <div class="logo-icon">M</div>
+      <div class="title-area">
+        <h1>Google Meet Bot Visualizer</h1>
+        <p>Real-Time Speaker Attributed Audio Stream</p>
+      </div>
+    </div>
+
+    <div class="connection-panel">
+      <div class="status-badge">
+        <div id="statusDot" class="status-dot"></div>
+        <span id="statusText">Disconnected</span>
+      </div>
+      <div class="input-group">
+        <input type="text" id="wsUrlInput" class="ws-input" value="ws://localhost:8080">
+        <button id="connectBtn" class="btn">Connect</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="main-grid">
+    <div class="sidebar">
+      <!-- Live Speaker Card -->
+      <div class="glass-card speaker-card">
+        <div id="speakerAvatar" class="speaker-avatar">?</div>
+        <h2 id="speakerName" class="speaker-name">No Active Speaker</h2>
+        <div id="speakerStatus" class="speaker-status">Waiting for stream...</div>
+        
+        <div class="visualizer-container">
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+        </div>
+      </div>
+
+      <!-- Stats Card -->
+      <div class="glass-card stats-card">
+        <h3>Stream Stats</h3>
+        <div class="stat-row">
+          <span class="stat-label">Total Chunks</span>
+          <span id="statChunks" class="stat-val">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Recorded Time</span>
+          <span id="statTime" class="stat-val">0.0s</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Format</span>
+          <span id="statFormat" class="stat-val">-</span>
+        </div>
+        <div class="stat-row" style="margin-top: 1.5rem;">
+          <button id="exportWavBtn" class="btn btn-secondary" style="width: 100%;" disabled>Export Session WAV</button>
+        </div>
+        <div class="stat-row">
+          <button id="clearBtn" class="btn btn-secondary btn-danger" style="width: 100%; font-size: 0.75rem; padding: 0.25rem;">Clear Data</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Transcript / Chunks list -->
+    <div class="glass-card content-area">
+      <div class="card-header-actions">
+        <h2>Live Audio Chunks Log</h2>
+        <p style="font-size: 0.875rem; color: var(--text-muted)">Latest chunks appear at the top</p>
+      </div>
+
+      <div id="transcript" class="transcript-container">
+        <div class="empty-state" id="emptyState">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/>
+          </svg>
+          <p>No audio chunks captured yet.</p>
+          <p style="font-size: 0.8125rem;">Make sure the Meet Bot is running and connected to a meeting.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let socket = null;
+    let audioCtx = null;
+    const chunks = [];
+    const recordedSamples = []; // Array of Int16Array
+    
+    // UI Elements
+    const connectBtn = document.getElementById('connectBtn');
+    const wsUrlInput = document.getElementById('wsUrlInput');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+    const speakerAvatar = document.getElementById('speakerAvatar');
+    const speakerName = document.getElementById('speakerName');
+    const speakerStatus = document.getElementById('speakerStatus');
+    const visBars = document.querySelectorAll('.vis-bar');
+    const transcript = document.getElementById('transcript');
+    const emptyState = document.getElementById('emptyState');
+    const statChunks = document.getElementById('statChunks');
+    const statTime = document.getElementById('statTime');
+    const statFormat = document.getElementById('statFormat');
+    const exportWavBtn = document.getElementById('exportWavBtn');
+    const clearBtn = document.getElementById('clearBtn');
+
+    // Init Audio Context on user interaction
+    function initAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+    }
+
+    connectBtn.addEventListener('click', () => {
+      initAudio();
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        disconnect();
+      } else {
+        connect();
+      }
+    });
+
+    clearBtn.addEventListener('click', () => {
+      chunks.length = 0;
+      recordedSamples.length = 0;
+      updateStats();
+      renderTranscript();
+      exportWavBtn.disabled = true;
+      resetSpeakerCard();
+    });
+
+    exportWavBtn.addEventListener('click', exportSessionWav);
+
+    function connect() {
+      const url = wsUrlInput.value.trim();
+      statusText.textContent = 'Connecting...';
+      statusDot.className = 'status-dot connecting';
+      connectBtn.disabled = true;
+
+      try {
+        socket = new WebSocket(url);
+        
+        socket.onopen = () => {
+          statusText.textContent = 'Connected';
+          statusDot.className = 'status-dot connected';
+          connectBtn.textContent = 'Disconnect';
+          connectBtn.disabled = false;
+          connectBtn.classList.add('btn-danger');
+        };
+
+        socket.onclose = () => {
+          handleDisconnect();
+        };
+
+        socket.onerror = (err) => {
+          console.error('Socket error:', err);
+          handleDisconnect();
+        };
+
+        socket.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            handleIncomingChunk(data);
+          } catch (e) {
+            console.error('Failed to parse socket message:', e);
+          }
+        };
+
+      } catch (err) {
+        console.error('Connection failed:', err);
+        handleDisconnect();
+      }
+    }
+
+    function disconnect() {
+      if (socket) {
+        socket.close();
+      }
+    }
+
+    function handleDisconnect() {
+      statusText.textContent = 'Disconnected';
+      statusDot.className = 'status-dot';
+      connectBtn.textContent = 'Connect';
+      connectBtn.disabled = false;
+      connectBtn.classList.remove('btn-danger');
+      resetSpeakerCard();
+    }
+
+    function resetSpeakerCard() {
+      speakerAvatar.textContent = '?';
+      speakerAvatar.className = 'speaker-avatar';
+      speakerName.textContent = 'No Active Speaker';
+      speakerStatus.textContent = 'Waiting for stream...';
+      visBars.forEach(bar => {
+        bar.className = 'vis-bar';
+      });
+    }
+
+    function handleIncomingChunk(chunk) {
+      // Decode Base64 audio into PCM Int16 Samples
+      const binaryString = atob(chunk.audio_base64);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      const int16Array = new Int16Array(bytes.buffer);
+      recordedSamples.push(int16Array);
+      
+      chunks.unshift(chunk); // Add to the top of list
+      
+      updateSpeakerCard(chunk.speaker);
+      updateStats();
+      addChunkRowToUI(chunk);
+    }
+
+    function updateSpeakerCard(speaker) {
+      if (speaker) {
+        speakerAvatar.textContent = speaker[0].toUpperCase();
+        speakerAvatar.className = 'speaker-avatar active';
+        speakerName.textContent = speaker;
+        speakerStatus.textContent = 'Speaking...';
+        visBars.forEach(bar => {
+          bar.className = 'vis-bar active';
+        });
+      } else {
+        speakerAvatar.textContent = '💤';
+        speakerAvatar.className = 'speaker-avatar';
+        speakerName.textContent = 'Silence / Noise';
+        speakerStatus.textContent = 'No voice activity';
+        visBars.forEach(bar => {
+          bar.className = 'vis-bar';
+        });
+      }
+    }
+
+    function updateStats() {
+      statChunks.textContent = chunks.length;
+      statTime.textContent = (chunks.length * 0.5).toFixed(1) + 's';
+      
+      if (chunks.length > 0) {
+        const first = chunks[0];
+        statFormat.textContent = `${first.sample_rate}Hz, ${first.channels}ch, ${first.format}`;
+        exportWavBtn.disabled = false;
+      } else {
+        statFormat.textContent = '-';
+      }
+    }
+
+    function addChunkRowToUI(chunk) {
+      // Hide empty state
+      if (emptyState) {
+        emptyState.style.display = 'none';
+      }
+
+      const row = document.createElement('div');
+      row.className = 'chunk-row';
+      
+      const timestamp = new Date(chunk.start_ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const duration = (chunk.end_ts - chunk.start_ts).toFixed(2) + 's';
+      const speakerClass = chunk.speaker ? 'active-talker' : 'silence';
+      const speakerNameText = chunk.speaker || 'Silence';
+
+      row.innerHTML = `
+        <div class="chunk-time">${timestamp}</div>
+        <div class="chunk-speaker-badge ${speakerClass}">${speakerNameText}</div>
+        <div class="chunk-data-info">
+          Chunk ID: <strong>${chunk.chunk_id}</strong> | Duration: ${duration}
+        </div>
+        <button class="chunk-play-btn" title="Play Chunk">
+          <svg viewBox="0 0 24 24">
+            <path d="M8 5v14l11-7z"/>
+          </svg>
+        </button>
+      `;
+
+      const playBtn = row.querySelector('.chunk-play-btn');
+      playBtn.addEventListener('click', () => {
+        initAudio();
+        playPcmChunk(chunk.audio_base64, chunk.sample_rate);
+      });
+
+      transcript.insertBefore(row, transcript.firstChild);
+    }
+
+    function renderTranscript() {
+      transcript.innerHTML = '';
+      if (chunks.length === 0) {
+        transcript.appendChild(emptyState);
+        emptyState.style.display = 'flex';
+      } else {
+        chunks.forEach(chunk => addChunkRowToUI(chunk));
+      }
+    }
+
+    function playPcmChunk(base64Data, sampleRate = 16000) {
+      if (!audioCtx) return;
+
+      const binaryString = atob(base64Data);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      const int16 = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(int16.length);
+      
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768.0;
+      }
+      
+      const buffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+      buffer.getChannelData(0).set(float32);
+      
+      const source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioCtx.destination);
+      source.start();
+    }
+
+    function exportSessionWav() {
+      if (recordedSamples.length === 0) return;
+      
+      const sampleRate = 16000;
+      const numChannels = 1;
+      const bitsPerSample = 16;
+      const bytesPerSample = bitsPerSample / 8;
+      const blockAlign = numChannels * bytesPerSample;
+      
+      let totalSamples = 0;
+      for (const chunk of recordedSamples) {
+        totalSamples += chunk.length;
+      }
+      
+      const buffer = new ArrayBuffer(44 + totalSamples * 2);
+      const view = new DataView(buffer);
+      
+      writeString(view, 0, 'RIFF');
+      view.setUint32(4, 36 + totalSamples * 2, true);
+      writeString(view, 8, 'WAVE');
+      writeString(view, 12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * blockAlign, true);
+      view.setUint16(32, blockAlign, true);
+      view.setUint16(34, bitsPerSample, true);
+      writeString(view, 36, 'data');
+      view.setUint32(40, totalSamples * 2, true);
+      
+      let offset = 44;
+      for (const chunk of recordedSamples) {
+        for (let i = 0; i < chunk.length; i++) {
+          view.setInt16(offset, chunk[i], true);
+          offset += 2;
+        }
+      }
+      
+      const blob = new Blob([view], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.style.display = 'none';
+      a.href = url;
+      a.download = `meet-capture-${Date.now()}.wav`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 100);
+    }
+
+    function writeString(view, offset, string) {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    }
+  </script>
+</body>
+</html>
