@@ -12,43 +12,40 @@ window.speakerDetector = {
     this.onSpeakerChange = onChangeCallback;
     this.isRunning = true;
     
-    const grid = document.querySelector('${SELECTORS.inCall.participantGrid}');
-    if (!grid) {
-      setTimeout(() => this.start(onChangeCallback), 1000);
-      return;
-    }
-
+    console.log('[SpeakerDetector] Starting speaker detector observer on document.body...');
     this.observer = new MutationObserver((mutations) => {
-      this.checkSpeakerChange(grid);
+      this.checkSpeakerChange();
     });
 
-    this.observer.observe(grid, {
+    this.observer.observe(document.body, {
       attributes: true,
       attributeFilter: ['aria-label', 'data-speaking', 'class'],
-      subtree: true,
-      childList: true
+      subtree: true
     });
 
-    this.checkSpeakerChange(grid);
+    this.checkSpeakerChange();
   },
 
-  checkSpeakerChange(grid) {
-    const tiles = grid.querySelectorAll('${SELECTORS.inCall.participantTile}');
+  checkSpeakerChange() {
+    // Find all participant tiles on the page
+    const tiles = document.querySelectorAll('[data-participant-id], [role="listitem"]');
     let foundSpeaker = null;
 
-    for (const tile of tiles) {
-      if (this.isSpeaking(tile)) {
-        const name = this.getParticipantName(tile);
-        if (name) {
-          foundSpeaker = name;
-          break;
-        }
+    for (let i = 0; i < tiles.length; i++) {
+      const tile = tiles[i];
+      const isSp = this.isSpeaking(tile);
+      const name = this.getParticipantName(tile);
+      
+      if (isSp && name) {
+        foundSpeaker = name;
+        break;
       }
     }
 
     const now = Date.now();
     if (foundSpeaker !== this.currentSpeaker) {
       if (now - this.lastChangeTime > ${TIMEOUTS.speakerDebounce}) {
+        console.log(\`[SpeakerDetector] Speaker changed: \${this.currentSpeaker} -> \${foundSpeaker}\`);
         this.currentSpeaker = foundSpeaker;
         this.lastChangeTime = now;
         this.onSpeakerChange?.({ speaker: foundSpeaker, timestamp: now });
@@ -57,20 +54,54 @@ window.speakerDetector = {
   },
 
   isSpeaking(tile) {
-    return tile.getAttribute('aria-label')?.includes('speaking') ||
-           tile.getAttribute('data-speaking') === 'true' ||
-           tile.classList.contains('speaking') ||
-           tile.querySelector('[aria-label*="speaking" i]') !== null;
+    const ariaLabel = tile.getAttribute('aria-label') || '';
+    const hasSpeakingAria = ariaLabel.toLowerCase().includes('speaking') || 
+                             ariaLabel.toLowerCase().includes('active speaker');
+                             
+    const hasSpeakingClass = tile.classList.contains('speaking') || 
+                             tile.classList.contains('active-speaker') ||
+                             tile.querySelector('.speaking, .active-speaker') !== null;
+                             
+    const hasSpeakingData = tile.getAttribute('data-speaking') === 'true' || 
+                            tile.querySelector('[data-speaking="true"]') !== null;
+                            
+    const hasWaveIndicator = tile.querySelector('[class*="speaking" i], [class*="volume" i], [aria-label*="speaking" i]') !== null;
+
+    return hasSpeakingAria || hasSpeakingClass || hasSpeakingData || hasWaveIndicator;
   },
 
   getParticipantName(tile) {
-    return tile.getAttribute('data-participant-name') ||
-           tile.querySelector('${SELECTORS.inCall.participantName}')?.textContent?.trim() ||
-           tile.getAttribute('aria-label')?.split(',')[0]?.trim() ||
-           null;
+    // 1. Check data-participant-name attribute
+    let name = tile.getAttribute('data-participant-name');
+    if (name) return name.trim();
+
+    // 2. Check participantName selector
+    const nameEl = tile.querySelector('${SELECTORS.inCall.participantName}');
+    if (nameEl && nameEl.textContent) {
+      name = nameEl.textContent.trim();
+      if (name) return name;
+    }
+
+    // 3. Search for elements containing name or labels
+    const nameSelectorEls = tile.querySelectorAll('[data-name], .name, [class*="name" i]');
+    for (const el of nameSelectorEls) {
+      if (el.textContent && el.textContent.trim()) {
+        return el.textContent.trim();
+      }
+    }
+
+    // 4. Fallback to aria-label
+    const ariaLabel = tile.getAttribute('aria-label');
+    if (ariaLabel) {
+      name = ariaLabel.split(',')[0].trim();
+      if (name && name !== 'speaking' && name !== 'video') return name;
+    }
+
+    return null;
   },
 
   stop() {
+    console.log('[SpeakerDetector] Stopping speaker detector observer...');
     this.isRunning = false;
     this.observer?.disconnect();
     this.observer = null;
@@ -90,9 +121,20 @@ export class SpeakerDetector {
   }
 
   async start() {
-    await this.page.evaluate(() => 
-      window.speakerDetector.start((data) => window.onSpeakerChange(data))
-    );
+    console.log('[SpeakerDetector] Calling start() in browser context...');
+    try {
+      const result = await this.page.evaluate(() => {
+        console.log('[SpeakerDetector] Browser check: window.speakerDetector is', window.speakerDetector ? 'defined' : 'undefined');
+        if (!window.speakerDetector) {
+          return 'undefined';
+        }
+        window.speakerDetector.start((data) => window.onSpeakerChange(data));
+        return 'started';
+      });
+      console.log('[SpeakerDetector] start() browser result:', result);
+    } catch (err) {
+      console.error('[SpeakerDetector] Failed to start in browser:', err.message);
+    }
   }
 
   stop() {

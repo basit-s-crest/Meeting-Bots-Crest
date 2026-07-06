@@ -329,14 +329,13 @@ export class MeetBot {
       'button:has-text("Leave call")',
     ];
 
-    for (const sel of inCallSelectors) {
-      try {
-        await this.page.waitForSelector(sel, { state: 'visible', timeout: 30000 });
-        console.log(`Found in-call indicator: ${sel}`);
-        return;
-      } catch {
-        // Try next selector
-      }
+    try {
+      const combinedSelector = inCallSelectors.join(', ');
+      await this.page.waitForSelector(combinedSelector, { state: 'visible', timeout: 30000 });
+      console.log('Found in-call indicator');
+      return;
+    } catch (e) {
+      console.log('Timeout waiting for in-call indicators');
     }
 
     // Check if still on pre-join screen
