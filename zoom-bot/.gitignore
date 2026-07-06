@@ -1,0 +1,5 @@
+lib/
+build/
+node_modules/
+.env.template
+*.wav

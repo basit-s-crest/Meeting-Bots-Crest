@@ -1,0 +1,13 @@
+{
+  "name": "zoom-bot",
+  "version": "1.0.0",
+  "description": "Programmatic Zoom raw audio capture bot",
+  "main": "run-bot.js",
+  "scripts": {
+    "start": "node run-bot.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "jsrsasign": "^11.1.0"
+  }
+}
