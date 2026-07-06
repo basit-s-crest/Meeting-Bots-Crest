@@ -1,0 +1,10 @@
+# Playwright credentials
+auth.json
+
+# Dependencies
+node_modules/
+
+# Local transcripts
+*.jsonl
+transcript.jsonl
+
