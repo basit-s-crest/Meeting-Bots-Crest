@@ -1,20 +1,69 @@
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
+import { createServer } from 'http';
+import { readFile } from 'fs/promises';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export class ChunkOutput {
   constructor(port = 8080) {
     this.port = port;
+    this.server = null;
     this.wss = null;
     this.clients = new Set();
   }
 
   async start() {
-    return new Promise((resolve) => {
-      this.wss = new WebSocketServer({ port: this.port });
-      this.wss.on('connection', (ws) => {
-        this.clients.add(ws);
-        ws.on('close', () => this.clients.delete(ws));
-      });
-      this.wss.on('listening', resolve);
+    return new Promise((resolve, reject) => {
+      console.log(`Starting HTTP and WebSocket server on port ${this.port}...`);
+      try {
+        // Create HTTP server to serve the ws-client.html page
+        this.server = createServer(async (req, res) => {
+          try {
+            // Serve the ws-client.html file for any request
+            const clientHtmlPath = join(__dirname, '../../ws-client.html');
+            const html = await readFile(clientHtmlPath, 'utf8');
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.end(html);
+          } catch (err) {
+            res.writeHead(500, { 'Content-Type': 'text/plain' });
+            res.end(`Internal Server Error: ${err.message}`);
+          }
+        });
+
+        this.wss = new WebSocketServer({ server: this.server });
+
+        this.wss.on('connection', (ws) => {
+          console.log('New WebSocket client connected');
+          this.clients.add(ws);
+          
+          ws.on('close', () => {
+            console.log('WebSocket client disconnected');
+            this.clients.delete(ws);
+          });
+          
+          ws.on('error', (err) => {
+            console.error('WebSocket client error:', err);
+          });
+        });
+
+        this.server.listen(this.port, () => {
+          console.log(`\n==================================================================`);
+          console.log(`Visualizer is available at: http://localhost:${this.port}`);
+          console.log(`WebSocket server is listening on: ws://localhost:${this.port}`);
+          console.log(`==================================================================\n`);
+          resolve();
+        });
+
+        this.server.on('error', (err) => {
+          console.error(`Server error on port ${this.port}:`, err);
+          reject(err);
+        });
+      } catch (err) {
+        console.error('Failed to start server:', err);
+        reject(err);
+      }
     });
   }
 
@@ -30,16 +79,36 @@ export class ChunkOutput {
       audio_base64: chunk.audio_data.toString('base64'),
     });
 
+    console.log(`[ChunkOutput] Streaming chunk ${chunk.chunk_id} to ${this.clients.size} connected client(s)`);
     for (const client of this.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
+      try {
+        if (client.readyState === WebSocket.OPEN || client.readyState === 1) {
+          client.send(message);
+        } else {
+          console.log(`[ChunkOutput] Skipping client with state: ${client.readyState}`);
+        }
+      } catch (err) {
+        console.error('[ChunkOutput] Error sending to client:', err.message);
       }
     }
   }
 
   async stop() {
-    for (const client of this.clients) client.close();
-    if (this.wss) await new Promise(r => this.wss.close(r));
+    console.log('Stopping ChunkOutput servers...');
+    for (const client of this.clients) {
+      try {
+        client.close();
+      } catch {}
+    }
+    this.clients.clear();
+
+    if (this.wss) {
+      await new Promise(r => this.wss.close(r));
+    }
+    if (this.server) {
+      await new Promise(r => this.server.close(r));
+    }
+    console.log('ChunkOutput servers stopped.');
   }
 }
 
