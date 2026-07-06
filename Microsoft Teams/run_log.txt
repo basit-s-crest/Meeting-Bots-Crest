@@ -3346,3 +3346,25 @@ Call log:
 [BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
 [BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
 [BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[BROWSER CONSOLE] [BrowserScraper] MutationObserver detected DOM change. mutationsCount=1
+[TeamsBot] Received SIGINT. Shutting down gracefully...
+[BotLifecycle] Stopping bot lifecycle...
+[CaptionScraper] Stop requested. Disconnecting observer...
+[CaptionScraper] Could not stop browser script execution (page may be closed): page.evaluate: Target page, context or browser has been closed
+[FileOutput] Flushed and closed output logger.
+[TeamsBot] Leaving meeting...
+[TeamsBot] Error clicking leave button: page.$: Target page, context or browser has been closed
