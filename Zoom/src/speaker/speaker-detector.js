@@ -5,6 +5,7 @@ window.speakerDetector = {
   observer: null,
   currentSpeaker: null,
   lastChangeTime: 0,
+  lastCheckTime: 0,
   onSpeakerChange: null,
   isRunning: false,
 
@@ -21,17 +22,9 @@ window.speakerDetector = {
     }
 
     this.observer = new MutationObserver((mutations) => {
-      mutations.slice(0, 5).forEach((mutation, index) => {
-        console.log('[Speaker Detector Mutation] Mutation ' + index + ':', 
-          'type:', mutation.type, 
-          'target:', mutation.target.tagName, 
-          'class:', typeof mutation.target.className === 'string' ? mutation.target.className : '', 
-          'attribute:', mutation.attributeName || 'none'
-        );
-      });
-      if (mutations.length > 5) {
-        console.log('[Speaker Detector Mutation] ...and ' + (mutations.length - 5) + ' more mutations.');
-      }
+      const now = Date.now();
+      if (now - this.lastCheckTime < 300) return;
+      this.lastCheckTime = now;
       this.checkSpeakerChange();
     });
 
@@ -49,32 +42,10 @@ window.speakerDetector = {
   checkSpeakerChange() {
     let foundSpeaker = null;
 
-    // Diagnostic query to print existing classes related to audio/speaking
-    try {
-      const keywords = ['active', 'speaking', 'speaker', 'audio', 'mic', 'avatar'];
-      const matches = document.querySelectorAll(keywords.map(k => '[class*="' + k + '"]').join(','));
-      if (matches.length > 0) {
-        const uniqueClasses = new Set();
-        matches.forEach(el => {
-          if (typeof el.className === 'string') {
-            el.className.split(/\\s+/).forEach(c => {
-              if (c && keywords.some(k => c.toLowerCase().includes(k))) {
-                uniqueClasses.add(c);
-              }
-            });
-          }
-        });
-        console.log('[Speaker Detector Hook] Diagnostic - Matching DOM classes: ' + Array.from(uniqueClasses).slice(0, 15).join(', '));
-      }
-    } catch (e) {
-      console.error('[Speaker Detector Hook] Diagnostic print failed:', e.message);
-    }
-
     // Strategy 1: Check for active speaker indicator banner or text in the DOM
     const talkingIndicator = document.querySelector('[class*="talking-indicator"], [class*="active-speaker-name"], .talking-indicator');
     if (talkingIndicator && talkingIndicator.textContent) {
       const text = talkingIndicator.textContent.trim();
-      console.log('[Speaker Detector Hook] Found talking-indicator text:', text);
       if (text.toLowerCase().includes('talking:') || text.toLowerCase().includes('speaking:')) {
         foundSpeaker = text.replace(/^(talking:|speaking:)\s*/i, '').trim();
       } else if (text.length > 0 && text.length < 50) {
@@ -87,9 +58,6 @@ window.speakerDetector = {
       const activeTile = document.querySelector('${SELECTORS.inCall.activeSpeakerBorder}');
       if (activeTile) {
         foundSpeaker = this.getParticipantName(activeTile);
-        if (foundSpeaker) {
-          console.log('[Speaker Detector Hook] Found active speaker via border highlight:', foundSpeaker);
-        }
       }
     }
 
@@ -100,9 +68,6 @@ window.speakerDetector = {
         const row = activeMic.closest('${SELECTORS.inCall.participantRow}');
         if (row) {
           foundSpeaker = this.getParticipantName(row);
-          if (foundSpeaker) {
-            console.log('[Speaker Detector Hook] Found active speaker via participant panel mic icon:', foundSpeaker);
-          }
         }
       }
     }
@@ -110,7 +75,7 @@ window.speakerDetector = {
     const now = Date.now();
     if (foundSpeaker !== this.currentSpeaker) {
       if (now - this.lastChangeTime > ${TIMEOUTS.speakerDebounce}) {
-        console.log('[Speaker Detector Hook] Emitting speaker change:', foundSpeaker);
+        console.log('[Speaker Detector Hook] Emitting speaker change from ' + this.currentSpeaker + ' to ' + foundSpeaker);
         this.currentSpeaker = foundSpeaker;
         this.lastChangeTime = now;
         this.onSpeakerChange?.({ speaker: foundSpeaker, timestamp: now });

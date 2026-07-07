@@ -69,11 +69,16 @@ export class ZoomBot {
   async join() {
     let joinUrl = this.meetingUrl;
 
-    // If it's a standard join URL (e.g. zoom.us/j/12345), convert to web client join URL
-    if (joinUrl.includes('/j/')) {
-      joinUrl = joinUrl.replace('/j/', '/wc/join/');
-    } else if (joinUrl.includes('/s/')) {
-      joinUrl = joinUrl.replace('/s/', '/wc/join/');
+    // Convert standard /j/ or /s/ or /wc/join/ format to the modern /wc/{meetingId}/join format
+    const meetingIdMatch = joinUrl.match(/\/j\/(\d+)/) || joinUrl.match(/\/s\/(\d+)/) || joinUrl.match(/\/wc\/join\/(\d+)/) || joinUrl.match(/\/wc\/(\d+)\/join/);
+    if (meetingIdMatch) {
+      const meetingId = meetingIdMatch[1];
+      try {
+        const urlObj = new URL(joinUrl);
+        joinUrl = `${urlObj.origin}/wc/${meetingId}/join${urlObj.search}`;
+      } catch {
+        joinUrl = `https://zoom.us/wc/${meetingId}/join`;
+      }
     }
 
     // Append prefer=1 to force web client view, and passcode if supplied
@@ -113,6 +118,7 @@ export class ZoomBot {
     if (nameInput) {
       console.log(`[Zoom Bot] Filling display name: ${this.botName}`);
       await nameInput.fill(this.botName);
+      await this.page.waitForTimeout(1000); // Wait for input triggers to propagate and enable join button
     }
 
     // 2. Fill Passcode if needed
@@ -121,27 +127,32 @@ export class ZoomBot {
       if (this.passcode) {
         console.log('[Zoom Bot] Filling passcode...');
         await passcodeInput.fill(this.passcode);
+        await this.page.waitForTimeout(1000);
       } else {
         console.warn('[Zoom Bot] Meeting asks for passcode, but none was provided!');
       }
     }
 
-    // 3. Click Join button
+    // 3. Click Join button (or press Enter as fallback)
     const joinBtn = await this.findLocator(SELECTORS.join.joinBtn);
     if (joinBtn) {
       console.log('[Zoom Bot] Clicking "Join" button...');
-      await joinBtn.click();
+      await joinBtn.click({ force: true }).catch(() => {});
     } else {
-      // Fallback: press Enter
       console.log('[Zoom Bot] Join button not found, pressing Enter...');
-      await this.page.keyboard.press('Enter');
+      if (nameInput) {
+        await nameInput.press('Enter').catch(() => {});
+      } else {
+        await this.page.keyboard.press('Enter').catch(() => {});
+      }
     }
 
     await this.page.waitForTimeout(5000);
   }
 
   async isAudioConnected() {
-    const muteBtn = await this.findLocator('button:has-text("Mute"), button:has-text("Unmute"), button[aria-label*="mute" i], button[aria-label*="unmute" i]');
+    // Exclude preview audio buttons to prevent false positives before joining call audio
+    const muteBtn = await this.findLocator('button:not([id*="preview"]):not([class*="preview"]):has-text("Mute"), button:not([id*="preview"]):not([class*="preview"]):has-text("Unmute"), button:not([id*="preview"]):not([class*="preview"])[aria-label*="mute" i], button:not([id*="preview"]):not([class*="preview"])[aria-label*="unmute" i]');
     return muteBtn !== null;
   }
 
@@ -153,6 +164,7 @@ export class ZoomBot {
     if (await this.isAudioConnected()) {
       console.log('[Zoom Bot] Audio auto-connected successfully.');
       await this.muteCamera();
+      await this.muteMic();
       await this.openParticipantsPanel();
       return true;
     }
@@ -172,6 +184,7 @@ export class ZoomBot {
       if (await this.isAudioConnected()) {
         console.log('[Zoom Bot] Audio connected.');
         await this.muteCamera();
+        await this.muteMic();
         await this.openParticipantsPanel();
         return true;
       }
@@ -185,6 +198,7 @@ export class ZoomBot {
         if (await this.isAudioConnected()) {
           console.log('[Zoom Bot] Audio connected.');
           await this.muteCamera();
+          await this.muteMic();
           await this.openParticipantsPanel();
           return true;
         }
@@ -198,6 +212,7 @@ export class ZoomBot {
     if (await this.isAudioConnected()) {
       console.log('[Zoom Bot] Audio connected (final check).');
       await this.muteCamera();
+      await this.muteMic();
       await this.openParticipantsPanel();
       return true;
     }
@@ -275,6 +290,23 @@ export class ZoomBot {
     }
   }
 
+  async muteMic() {
+    try {
+      // Look for the Microphone/Mute button in footer
+      const micBtn = await this.findLocator('button[aria-label*="mute" i], button[aria-label*="audio" i], .footer-button__audio');
+      if (micBtn) {
+        const label = (await micBtn.getAttribute('aria-label') || '').toLowerCase();
+        // If the label contains 'mute' and does NOT contain 'unmute', it is active, so click to mute
+        if (label.includes('mute') && !label.includes('unmute')) {
+          console.log('[Zoom Bot] Muting microphone in call UI...');
+          await micBtn.click({ force: true }).catch(() => {});
+        }
+      }
+    } catch (e) {
+      console.log('[Zoom Bot] Microphone mute check error:', e.message);
+    }
+  }
+
   async leave() {
     try {
       const leaveBtn = await this.findLocator(SELECTORS.inCall.leaveBtn);
@@ -301,20 +333,22 @@ export class ZoomBot {
     if (this.browser) await this.browser.close();
   }
 
-  async findLocator(selector) {
+  async findLocator(selector, timeout = 5000) {
     // 1. Check main page
     const loc = this.page.locator(selector).first();
-    if (await loc.isVisible().catch(() => false)) {
+    try {
+      await loc.waitFor({ state: 'visible', timeout });
       return loc;
-    }
+    } catch {}
 
     // 2. Check frames (Zoom web client mounts in iframes sometimes)
     const frames = this.page.frames();
     for (const frame of frames) {
       const locFrame = frame.locator(selector).first();
-      if (await locFrame.isVisible().catch(() => false)) {
+      try {
+        await locFrame.waitFor({ state: 'visible', timeout: 1000 });
         return locFrame;
-      }
+      } catch {}
     }
 
     return null;
