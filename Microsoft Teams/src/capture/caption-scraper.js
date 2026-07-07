@@ -8,15 +8,22 @@ window.teamsCaptionScraper = {
   onCaptionCallback: null,
   checkInterval: null,
   isRunning: false,
+  hasDumpedOuterHTML: false,
 
   start(onCaptionCallback) {
     this.onCaptionCallback = onCaptionCallback;
     this.isRunning = true;
+    this.hasDumpedOuterHTML = false;
 
     console.log('[BrowserScraper] Caption observer monitoring started.');
 
-    // Periodically sweep and finalize blocks that haven't updated in 2.5 seconds
+    // Run fallback check and sweep blocks periodically
     this.checkInterval = setInterval(() => {
+      try {
+        this.processBlocks();
+      } catch (e) {
+        console.error('[BrowserScraper] Error in periodic processBlocks:', e.message);
+      }
       this.sweepBlocks(2500);
     }, 1000);
 
@@ -34,9 +41,9 @@ window.teamsCaptionScraper = {
       setTimeout(() => {
         pending = false;
         try {
-          this.processMutations();
+          this.processBlocks();
         } catch (e) {
-          console.error('[BrowserScraper] Error in processMutations:', e.message);
+          console.error('[BrowserScraper] Error in processBlocks:', e.message);
         }
       }, 100);
     });
@@ -48,51 +55,35 @@ window.teamsCaptionScraper = {
     });
   },
 
-  processMutations() {
-    // Find all speaker elements matching the Fluent UI compiled class
-    const speakerElements = Array.from(document.querySelectorAll('.___1hdoxqz'));
+  processBlocks() {
+    if (!this.isRunning) return;
+
+    // Find all compact chat messages/caption elements
+    const blocks = Array.from(document.querySelectorAll('.fui-ChatMessageCompact, [data-tid="closed-caption-v2-message"], [class*="ChatMessageCompact" i]'));
+
+    if (blocks.length > 0 && !this.hasDumpedOuterHTML) {
+      const container = document.querySelector('[data-tid="closed-caption-renderer-wrapper"], [data-tid="closed-caption-v2-window-wrapper"], div.captions-render-area, div[class*="captions-container" i]');
+      if (container) {
+        console.log('[BrowserScraper] [DEBUG DUMP] Caption container outerHTML:', container.outerHTML);
+        this.hasDumpedOuterHTML = true;
+      }
+    }
+
     const now = Date.now();
 
-    for (const speakerEl of speakerElements) {
-      const speaker = speakerEl.textContent.trim();
-      
-      // Find the closest ancestor/parent block representing this utterance row
-      let block = speakerEl.parentElement;
-      let textEl = null;
-      let depth = 0;
-      
-      // Look up to 4 levels of hierarchy to find a leaf text sibling
-      while (block && block !== document.body && depth < 4) {
-        // Try targeting the fui-ChatMessageCompact__body selector directly inside the block
-        textEl = block.querySelector('.fui-ChatMessageCompact__body') || block.querySelector('[class*="body" i]');
-        if (textEl) {
-          break;
-        }
-
-        const children = Array.from(block.querySelectorAll('div, span, p'));
-        textEl = children.find(el => {
-          if (el === speakerEl || el.contains(speakerEl)) return false;
-          
-          const txt = el.textContent.trim();
-          if (txt === speaker) return false; // Skip duplicate speaker names/author wrapper text
-          
-          // Skip avatar initials (usually 1-2 uppercase letters, e.g. "IB")
-          if (txt.length <= 2 && txt === txt.toUpperCase()) return false;
-          
-          const hasText = txt.length > 0;
-          const isLeaf = el.querySelectorAll('div, span, p').length === 0;
-          const isVisible = el.offsetWidth > 0 || el.offsetHeight > 0;
-          return hasText && isLeaf && isVisible;
-        });
-
-        if (textEl) {
-          break;
-        }
-        block = block.parentElement;
-        depth++;
+    for (const block of blocks) {
+      // Skip already finalized blocks
+      if (block._captionFinalized) {
+        continue;
       }
 
-      if (speakerEl && textEl && block) {
+      // Find speaker element
+      const speakerEl = block.querySelector('.fui-ChatMessageCompact__author, [data-tid="author"], [data-tid="closed-caption-v2-author"], span[class*="author" i], div[class*="author" i]');
+      // Find text element
+      const textEl = block.querySelector('.fui-ChatMessageCompact__body, [data-tid="content"], [data-tid="closed-caption-v2-content"], span[class*="body" i], div[class*="body" i], span[class*="content" i], div[class*="content" i]');
+
+      if (speakerEl && textEl) {
+        const speaker = speakerEl.textContent.trim();
         const text = textEl.textContent.trim();
 
         if (!text) continue;
@@ -107,15 +98,16 @@ window.teamsCaptionScraper = {
         } else {
           // Existing block updated
           const current = this.activeBlocks.get(block);
-          if (current.text !== text) {
+          if (current.text !== text || current.speaker !== speaker) {
             current.text = text;
+            current.speaker = speaker;
             current.lastUpdated = now;
           }
         }
       }
     }
 
-    // Check if any blocks in our map are no longer present in the DOM (means they scrolled out or were removed)
+    // Sweep any blocks in activeBlocks that are no longer in the DOM (e.g. scrolled out)
     for (const [block, value] of this.activeBlocks.entries()) {
       if (!document.body.contains(block)) {
         this.finalizeBlock(block, value);
@@ -134,7 +126,8 @@ window.teamsCaptionScraper = {
 
   finalizeBlock(block, value) {
     this.activeBlocks.delete(block);
-    // Send final cleaned utterance to Node
+    block._captionFinalized = true;
+
     if (value.text && value.text.trim().length > 0) {
       this.onCaptionCallback?.({
         speaker: value.speaker,
