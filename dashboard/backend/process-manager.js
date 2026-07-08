@@ -129,20 +129,8 @@ class ProcessManager {
         }
       }
       
-      // If Teams, log lines can contain transcripts too:
-      if (botType === 'teams' && log.includes('[TRANSCRIPT]')) {
-        const transcriptMatch = log.match(/\[TRANSCRIPT\]\s*\[(.*?)\]:\s*(.*)/);
-        if (transcriptMatch && sessionInfo.onTranscriptCallback) {
-          const speaker = transcriptMatch[1];
-          const text = transcriptMatch[2];
-          sessionInfo.onTranscriptCallback({
-            speaker,
-            text,
-            timestamp: new Date().toISOString(),
-            isFinal: true
-          });
-        }
-      }
+      // NOTE: Replaced stdout transcript parsing for Teams to prevent duplication.
+      // The file tail watcher (startTeamsFileTail) acts as the single source of truth.
     });
 
     child.stderr.on('data', (data) => {
