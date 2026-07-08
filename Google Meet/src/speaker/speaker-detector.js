@@ -31,6 +31,26 @@ window.speakerDetector = {
     const tiles = document.querySelectorAll('[data-participant-id], [role="listitem"]');
     let foundSpeaker = null;
 
+    // Temporary DOM debugging
+    if (tiles.length > 0 && !window.hasDumpedTile) {
+      window.hasDumpedTile = true;
+      console.log('[SpeakerDetectorDebug] Found ' + tiles.length + ' tiles. Dumping first tile:');
+      const els = Array.from(tiles[0].querySelectorAll('*'));
+      const dump = els.map(el => {
+        const attrs = {};
+        for (const attr of el.attributes) {
+          attrs[attr.name] = attr.value;
+        }
+        return {
+          tag: el.tagName,
+          class: el.className,
+          text: el.textContent?.trim().substring(0, 30),
+          attrs: attrs
+        };
+      });
+      console.log('[SpeakerDetectorDebug] Tile elements:', JSON.stringify(dump, null, 2));
+    }
+
     for (let i = 0; i < tiles.length; i++) {
       const tile = tiles[i];
       const isSp = this.isSpeaking(tile);
@@ -67,7 +87,25 @@ window.speakerDetector = {
                             
     const hasWaveIndicator = tile.querySelector('[class*="speaking" i], [class*="volume" i], [aria-label*="speaking" i]') !== null;
 
-    return hasSpeakingAria || hasSpeakingClass || hasSpeakingData || hasWaveIndicator;
+    if (hasSpeakingAria || hasSpeakingClass || hasSpeakingData || hasWaveIndicator) {
+      return true;
+    }
+
+    // Google Meet active speaker blue border color fallback (computed style check)
+    try {
+      const borderEls = Array.from(tile.querySelectorAll('*')).concat([tile]);
+      for (const el of borderEls) {
+        const computedStyle = window.getComputedStyle(el);
+        const borderCol = computedStyle.borderColor || '';
+        const outlineCol = computedStyle.outlineColor || '';
+        const isBlue = borderCol.includes('26, 115, 232') || outlineCol.includes('26, 115, 232') ||
+                       borderCol.includes('1a73e8') || outlineCol.includes('1a73e8') ||
+                       borderCol.includes('66, 133, 244') || outlineCol.includes('66, 133, 244');
+        if (isBlue) return true;
+      }
+    } catch (e) {}
+
+    return false;
   },
 
   getParticipantName(tile) {
@@ -96,6 +134,20 @@ window.speakerDetector = {
       name = ariaLabel.split(',')[0].trim();
       if (name && name !== 'speaking' && name !== 'video') return name;
     }
+
+    // 5. Leaf node text fallback
+    try {
+      const children = Array.from(tile.querySelectorAll('*'));
+      for (const child of children) {
+        if (child.children.length === 0 && child.textContent) {
+          const txt = child.textContent.trim();
+          if (txt.length >= 2 && txt.length <= 40 && 
+              !['mute', 'camera', 'video', 'audio', 'mic', 'screen', 'share', 'present', 'pin', 'layout', 'settings', 'more', 'visual', 'effects', 'background'].some(word => txt.toLowerCase().includes(word))) {
+            return txt;
+          }
+        }
+      }
+    } catch (e) {}
 
     return null;
   },

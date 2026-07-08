@@ -116,6 +116,9 @@ export class MeetBot {
   async handlePreJoin() {
     // Simple flow: turn off video, click "Ask to join"
     
+    // Dismiss overlays early
+    await this.dismissDialogs();
+    
     // 1. Turn off camera (video)
     console.log('Turning off camera...');
     await this.turnOffCamera();

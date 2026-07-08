@@ -19,4 +19,7 @@ Thumbs.db
 *.pem
 playwright-report/
 test-results/
-.user_data/
+.user_data*
+session_capture_*
+*.pcm
+*.wav

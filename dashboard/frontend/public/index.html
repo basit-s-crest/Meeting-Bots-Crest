@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Central Meeting Bot & Transcription Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+
+
+  <header>
+    <div class="logo-container">
+      <div class="logo-icon">🤖</div>
+      <div class="title-area">
+        <h1>Meeting Bots</h1>
+        <p>Centralized Bot Orchestration & Real-Time Transcription</p>
+      </div>
+    </div>
+    <div class="header-status">
+      <div class="status-indicator">
+        <div id="globalStatusDot" class="status-dot"></div>
+        <span id="globalStatusText">Dashboard Ready</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="dashboard-grid">
+    
+    <!-- Left Column: Controls and Settings -->
+    <section class="left-panel">
+      
+      <!-- Launch Bot Panel -->
+      <div class="glass-card">
+        <h2 class="card-title">Orchestrate a Bot</h2>
+        <form id="launchForm" class="launch-form">
+          <div class="form-group">
+            <label for="botType">Meeting Platform</label>
+            <select id="botType" required>
+              <option value="google-meet">Google Meet</option>
+              <option value="zoom">Zoom</option>
+              <option value="teams">Microsoft Teams</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label for="meetingUrl">Meeting URL</label>
+            <input type="url" id="meetingUrl" placeholder="https://meet.google.com/abc-defg-hij" required>
+          </div>
+          
+          <div class="form-group">
+            <label for="botName">Bot Display Name</label>
+            <input type="text" id="botName" value="Antigravity transcriber">
+          </div>
+          
+          <div class="form-row">
+            <div class="form-group toggle-group">
+              <label class="switch">
+                <input type="checkbox" id="headless" checked>
+                <span class="slider round"></span>
+              </label>
+              <span class="toggle-label">Run Headless (Recommended)</span>
+            </div>
+          </div>
+          
+          <button type="submit" id="submitBtn" class="btn btn-primary">
+            <span>Launch Bot & Start Transcription</span>
+          </button>
+        </form>
+      </div>
+
+      <!-- Active Status / Live Monitor -->
+      <div class="glass-card monitor-card">
+        <h2 class="card-title">Live Speaker Monitor</h2>
+        <div class="speaker-display">
+          <div id="speakerAvatar" class="speaker-avatar">?</div>
+          <h3 id="speakerName" class="speaker-name">No Active Speaker</h3>
+          <p id="speakerStatus" class="speaker-status">Idle (No active session)</p>
+        </div>
+
+        <div class="visualizer-container">
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+          <div class="vis-bar"></div>
+        </div>
+        
+        <div id="sessionActions" class="session-actions hidden">
+          <button id="stopBtn" class="btn btn-danger">Stop Bot Session</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right Column: Live Transcription Panel -->
+    <section class="right-panel">
+      
+      <!-- Live Transcription Card -->
+      <div class="glass-card transcript-card">
+        <div class="card-header">
+          <h2 class="card-title">Live Streamed Transcript</h2>
+          <div class="transcript-info">
+            <span id="activeBotType" class="badge hidden">-</span>
+            <span id="activeSessionId" class="session-id-display hidden">Session ID: -</span>
+          </div>
+        </div>
+        
+        <div id="transcriptScrollContainer" class="transcript-container">
+          <div id="emptyTranscript" class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/>
+            </svg>
+            <p>Waiting for meeting stream to begin...</p>
+            <p class="sub-text">Launch a bot on the left panel to display live speaker transcription.</p>
+          </div>
+          <div id="liveTranscript" class="transcript-log"></div>
+        </div>
+      </div>
+
+      <!-- History of Saved Transcripts -->
+      <div class="glass-card history-card">
+        <h2 class="card-title">Session History Logs</h2>
+        <div class="history-container">
+          <div id="emptyHistory" class="empty-state small">
+            <p>No past session records found.</p>
+          </div>
+          <div id="historyList" class="history-list"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Modal for Viewing Saved Transcripts -->
+  <div id="historyModal" class="modal hidden">
+    <div class="modal-content glass-card">
+      <div class="modal-header">
+        <h2 id="modalTitle">Saved Session Transcript</h2>
+        <button id="modalCloseBtn" class="close-btn">&times;</button>
+      </div>
+      <div id="modalBody" class="modal-body transcript-container">
+        <!-- Transcript rows go here -->
+      </div>
+      <div class="modal-footer">
+        <button id="modalDownloadBtn" class="btn btn-primary">Download Text</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
