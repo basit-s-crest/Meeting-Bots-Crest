@@ -5,6 +5,7 @@ window.speakerDetector = {
   observer: null,
   currentSpeaker: null,
   lastChangeTime: 0,
+  lastCheckTime: 0,
   onSpeakerChange: null,
   isRunning: false,
 
@@ -14,13 +15,17 @@ window.speakerDetector = {
     
     console.log('[SpeakerDetector] Starting speaker detector observer on document.body...');
     this.observer = new MutationObserver((mutations) => {
+      const now = Date.now();
+      if (now - this.lastCheckTime < 250) return;
+      this.lastCheckTime = now;
       this.checkSpeakerChange();
     });
 
     this.observer.observe(document.body, {
       attributes: true,
-      attributeFilter: ['aria-label', 'data-speaking', 'class'],
-      subtree: true
+      attributeFilter: ['aria-label', 'data-speaking', 'class', 'style'],
+      subtree: true,
+      childList: true
     });
 
     this.checkSpeakerChange();
@@ -91,17 +96,29 @@ window.speakerDetector = {
       return true;
     }
 
-    // Google Meet active speaker blue border color fallback (computed style check)
+    // Google Meet active speaker blue border/outline/shadow fallback
     try {
+      const isBlueColor = (str) => {
+        if (!str) return false;
+        const match = str.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
+        if (match) {
+          const r = parseInt(match[1]);
+          const g = parseInt(match[2]);
+          const b = parseInt(match[3]);
+          // Check if blue component is dominant and bright
+          return b > r && b > g && b > 120;
+        }
+        return false;
+      };
+
       const borderEls = Array.from(tile.querySelectorAll('*')).concat([tile]);
       for (const el of borderEls) {
         const computedStyle = window.getComputedStyle(el);
-        const borderCol = computedStyle.borderColor || '';
-        const outlineCol = computedStyle.outlineColor || '';
-        const isBlue = borderCol.includes('26, 115, 232') || outlineCol.includes('26, 115, 232') ||
-                       borderCol.includes('1a73e8') || outlineCol.includes('1a73e8') ||
-                       borderCol.includes('66, 133, 244') || outlineCol.includes('66, 133, 244');
-        if (isBlue) return true;
+        if (isBlueColor(computedStyle.borderColor) || 
+            isBlueColor(computedStyle.outlineColor) || 
+            isBlueColor(computedStyle.boxShadow)) {
+          return true;
+        }
       }
     } catch (e) {}
 
@@ -141,8 +158,19 @@ window.speakerDetector = {
       for (const child of children) {
         if (child.children.length === 0 && child.textContent) {
           const txt = child.textContent.trim();
+          
+          // Filter out icon classes or specific icon tags
+          const className = (child.className || '').toLowerCase();
+          const isIcon = className.includes('icon') || 
+                         className.includes('symbol') || 
+                         className.includes('material') || 
+                         child.tagName === 'I' || 
+                         child.tagName === 'SVG';
+                         
+          if (isIcon) continue;
+
           if (txt.length >= 2 && txt.length <= 40 && 
-              !['mute', 'camera', 'video', 'audio', 'mic', 'screen', 'share', 'present', 'pin', 'layout', 'settings', 'more', 'visual', 'effects', 'background'].some(word => txt.toLowerCase().includes(word))) {
+              !['mute', 'camera', 'video', 'audio', 'mic', 'screen', 'share', 'present', 'pin', 'layout', 'settings', 'more', 'visual', 'effects', 'background', 'keep', 'outline', 'more_vert', 'volume'].some(word => txt.toLowerCase().includes(word))) {
             return txt;
           }
         }

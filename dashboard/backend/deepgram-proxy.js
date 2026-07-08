@@ -13,7 +13,7 @@ class DeepgramProxy {
       this.closeSession(sessionId);
     }
 
-    const url = 'wss://api.deepgram.com/v1/listen?model=nova-2&encoding=linear16&sample_rate=16000&channels=1&interim_results=true&smart_format=true&endpointing=100';
+    const url = 'wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=16000&channels=1&interim_results=true&smart_format=true&endpointing=100';
     console.log(`[DeepgramProxy] Connecting to Deepgram WebSocket for session ${sessionId}...`);
 
     const headers = {

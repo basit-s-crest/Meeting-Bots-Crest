@@ -10,7 +10,7 @@ function parseArgs() {
     outputType: process.env.OUTPUT_TYPE || 'websocket',
     outputPort: parseInt(process.env.OUTPUT_PORT || '8080'),
     headless: process.env.HEADLESS !== 'false',
-    channel: process.env.BROWSER_CHANNEL || null,
+    channel: process.env.BROWSER_CHANNEL || 'chrome',
     userDataDir: process.env.USER_DATA_DIR || null,
     login: false,
   };

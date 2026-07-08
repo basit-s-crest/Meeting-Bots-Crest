@@ -203,7 +203,7 @@ function connectToBotAudioStream(sessionId, wsPort) {
   const url = `ws://localhost:${wsPort}`;
   let botSocket = null;
   let attempts = 0;
-  const maxAttempts = 30; // 15 seconds total wait
+  const maxAttempts = 120; // 60 seconds total wait
 
   const tryConnect = () => {
     attempts++;
