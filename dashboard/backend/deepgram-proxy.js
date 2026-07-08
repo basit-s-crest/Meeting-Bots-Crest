@@ -61,13 +61,12 @@ class DeepgramProxy {
         
         if (transcript && transcript.trim().length > 0) {
           const isFinal = response.is_final || response.speech_final;
-          const relativeStart = response.start; // Offset in seconds from start of stream
-          
-          // Map relative time to speaker name using our chunk history
+          const relativeStart = response.start;
+
           const speaker = this.mapTimeToSpeaker(sessionId, relativeStart);
-          
+
           onTranscript({
-            speaker: speaker || 'Silence/Noise',
+            speaker: speaker || 'Unknown',
             text: transcript.trim(),
             timestamp: new Date().toISOString(),
             isFinal
@@ -104,8 +103,8 @@ class DeepgramProxy {
 
     proxy.chunkHistory.push({ start_ts, end_ts, speaker });
 
-    // Keep history size limited to last 15 minutes (approx 1800 chunks at 500ms intervals) to avoid memory growth
-    if (proxy.chunkHistory.length > 2000) {
+    // Keep history size limited to last 60 minutes (approx 7200 chunks at 500ms intervals) to avoid memory growth
+    if (proxy.chunkHistory.length > 7200) {
       proxy.chunkHistory.shift();
     }
   }
@@ -126,27 +125,50 @@ class DeepgramProxy {
 
   /**
    * Align Deepgram's relative timestamp against the active speaker intervals.
+   * Deepgram's `start` offset is seconds from the beginning of the audio stream.
+   * We convert it to absolute epoch seconds using firstChunkTs, then find the
+   * chunk whose [start_ts, end_ts] window best covers that moment.
    */
   mapTimeToSpeaker(sessionId, relativeTimeSec) {
     const proxy = this.activeProxies.get(sessionId);
     if (!proxy || proxy.firstChunkTs === null) return null;
 
-    // Convert Deepgram relative offset to absolute Unix epoch seconds
     const absoluteTimeSec = proxy.firstChunkTs + relativeTimeSec;
+    const history = proxy.chunkHistory;
+    if (history.length === 0) return null;
 
-    // Find nearest matching chunk interval in history (search from newest to oldest for speed)
-    for (let i = proxy.chunkHistory.length - 1; i >= 0; i--) {
-      const c = proxy.chunkHistory[i];
-      if (absoluteTimeSec >= c.start_ts && absoluteTimeSec <= c.end_ts) {
+    // 1. Exact window match — search newest-to-oldest.
+    for (let i = history.length - 1; i >= 0; i--) {
+      const c = history[i];
+      if (c.speaker && absoluteTimeSec >= c.start_ts && absoluteTimeSec <= c.end_ts) {
         return c.speaker;
       }
     }
 
-    // Fallback: check if we match slightly outside bounds
-    if (proxy.chunkHistory.length > 0) {
-      const newest = proxy.chunkHistory[proxy.chunkHistory.length - 1];
-      if (absoluteTimeSec > newest.end_ts) {
-        return newest.speaker;
+    // 2. Gap fallback — timestamp falls between speaker intervals (transition window).
+    //    Find the NEAREST chunk with a speaker, but cap tolerance at 1.5s.
+    //    Prefer the chunk AFTER the gap (the new speaker) over the chunk BEFORE (old
+    //    speaker) by searching forward-first when the timestamp is past a chunk's end.
+    let bestChunk = null;
+    let bestDist = Infinity;
+    for (let i = history.length - 1; i >= 0; i--) {
+      const c = history[i];
+      if (!c.speaker) continue;
+      const mid = (c.start_ts + c.end_ts) / 2;
+      const dist = Math.abs(absoluteTimeSec - mid);
+      if (dist < bestDist && dist <= 1.5) {
+        bestDist = dist;
+        bestChunk = c;
+      }
+    }
+    if (bestChunk) return bestChunk.speaker;
+
+    // 3. Last resort — most recent non-null speaker (capped at 2s ago to avoid
+    //    stale attribution after a long silence).
+    for (let i = history.length - 1; i >= 0; i--) {
+      const c = history[i];
+      if (c.speaker && (absoluteTimeSec - c.end_ts) <= 2.0) {
+        return c.speaker;
       }
     }
 

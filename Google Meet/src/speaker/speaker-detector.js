@@ -1,231 +1,168 @@
-import { SELECTORS, TIMEOUTS } from '../config/selectors.js';
+import { TIMEOUTS } from '../config/selectors.js';
 
-const SPEAKER_DETECTION_SCRIPT = `
-window.speakerDetector = {
-  observer: null,
-  currentSpeaker: null,
-  lastChangeTime: 0,
-  lastCheckTime: 0,
-  onSpeakerChange: null,
-  isRunning: false,
-
-  start(onChangeCallback) {
-    this.onSpeakerChange = onChangeCallback;
-    this.isRunning = true;
-    
-    console.log('[SpeakerDetector] Starting speaker detector observer on document.body...');
-    this.observer = new MutationObserver((mutations) => {
-      const now = Date.now();
-      if (now - this.lastCheckTime < 250) return;
-      this.lastCheckTime = now;
-      this.checkSpeakerChange();
-    });
-
-    this.observer.observe(document.body, {
-      attributes: true,
-      attributeFilter: ['aria-label', 'data-speaking', 'class', 'style'],
-      subtree: true,
-      childList: true
-    });
-
-    this.checkSpeakerChange();
-  },
-
-  checkSpeakerChange() {
-    // Find all participant tiles on the page
-    const tiles = document.querySelectorAll('[data-participant-id], [role="listitem"]');
-    let foundSpeaker = null;
-
-    // Temporary DOM debugging
-    if (tiles.length > 0 && !window.hasDumpedTile) {
-      window.hasDumpedTile = true;
-      console.log('[SpeakerDetectorDebug] Found ' + tiles.length + ' tiles. Dumping first tile:');
-      const els = Array.from(tiles[0].querySelectorAll('*'));
-      const dump = els.map(el => {
-        const attrs = {};
-        for (const attr of el.attributes) {
-          attrs[attr.name] = attr.value;
-        }
-        return {
-          tag: el.tagName,
-          class: el.className,
-          text: el.textContent?.trim().substring(0, 30),
-          attrs: attrs
-        };
-      });
-      console.log('[SpeakerDetectorDebug] Tile elements:', JSON.stringify(dump, null, 2));
-    }
-
-    for (let i = 0; i < tiles.length; i++) {
-      const tile = tiles[i];
-      const isSp = this.isSpeaking(tile);
-      const name = this.getParticipantName(tile);
-      
-      if (isSp && name) {
-        foundSpeaker = name;
-        break;
-      }
-    }
-
-    const now = Date.now();
-    if (foundSpeaker !== this.currentSpeaker) {
-      if (now - this.lastChangeTime > ${TIMEOUTS.speakerDebounce}) {
-        console.log(\`[SpeakerDetector] Speaker changed: \${this.currentSpeaker} -> \${foundSpeaker}\`);
-        this.currentSpeaker = foundSpeaker;
-        this.lastChangeTime = now;
-        this.onSpeakerChange?.({ speaker: foundSpeaker, timestamp: now });
-      }
-    }
-  },
-
-  isSpeaking(tile) {
-    const ariaLabel = tile.getAttribute('aria-label') || '';
-    const hasSpeakingAria = ariaLabel.toLowerCase().includes('speaking') || 
-                             ariaLabel.toLowerCase().includes('active speaker');
-                             
-    const hasSpeakingClass = tile.classList.contains('speaking') || 
-                             tile.classList.contains('active-speaker') ||
-                             tile.querySelector('.speaking, .active-speaker') !== null;
-                             
-    const hasSpeakingData = tile.getAttribute('data-speaking') === 'true' || 
-                            tile.querySelector('[data-speaking="true"]') !== null;
-                            
-    const hasWaveIndicator = tile.querySelector('[class*="speaking" i], [class*="volume" i], [aria-label*="speaking" i]') !== null;
-
-    if (hasSpeakingAria || hasSpeakingClass || hasSpeakingData || hasWaveIndicator) {
-      return true;
-    }
-
-    // Google Meet active speaker blue border/outline/shadow fallback
-    try {
-      const isBlueColor = (str) => {
-        if (!str) return false;
-        const match = str.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
-        if (match) {
-          const r = parseInt(match[1]);
-          const g = parseInt(match[2]);
-          const b = parseInt(match[3]);
-          // Check if blue component is dominant and bright
-          return b > r && b > g && b > 120;
-        }
-        return false;
-      };
-
-      const borderEls = Array.from(tile.querySelectorAll('*')).concat([tile]);
-      for (const el of borderEls) {
-        const computedStyle = window.getComputedStyle(el);
-        if (isBlueColor(computedStyle.borderColor) || 
-            isBlueColor(computedStyle.outlineColor) || 
-            isBlueColor(computedStyle.boxShadow)) {
-          return true;
-        }
-      }
-    } catch (e) {}
-
-    return false;
-  },
-
-  getParticipantName(tile) {
-    // 1. Check data-participant-name attribute
-    let name = tile.getAttribute('data-participant-name');
-    if (name) return name.trim();
-
-    // 2. Check participantName selector
-    const nameEl = tile.querySelector('${SELECTORS.inCall.participantName}');
-    if (nameEl && nameEl.textContent) {
-      name = nameEl.textContent.trim();
-      if (name) return name;
-    }
-
-    // 3. Search for elements containing name or labels
-    const nameSelectorEls = tile.querySelectorAll('[data-name], .name, [class*="name" i]');
-    for (const el of nameSelectorEls) {
-      if (el.textContent && el.textContent.trim()) {
-        return el.textContent.trim();
-      }
-    }
-
-    // 4. Fallback to aria-label
-    const ariaLabel = tile.getAttribute('aria-label');
-    if (ariaLabel) {
-      name = ariaLabel.split(',')[0].trim();
-      if (name && name !== 'speaking' && name !== 'video') return name;
-    }
-
-    // 5. Leaf node text fallback
-    try {
-      const children = Array.from(tile.querySelectorAll('*'));
-      for (const child of children) {
-        if (child.children.length === 0 && child.textContent) {
-          const txt = child.textContent.trim();
-          
-          // Filter out icon classes or specific icon tags
-          const className = (child.className || '').toLowerCase();
-          const isIcon = className.includes('icon') || 
-                         className.includes('symbol') || 
-                         className.includes('material') || 
-                         child.tagName === 'I' || 
-                         child.tagName === 'SVG';
-                         
-          if (isIcon) continue;
-
-          if (txt.length >= 2 && txt.length <= 40 && 
-              !['mute', 'camera', 'video', 'audio', 'mic', 'screen', 'share', 'present', 'pin', 'layout', 'settings', 'more', 'visual', 'effects', 'background', 'keep', 'outline', 'more_vert', 'volume'].some(word => txt.toLowerCase().includes(word))) {
-            return txt;
-          }
-        }
-      }
-    } catch (e) {}
-
-    return null;
-  },
-
-  stop() {
-    console.log('[SpeakerDetector] Stopping speaker detector observer...');
-    this.isRunning = false;
-    this.observer?.disconnect();
-    this.observer = null;
-  }
-};
-`;
-
+/**
+ * SpeakerDetector — polls Google Meet DOM every 400ms from the Node/Playwright side.
+ *
+ * Key facts from DOM analysis:
+ *   - Speaker indicator: [jsname="QgSmzd"].KUNJSe — added when participant is speaking
+ *     Works for video ON/OFF, mic ON/OFF, any number of participants.
+ *   - Name source: [aria-label^="More options for <Name>"] inside each tile
+ *   - Bot's own tile is identified by containing "Remove this tile" button
+ *     (self-view controls only appear on the bot's own tile, never on others)
+ *   - Bot tile must be excluded — it joins as the same Google account name as
+ *     the real user, so name-based exclusion is not reliable.
+ */
 export class SpeakerDetector {
   constructor(page) {
     this.page = page;
+    this.callback = null;
+    this.currentSpeaker = null;
+    this.lastChangeTime = 0;
+    this.pollInterval = null;
+    this.botParticipantId = null; // Set once detected, then excluded permanently
   }
 
   async initialize() {
-    await this.page.addInitScript(SPEAKER_DETECTION_SCRIPT).catch(() => {});
-    await this.page.exposeFunction('onSpeakerChange', this.onChange.bind(this)).catch(() => {});
-    await this.page.evaluate(SPEAKER_DETECTION_SCRIPT);
+    // Node-side polling — nothing to inject
   }
 
   async start() {
-    console.log('[SpeakerDetector] Calling start() in browser context...');
-    try {
-      const result = await this.page.evaluate(() => {
-        console.log('[SpeakerDetector] Browser check: window.speakerDetector is', window.speakerDetector ? 'defined' : 'undefined');
-        if (!window.speakerDetector) {
-          return 'undefined';
-        }
-        window.speakerDetector.start((data) => window.onSpeakerChange(data));
-        return 'started';
-      });
-      console.log('[SpeakerDetector] start() browser result:', result);
-    } catch (err) {
-      console.error('[SpeakerDetector] Failed to start in browser:', err.message);
+    console.log('[SpeakerDetector] Starting (KUNJSe detection, bot-tile excluded)...');
+
+    // Detect bot's own tile before polling starts
+    await this._detectBotTile(true);
+
+    await this._poll();
+    this.pollInterval = setInterval(() => this._poll(), 150);
+  }
+
+  async stop() {
+    console.log('[SpeakerDetector] Stopping...');
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval);
+      this.pollInterval = null;
     }
-  }
-
-  stop() {
-    return this.page.evaluate(() => window.speakerDetector.stop());
-  }
-
-  onChange(data) {
-    if (this.callback) this.callback(data);
   }
 
   setCallback(callback) {
     this.callback = callback;
+  }
+
+  /**
+   * Find and cache the bot's own participant-id by looking for self-view controls.
+   * "Remove this tile" and "Backgrounds and effects" only appear on the bot's tile.
+   * Called once at startup (with retries) and then again on each poll until found.
+   */
+  async _detectBotTile(withRetries = false) {
+    const attempts = withRetries ? 10 : 1;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const botId = await this.page.evaluate(() => {
+          const tiles = Array.from(document.querySelectorAll('[data-participant-id]'));
+          for (const tile of tiles) {
+            const hasRemove = tile.querySelector('[aria-label="Remove this tile"]') !== null;
+            const hasBg = tile.querySelector('[aria-label="Backgrounds and effects"]') !== null;
+            if (hasRemove || hasBg) {
+              return tile.getAttribute('data-participant-id');
+            }
+          }
+          return null;
+        });
+
+        if (botId) {
+          this.botParticipantId = botId;
+          console.log(`[SpeakerDetector] Bot tile identified: data-participant-id="${botId}"`);
+          return;
+        }
+      } catch (err) {
+        // Page still loading
+      }
+      if (withRetries) await new Promise(r => setTimeout(r, 1000));
+    }
+    if (withRetries) {
+      console.warn('[SpeakerDetector] Could not identify bot tile after retries — self-exclusion disabled');
+    }
+  }
+
+  async _poll() {
+    try {
+      // If bot tile not yet found, keep trying on every poll until found
+      if (!this.botParticipantId) {
+        await this._detectBotTile();
+      }
+
+      const botId = this.botParticipantId;
+
+      const result = await this.page.evaluate((excludeId) => {
+
+        function getNameFromTile(tile) {
+          const moreBtn = tile.querySelector('[aria-label^="More options for"]');
+          if (moreBtn) {
+            const name = moreBtn.getAttribute('aria-label')
+              .replace(/^More options for\s+/i, '').trim();
+            if (name) return name;
+          }
+          const pinBtn = tile.querySelector('[aria-label^="Pin "]');
+          if (pinBtn) {
+            const m = pinBtn.getAttribute('aria-label').match(/^Pin (.+?) to your/i);
+            if (m) return m[1].trim();
+          }
+          return null;
+        }
+
+        // ── Strategy 1: KUNJSe — primary speaking indicator ──────────────────
+        // Find ALL speaking indicators (could be more than one briefly during transitions)
+        const speakingEls = Array.from(document.querySelectorAll('[jsname="QgSmzd"].KUNJSe'));
+        for (const el of speakingEls) {
+          const tile = el.closest('[data-participant-id]');
+          if (!tile) continue;
+
+          // Skip the bot's own tile
+          const tileId = tile.getAttribute('data-participant-id');
+          if (excludeId && tileId === excludeId) continue;
+
+          const name = getNameFromTile(tile);
+          if (name) return { speaker: name, strategy: 'KUNJSe' };
+        }
+
+        // ── Strategy 2: Mic-live fallback ─────────────────────────────────────
+        const tiles = Array.from(document.querySelectorAll('[data-participant-id]'));
+        for (const tile of tiles) {
+          const tileId = tile.getAttribute('data-participant-id');
+          if (excludeId && tileId === excludeId) continue;
+
+          for (const el of tile.querySelectorAll('[aria-label]')) {
+            const lbl = el.getAttribute('aria-label') || '';
+            const m = lbl.match(/^You can't remotely mute (.+?)'s microphone$/i);
+            if (m) return { speaker: m[1].trim(), strategy: 'mic-live' };
+            const m2 = lbl.match(/^Mute (.+)$/i);
+            if (m2 && m2[1].trim().length > 1) {
+              return { speaker: m2[1].trim(), strategy: 'mute-btn' };
+            }
+          }
+        }
+
+        return null;
+
+      }, botId);
+
+      const foundSpeaker = result ? result.speaker : null;
+      const now = Date.now();
+
+      if (foundSpeaker !== this.currentSpeaker) {
+        if (now - this.lastChangeTime > TIMEOUTS.speakerDebounce) {
+          console.log(`[SpeakerDetector] "${this.currentSpeaker}" → "${foundSpeaker}" (${result?.strategy ?? 'silence'})`);
+          this.currentSpeaker = foundSpeaker;
+          this.lastChangeTime = now;
+          if (this.callback) {
+            this.callback({ speaker: foundSpeaker, timestamp: now });
+          }
+        }
+      }
+    } catch (err) {
+      if (!err.message.includes('Target closed') && !err.message.includes('Execution context')) {
+        console.error('[SpeakerDetector] Poll error:', err.message);
+      }
+    }
   }
 }

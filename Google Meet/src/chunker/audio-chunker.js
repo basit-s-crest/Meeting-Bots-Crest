@@ -27,13 +27,22 @@ export class AudioChunker {
   }
 
   addSpeakerEvent({ speaker, timestamp }) {
+    // Close off the previous speaker interval at exactly this timestamp
     if (this.speakerHistory.length > 0) {
       this.speakerHistory[this.speakerHistory.length - 1].endTime = timestamp;
     }
-    this.speakerHistory.push({ speaker, startTime: timestamp, endTime: null });
-    
-    // Keep only recent history (last 10 seconds)
-    const cutoff = timestamp - 10000;
+
+    if (speaker) {
+      this.currentSpeaker = speaker;
+      this.speakerHistory.push({ speaker, startTime: timestamp, endTime: null });
+    }
+    // null speaker = silence gap — we close A's interval above but don't push
+    // a null entry. The gap chunks will have no speaker match in getSpeakerForWindow,
+    // which is correct — the deepgram-proxy fallback then uses nearest-chunk (1.5s
+    // tolerance) to assign the new speaker B rather than reaching back to A.
+
+    // Keep last 30 seconds of history
+    const cutoff = timestamp - 30000;
     this.speakerHistory = this.speakerHistory.filter(h => (h.endTime || timestamp) > cutoff);
   }
 

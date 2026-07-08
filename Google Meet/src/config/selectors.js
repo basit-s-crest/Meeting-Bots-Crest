@@ -26,7 +26,7 @@ export const TIMEOUTS = {
   navigation: 30000,
   join: 60000,
   element: 10000,
-  speakerDebounce: 100,
+  speakerDebounce: 150,
 };
 
 export const AUDIO_CONFIG = {
