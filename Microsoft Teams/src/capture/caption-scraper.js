@@ -77,14 +77,30 @@ window.teamsCaptionScraper = {
         continue;
       }
 
-      // Find speaker element
-      const speakerEl = block.querySelector('.fui-ChatMessageCompact__author, [data-tid="author"], [data-tid="closed-caption-v2-author"], span[class*="author" i], div[class*="author" i]');
-      // Find text element
-      const textEl = block.querySelector('.fui-ChatMessageCompact__body, [data-tid="content"], [data-tid="closed-caption-v2-content"], span[class*="body" i], div[class*="body" i], span[class*="content" i], div[class*="content" i]');
+      // Find speaker element using distinct child selectors
+      const speakerEl = block.querySelector('.fui-ChatMessageCompact__author, [data-tid="author"], [data-tid="closed-caption-v2-author"], .caption-speaker, .___1hdoxqz, span[class*="speaker" i], div[class*="speaker" i], span[class*="author" i], div[class*="author" i], strong');
+      // Find text element using distinct child selectors
+      const textEl = block.querySelector('.fui-ChatMessageCompact__body, [data-tid="content"], [data-tid="closed-caption-v2-content"], .caption-text, div[class*="caption-text" i], span[class*="caption-text" i], span[class*="body" i], div[class*="body" i], span[class*="content" i], div[class*="content" i]');
 
       if (speakerEl && textEl) {
         const speaker = speakerEl.textContent.trim();
-        const text = textEl.textContent.trim();
+        
+        // Extract text by excluding the speaker element if it is contained within the text element
+        let textNode = textEl;
+        if (speakerEl && textEl.contains(speakerEl)) {
+          textNode = textEl.cloneNode(true);
+          const clonedSpeaker = textNode.querySelector('.fui-ChatMessageCompact__author, [data-tid="author"], [data-tid="closed-caption-v2-author"], .caption-speaker, .___1hdoxqz, span[class*="speaker" i], div[class*="speaker" i], span[class*="author" i], div[class*="author" i], strong');
+          if (clonedSpeaker) {
+            clonedSpeaker.remove();
+          }
+        }
+        
+        let text = textNode.textContent.trim();
+
+        // Defensive strip-fallback: if text starts with speaker's name, slice it off
+        if (speaker && text.startsWith(speaker)) {
+          text = text.slice(speaker.length).trim();
+        }
 
         if (!text) continue;
 
