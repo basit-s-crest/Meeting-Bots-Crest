@@ -511,34 +511,16 @@ window.audioCapture = {
         await this.stopTrack();
       }
 
-      // Create a native AudioContext running at 16kHz for proper resampling and mixdown
-      const ResamplerCtxClass = this.OriginalAudioContext || window.AudioContext || window.webkitAudioContext;
-      const resamplerCtx = new ResamplerCtxClass({ sampleRate: this.targetSampleRate });
-      this.resamplerCtx = resamplerCtx; // Keep a reference to prevent garbage collection
-
-      // Source stream wrapping the incoming track
-      const sourceStream = new MediaStream([track]);
-      const sourceNode = resamplerCtx.createMediaStreamSource(sourceStream);
-
-      // Destination stream at 16kHz explicitly mixed to Mono (1 channel)
-      const destNode = resamplerCtx.createMediaStreamDestination();
-      destNode.channelCount = 1;
-      destNode.channelCountMode = 'explicit';
-      destNode.channelInterpretation = 'speakers';
-
-      sourceNode.connect(destNode);
-      console.log('[Audio Hook] Resampler AudioContext pipeline wired successfully.');
-
-      const resampledTrack = destNode.stream.getAudioTracks()[0];
-
-      this.processor = new MediaStreamTrackProcessor({ track: resampledTrack });
-      console.log('[Audio Hook] MediaStreamTrackProcessor created successfully on resampled track.');
+      this.isRunning = true;
+      this.processor = new MediaStreamTrackProcessor({
+        track
+      });
       
       this.readable = this.processor.readable;
       this.reader = this.readable.getReader();
       console.log('[Audio Hook] Stream reader acquired.');
       
-      this.readLoop();
+      await this.readLoop();
     } catch (e) {
       console.error('[Audio Hook] captureStreamTrack failed:', e);
       this.currentTrackId = null;
@@ -549,6 +531,7 @@ window.audioCapture = {
 
   async readLoop() {
     console.log('[Audio Hook] Entering readLoop...');
+    let frameCount = 0;
     try {
       while (this.isRunning && this.reader) {
         const { done, value } = await this.reader.read();
@@ -557,35 +540,59 @@ window.audioCapture = {
           break;
         }
 
+        frameCount++;
+        if (frameCount % 100 === 0) {
+          console.log('[Audio Hook] Received ' + frameCount + ' audio frames');
+        }
+
         if (value instanceof AudioData) {
-          const sampleRate = value.sampleRate;
-          const numberOfFrames = value.numberOfFrames;
-          const format = value.format;
+          try {
+            const format = value.format;
+            const size = value.allocationSize({ planeIndex: 0 });
+            const arrayBuffer = new ArrayBuffer(size);
+            value.copyTo(arrayBuffer, { planeIndex: 0 });
 
-          let pcmData;
-          if (format.includes('f32')) {
-            const f32Buffer = new Float32Array(numberOfFrames);
-            value.copyTo(f32Buffer, { planeIndex: 0 });
-
-            pcmData = new Int16Array(numberOfFrames);
-            for (let i = 0; i < numberOfFrames; i++) {
-              let s = Math.max(-1, Math.min(1, f32Buffer[i]));
-              pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            let samples;
+            if (format.includes('f32')) {
+              const f32 = new Float32Array(arrayBuffer);
+              samples = new Int16Array(f32.length);
+              for (let i = 0; i < f32.length; i++) {
+                const s = Math.max(-1, Math.min(1, f32[i]));
+                samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+              }
+            } else {
+              samples = new Int16Array(arrayBuffer);
             }
-          } else {
-            pcmData = new Int16Array(numberOfFrames);
-            value.copyTo(pcmData, { planeIndex: 0 });
+
+            let finalSamples = samples;
+            const incomingRate = value.sampleRate;
+            const targetRate = 16000;
+            if (incomingRate !== targetRate) {
+              const ratio = incomingRate / targetRate;
+              const newLength = Math.round(samples.length / ratio);
+              const resampled = new Int16Array(newLength);
+              for (let i = 0; i < newLength; i++) {
+                const pos = i * ratio;
+                const idx = Math.floor(pos);
+                const nextIdx = Math.min(samples.length - 1, idx + 1);
+                const weight = pos - idx;
+                resampled[i] = Math.round(samples[idx] * (1 - weight) + samples[nextIdx] * weight);
+              }
+              finalSamples = resampled;
+            }
+
+            this.onFrame?.({
+              timestamp: value.timestamp,
+              sampleRate: targetRate,
+              numberOfFrames: finalSamples.length,
+              numberOfChannels: 1,
+              data: Array.from(finalSamples)
+            });
+          } catch (copyErr) {
+            console.error('[Audio Hook] Error processing frame:', copyErr.message);
+          } finally {
+            value.close();
           }
-
-          this.onFrame?.({
-            timestamp: value.timestamp,
-            sampleRate: sampleRate,
-            numberOfFrames: pcmData.length,
-            numberOfChannels: 1,
-            data: Array.from(pcmData)
-          });
-
-          value.close();
         }
       }
     } catch (e) {
@@ -629,10 +636,10 @@ export class AudioCapture {
     this.isCapturing = false;
 
     // We register the init script on the context so it propagates to all subframes and pages cleanly
-    await this.page.context().addInitScript(AUDIO_CAPTURE_SCRIPT).catch(() => {});
-    await this.page.exposeFunction('onAudioFrame', this.onFrame.bind(this)).catch(() => {});
-    await this.page.exposeFunction('onAudioError', this.onError.bind(this)).catch(() => {});
-    
+    await this.page.context().addInitScript(AUDIO_CAPTURE_SCRIPT).catch(() => { });
+    await this.page.exposeFunction('onAudioFrame', this.onFrame.bind(this)).catch(() => { });
+    await this.page.exposeFunction('onAudioError', this.onError.bind(this)).catch(() => { });
+
     // Listen for dynamically created or navigated frames during an active session
     this.page.on('frameattached', async (frame) => {
       if (this.isCapturing) {
@@ -652,7 +659,7 @@ export class AudioCapture {
     const frames = this.page.frames();
     for (const frame of frames) {
       try {
-        await frame.evaluate(AUDIO_CAPTURE_SCRIPT).catch(() => {});
+        await frame.evaluate(AUDIO_CAPTURE_SCRIPT).catch(() => { });
       } catch (err) {
         // Ignore cross-origin frame access limits
       }
@@ -661,7 +668,7 @@ export class AudioCapture {
 
   async startFrameCapture(frame) {
     try {
-      await frame.waitForLoadState('domcontentloaded').catch(() => {});
+      await frame.waitForLoadState('domcontentloaded').catch(() => { });
       const hasCapture = await frame.evaluate(() => typeof window.audioCapture !== 'undefined').catch(() => false);
       if (hasCapture) {
         console.log(`[Audio Capture] Found window.audioCapture in: ${frame.url()}`);
@@ -691,14 +698,14 @@ export class AudioCapture {
     const frames = this.page.frames();
     let started = false;
     console.log(`[Audio Capture] Starting audio capture in matching contexts across ${frames.length} frames...`);
-    
+
     for (const frame of frames) {
       const result = await this.startFrameCapture(frame);
       if (result) {
         started = true;
       }
     }
-    
+
     if (!started) {
       console.warn('[Audio Capture] Warning: No frames responded to start() request.');
     }
@@ -713,7 +720,7 @@ export class AudioCapture {
       try {
         const hasCapture = await frame.evaluate(() => typeof window.audioCapture !== 'undefined').catch(() => false);
         if (hasCapture) {
-          await frame.evaluate(() => window.audioCapture.stop()).catch(() => {});
+          await frame.evaluate(() => window.audioCapture.stop()).catch(() => { });
         }
       } catch (e) {
         // ignore

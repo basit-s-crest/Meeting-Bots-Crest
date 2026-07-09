@@ -34,6 +34,17 @@ export class BotLifecycle {
   async start() {
     this.transitionState('joining');
     
+    // Start WebSocket / Output handler server early (before launching browser/joining)
+    try {
+      console.log('[Lifecycle] Starting early output handler of type "' + this.outputType + '" on port:', this.outputConfig.port || 8080);
+      this.output = createOutput(this.outputType, this.outputConfig);
+      await this.output.start();
+      console.log('[Lifecycle] Early output handler started successfully.');
+    } catch (err) {
+      console.error('[Lifecycle] ERROR: Failed to start early output handler:', err.message || err);
+      throw err;
+    }
+    
     this.bot = new ZoomBot(this.meetingUrl, this.botName, {
       headless: this.headless,
       channel: this.channel,
@@ -48,7 +59,7 @@ export class BotLifecycle {
     this.audioCapture = new AudioCapture(page);
     await this.audioCapture.initialize();
 
-    this.speakerDetector = new SpeakerDetector(page);
+    this.speakerDetector = new SpeakerDetector(page, this.botName);
     await this.speakerDetector.initialize();
 
     await this.bot.join();
@@ -116,12 +127,9 @@ export class BotLifecycle {
   }
 
   async initializeCapture() {
-    // 1. Set up chunker & output
+    // 1. Set up chunker & output callbacks linking to already running output
     this.chunker = new AudioChunker();
     this.chunker.onChunk = (chunk) => this.output?.send(chunk);
-
-    this.output = createOutput(this.outputType, this.outputConfig);
-    await this.output.start();
 
     // 2. Set callbacks on pre-initialized audio interceptor
     this.audioCapture.setCallbacks({

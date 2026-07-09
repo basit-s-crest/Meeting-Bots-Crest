@@ -11,6 +11,14 @@ window.speakerDetector = {
 
   start(onChangeCallback) {
     this.onSpeakerChange = onChangeCallback;
+    
+    if (this.isRunning) {
+      console.log('[Speaker Detector Hook] Already running, forcing speaker check...');
+      this.currentSpeaker = null; // Force re-detection to emit current speaker to newly registered callback
+      this.checkSpeakerChange();
+      return;
+    }
+    
     this.isRunning = true;
     console.log('[Speaker Detector Hook] Starting MutationObserver on: ' + window.location.href);
     
@@ -40,24 +48,47 @@ window.speakerDetector = {
   },
 
   checkSpeakerChange() {
+    console.log('[Speaker Detector Hook] Running checkSpeakerChange() on: ' + window.location.href);
     let foundSpeaker = null;
 
     // Strategy 1: Check for active speaker indicator banner or text in the DOM
     const talkingIndicator = document.querySelector('[class*="talking-indicator"], [class*="active-speaker-name"], .talking-indicator');
     if (talkingIndicator && talkingIndicator.textContent) {
       const text = talkingIndicator.textContent.trim();
+      let candidateName = null;
       if (text.toLowerCase().includes('talking:') || text.toLowerCase().includes('speaking:')) {
-        foundSpeaker = text.replace(/^(talking:|speaking:)\s*/i, '').trim();
+        candidateName = text.replace(/^(talking:|speaking:)\s*/i, '').trim();
       } else if (text.length > 0 && text.length < 50) {
-        foundSpeaker = text;
+        candidateName = text;
+      }
+      
+      if (candidateName) {
+        const lower = candidateName.toLowerCase();
+        // Skip if the talking banner is labeling the bot
+        if (lower.includes('(me)') || (window.botDisplayName && lower.includes(window.botDisplayName.toLowerCase())) || lower.includes('bot') || lower.includes('transcriber') || lower.includes('recorder')) {
+          console.log('[Speaker Detector Hook] Strategy 1 found indicator for BOT: ' + candidateName + ' (skipped)');
+        } else {
+          foundSpeaker = candidateName;
+          console.log('[Speaker Detector Hook] Strategy 1 found indicator: ' + text + ' -> speaker: ' + foundSpeaker);
+        }
       }
     }
 
-    // Strategy 2: Check active speaker borders or highlighted tiles in Gallery View
+    // Strategy 2: Check active speaker borders/tiles in Gallery View OR the
+    // dominant video pane in Speaker View. These are two different Zoom
+    // layouts with unrelated class names:
+    //   - Gallery View: small thumbnail gets a "--active" modifier class
+    //   - Speaker View: the large/main pane uses speaker-active-container__*
+    //     and its mere presence there (no modifier needed) IS the signal
     if (!foundSpeaker) {
-      const activeTile = document.querySelector('${SELECTORS.inCall.activeSpeakerBorder}');
+      const activeTile = document.querySelector('.speaker-bar-container__video-frame--active, [class*="speaker-bar-container__video-frame--active"], .speaker-active-container__video-frame, [class*="speaker-active-container__video-frame"]');
       if (activeTile) {
         foundSpeaker = this.getParticipantName(activeTile);
+        if (foundSpeaker) {
+          console.log('[Speaker Detector Hook] Strategy 2 found active tile (' + activeTile.className + ') -> speaker: ' + foundSpeaker);
+        } else {
+          console.log('[Speaker Detector Hook] Strategy 2 found active tile class but name was null/excluded.');
+        }
       }
     }
 
@@ -68,10 +99,14 @@ window.speakerDetector = {
         const row = activeMic.closest('${SELECTORS.inCall.participantRow}');
         if (row) {
           foundSpeaker = this.getParticipantName(row);
+          if (foundSpeaker) {
+            console.log('[Speaker Detector Hook] Strategy 3 found active mic container -> speaker: ' + foundSpeaker);
+          }
         }
       }
     }
 
+    console.log('[Speaker Detector Hook] checkSpeakerChange final result: ' + foundSpeaker);
     const now = Date.now();
     if (foundSpeaker !== this.currentSpeaker) {
       if (now - this.lastChangeTime > ${TIMEOUTS.speakerDebounce}) {
@@ -83,14 +118,45 @@ window.speakerDetector = {
     }
   },
 
-  getParticipantName(el) {
+  getParticipantRawName(el) {
     if (!el) return null;
+    
+    // a. img[alt] attribute inside the active tile (e.g. <img class="video-avatar__avatar-img" alt="Lina Dholariya">)
+    const imgEl = el.querySelector('img[alt]');
+    if (imgEl) {
+      const altVal = imgEl.getAttribute('alt')?.trim();
+      if (altVal && altVal.length > 0) return altVal;
+    }
+
+    // b. span[role="none"] text content inside video-avatar__avatar-footer
+    const spanEl = el.querySelector('span[role="none"], .video-avatar__avatar-footer span, [class*="avatar-footer"] span');
+    if (spanEl && spanEl.textContent?.trim()) {
+      return spanEl.textContent.trim();
+    }
+
+    // c. Any other visible text-containing name element as a last-resort fallback
     const nameEl = el.querySelector('${SELECTORS.inCall.participantName}');
-    if (nameEl) return nameEl.textContent.trim();
+    if (nameEl && nameEl.textContent?.trim()) return nameEl.textContent.trim();
+    
+    const genericNameEl = el.querySelector('[class*="name" i]');
+    if (genericNameEl && genericNameEl.textContent?.trim()) return genericNameEl.textContent.trim();
     
     const label = el.getAttribute('aria-label') || el.getAttribute('title');
     if (label) {
       return label.replace(/'s video|video of/i, '').trim();
+    }
+    return null;
+  },
+
+  getParticipantName(el) {
+    const name = this.getParticipantRawName(el);
+    if (name) {
+      const lower = name.toLowerCase();
+      // Exclude bot self-view and generic bot display names
+      if (lower.includes('(me)')) return null;
+      if (window.botDisplayName && lower.includes(window.botDisplayName.toLowerCase())) return null;
+      if (lower.includes('bot') || lower.includes('transcriber') || lower.includes('recorder')) return null;
+      return name;
     }
     return null;
   },
@@ -102,11 +168,23 @@ window.speakerDetector = {
     console.log('[Speaker Detector Hook] Stopped');
   }
 };
+
+// Auto-start if window.onSpeakerChange function is already exposed
+if (typeof window.onSpeakerChange === 'function') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      window.speakerDetector.start((data) => window.onSpeakerChange(data));
+    });
+  } else {
+    window.speakerDetector.start((data) => window.onSpeakerChange(data));
+  }
+}
 `;
 
 export class SpeakerDetector {
-  constructor(page) {
+  constructor(page, botName) {
     this.page = page;
+    this.botName = botName || 'Zoom Bot';
   }
 
   async initialize() {
@@ -114,11 +192,19 @@ export class SpeakerDetector {
     await this.page.context().addInitScript(SPEAKER_DETECTION_SCRIPT).catch(() => {});
     await this.page.exposeFunction('onSpeakerChange', this.onChange.bind(this)).catch(() => {});
 
+    // Set the bot display name in the browser context initially
+    await this.page.context().addInitScript((name) => {
+      window.botDisplayName = name;
+    }, this.botName).catch(() => {});
+
     // Run init script on any already loaded frames
     const frames = this.page.frames();
     for (const frame of frames) {
       try {
         await frame.evaluate(SPEAKER_DETECTION_SCRIPT).catch(() => {});
+        await frame.evaluate((name) => {
+          window.botDisplayName = name;
+        }, this.botName).catch(() => {});
       } catch (err) {
         // Ignore cross-origin frame access limits
       }
@@ -127,16 +213,17 @@ export class SpeakerDetector {
 
   async start() {
     const frames = this.page.frames();
-    console.log(`[Speaker Detector] Starting observer across ${frames.length} frames...`);
+    console.log(`[Speaker Detector] Starting observer across ${frames.length} frames (botName: ${this.botName})...`);
     
     for (const frame of frames) {
       try {
         const hasDetector = await frame.evaluate(() => typeof window.speakerDetector !== 'undefined').catch(() => false);
         if (hasDetector) {
           console.log(`[Speaker Detector] Starting observer in frame: ${frame.url()}`);
-          await frame.evaluate(() => {
+          await frame.evaluate((name) => {
+            if (name) window.botDisplayName = name;
             window.speakerDetector.start((data) => window.onSpeakerChange(data));
-          }).catch((err) => console.error('[Speaker Detector Frame Start Error]:', err.message));
+          }, this.botName).catch((err) => console.error('[Speaker Detector Frame Start Error]:', err.message));
         }
       } catch (err) {
         // Ignore cross-origin frame access limits

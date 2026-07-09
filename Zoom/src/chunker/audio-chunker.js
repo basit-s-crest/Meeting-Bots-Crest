@@ -43,6 +43,14 @@ export class AudioChunker {
     const chunkEnd = chunkStart + CHUNK_MS;
     const speaker = this.getSpeakerForWindow(chunkStart, chunkEnd);
 
+    // Calculate RMS energy of the Int16 samples
+    let sum = 0;
+    for (let i = 0; i < chunkData.length; i++) {
+      sum += chunkData[i] * chunkData[i];
+    }
+    const rms = Math.sqrt(sum / chunkData.length);
+    console.log(`[AudioChunker] Emitted chunk c${String(this.chunkId).padStart(6, '0')}, speaker: ${speaker || 'silence'}, RMS energy: ${rms.toFixed(2)}`);
+
     // Format matches Google Meet's structure: includes base64-encoded PCM audio
     const chunk = {
       chunk_id: `c${String(this.chunkId).padStart(6, '0')}`,
