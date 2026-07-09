@@ -70,20 +70,37 @@ export class WebSocketChunkOutput {
   }
 
   async start() {
-    return new Promise((resolve) => {
-      this.wss = new WebSocketServer({ port: this.port });
-      this.wss.on('connection', (ws) => {
-        this.clients.add(ws);
-        console.log(`[Output Handler] WebSocket client connected (${this.clients.size} active)`);
-        ws.on('close', () => {
-          this.clients.delete(ws);
-          console.log(`[Output Handler] WebSocket client disconnected`);
+    return new Promise((resolve, reject) => {
+      try {
+        this.wss = new WebSocketServer({ port: this.port });
+        
+        this.wss.on('error', (err) => {
+          console.error(`[Output Handler] WebSocket server error on port ${this.port}:`, err.message || err);
+          reject(err);
         });
-      });
-      this.wss.on('listening', () => {
-        console.log(`[Output Handler] WebSocket server listening on ws://localhost:${this.port}`);
-        resolve();
-      });
+
+        this.wss.on('connection', (ws) => {
+          this.clients.add(ws);
+          console.log(`[Output Handler] WebSocket client connected (${this.clients.size} active)`);
+          
+          ws.on('close', () => {
+            this.clients.delete(ws);
+            console.log(`[Output Handler] WebSocket client disconnected`);
+          });
+
+          ws.on('error', (err) => {
+            console.error(`[Output Handler] WebSocket client error:`, err.message);
+          });
+        });
+
+        this.wss.on('listening', () => {
+          console.log(`[Output Handler] WebSocket server listening on ws://localhost:${this.port}`);
+          resolve();
+        });
+      } catch (err) {
+        console.error(`[Output Handler] Failed to initialize WebSocketServer on port ${this.port}:`, err);
+        reject(err);
+      }
     });
   }
 
