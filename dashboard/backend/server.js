@@ -9,6 +9,7 @@ import dotenv from 'dotenv';
 
 import { processManager } from './process-manager.js';
 import { deepgramProxy } from './deepgram-proxy.js';
+import { generateFirefliesReport, calculateSpeakerStats } from './report-generator.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -193,6 +194,86 @@ app.get('/api/transcripts/:filename', (req, res) => {
     res.json({ lines });
   } catch (err) {
     res.status(500).json({ error: `Failed to read transcript: ${err.message}` });
+  }
+});
+
+/**
+ * REST API: Generate post-meeting report
+ */
+app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
+  const filename = req.params.filename;
+  
+  // Sanitize: reject if it contains '..' or has non-alphanumeric/underscore/hyphen/dot characters
+  if (!/^[a-zA-Z0-9_\-\.]+$/.test(filename) || filename.includes('..') || !filename.endsWith('.jsonl')) {
+    return res.status(400).json({ error: 'Invalid or unauthorized file name' });
+  }
+
+  const transcriptsDir = path.join(__dirname, 'transcripts');
+  const filePath = path.join(transcriptsDir, filename);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Transcript file not found' });
+  }
+
+  try {
+    const reportMarkdown = await generateFirefliesReport(filePath);
+    
+    // Save report file
+    const reportFilename = filename.replace('.jsonl', '_report.md');
+    const reportPath = path.join(transcriptsDir, reportFilename);
+    fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(`[Server] Report generation failed for ${filename}:`, err.message);
+    
+    if (err.message.includes('GEMINI_API_KEY not set')) {
+      return res.status(503).json({ error: 'GEMINI_API_KEY not set in .env' });
+    } else if (err.message.includes('Gemini API Error')) {
+      return res.status(503).json({ error: err.message });
+    }
+    res.status(500).json({ error: `Report generation failed: ${err.message}` });
+  }
+});
+
+/**
+ * REST API: Get post-meeting report and speaker analytics
+ */
+app.get('/api/transcripts/:filename/report', (req, res) => {
+  const filename = req.params.filename;
+  
+  // Sanitize: reject if it contains '..' or has non-alphanumeric/underscore/hyphen/dot characters
+  if (!/^[a-zA-Z0-9_\-\.]+$/.test(filename) || filename.includes('..') || !filename.endsWith('.jsonl')) {
+    return res.status(400).json({ error: 'Invalid or unauthorized file name' });
+  }
+
+  const transcriptsDir = path.join(__dirname, 'transcripts');
+  const filePath = path.join(transcriptsDir, filename);
+  const reportFilename = filename.replace('.jsonl', '_report.md');
+  const reportPath = path.join(transcriptsDir, reportFilename);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Transcript file not found' });
+  }
+
+  if (!fs.existsSync(reportPath)) {
+    return res.status(404).json({ error: 'Report not yet generated' });
+  }
+
+  try {
+    const reportMarkdown = fs.readFileSync(reportPath, 'utf8');
+    
+    // Calculate speaker statistics from source .jsonl file for the progress bars
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+    const lines = fileContent.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
+    const stats = calculateSpeakerStats(lines);
+
+    res.json({
+      report: reportMarkdown,
+      analytics: stats.analytics
+    });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to retrieve report: ${err.message}` });
   }
 });
 

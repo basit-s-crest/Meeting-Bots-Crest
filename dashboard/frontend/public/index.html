@@ -156,6 +156,35 @@
     </div>
   </div>
 
+  <!-- Modal for Viewing Meeting Report & Insights -->
+  <div id="reportModal" class="modal hidden">
+    <div class="modal-content glass-card report-modal-content">
+      <div class="modal-header">
+        <h2 id="reportModalTitle">Meeting Report & Insights</h2>
+        <button id="reportModalCloseBtn" class="close-btn">&times;</button>
+      </div>
+      <div class="modal-body report-modal-body">
+        <div class="report-section">
+          <h3 class="section-subtitle">Speaker Talk-Time Analytics</h3>
+          <div id="reportSpeakerStats" class="speaker-stats-container">
+            <!-- Dynamic progress bars go here -->
+          </div>
+        </div>
+        <hr class="report-divider">
+        <div class="report-section">
+          <h3 class="section-subtitle">AI Summary & Highlights</h3>
+          <div id="reportContent" class="markdown-body">
+            <!-- Markdown content rendered as HTML goes here -->
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="reportModalDownloadBtn" class="btn btn-secondary" style="margin-right: 0.5rem;">Download Markdown</button>
+        <button id="reportModalCloseBtn2" class="btn btn-primary">Close</button>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

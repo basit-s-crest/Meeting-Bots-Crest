@@ -37,6 +37,15 @@ const modalBody = document.getElementById('modalBody');
 const modalCloseBtn = document.getElementById('modalCloseBtn');
 const modalDownloadBtn = document.getElementById('modalDownloadBtn');
 
+// Report Modal elements
+const reportModal = document.getElementById('reportModal');
+const reportModalTitle = document.getElementById('reportModalTitle');
+const reportSpeakerStats = document.getElementById('reportSpeakerStats');
+const reportContent = document.getElementById('reportContent');
+const reportModalCloseBtn = document.getElementById('reportModalCloseBtn');
+const reportModalCloseBtn2 = document.getElementById('reportModalCloseBtn2');
+const reportModalDownloadBtn = document.getElementById('reportModalDownloadBtn');
+
 let currentViewedLines = [];
 
 // Initialize Dashboard
@@ -50,10 +59,17 @@ document.addEventListener('DOMContentLoaded', () => {
   modalCloseBtn.addEventListener('click', () => historyModal.classList.add('hidden'));
   modalDownloadBtn.addEventListener('click', downloadCurrentTranscript);
   
+  // Bind report close events
+  reportModalCloseBtn.addEventListener('click', () => reportModal.classList.add('hidden'));
+  reportModalCloseBtn2.addEventListener('click', () => reportModal.classList.add('hidden'));
+  
   // Close modal on background click
   window.addEventListener('click', (e) => {
     if (e.target === historyModal) {
       historyModal.classList.add('hidden');
+    }
+    if (e.target === reportModal) {
+      reportModal.classList.add('hidden');
     }
   });
 });
@@ -426,8 +442,14 @@ async function loadTranscriptsHistory() {
         viewBtn.className = 'btn btn-secondary btn-sm';
         viewBtn.textContent = 'View';
         viewBtn.onclick = () => viewTranscriptFile(item.fileName);
-        
         actions.appendChild(viewBtn);
+
+        const reportBtn = document.createElement('button');
+        reportBtn.className = 'btn btn-secondary btn-sm';
+        reportBtn.style.marginLeft = '0.5rem';
+        reportBtn.textContent = 'Report';
+        reportBtn.onclick = () => openReportFlow(item.fileName, reportBtn);
+        actions.appendChild(reportBtn);
         fileRow.appendChild(details);
         fileRow.appendChild(actions);
         historyList.appendChild(fileRow);
@@ -560,4 +582,217 @@ function setupActiveSessionUI() {
   
   emptyTranscript.style.display = 'none';
   liveTranscript.innerHTML = '';
+}
+
+/**
+ * Handle checking, generating, and viewing reports for completed sessions
+ */
+async function openReportFlow(fileName, button) {
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Loading...';
+
+  try {
+    const res = await fetch(`/api/transcripts/${fileName}/report`);
+    
+    if (res.status === 200) {
+      const data = await res.json();
+      showReport(fileName, data);
+    } else if (res.status === 404) {
+      const confirmGen = confirm('No report exists for this session. Would you like to generate one using Gemini? This may take several seconds.');
+      if (confirmGen) {
+        button.textContent = 'Generating...';
+        
+        const genRes = await fetch(`/api/transcripts/${fileName}/generate-report`, {
+          method: 'POST'
+        });
+
+        const genData = await genRes.json();
+        
+        if (genRes.ok && genData.success) {
+          alert('Report generated successfully!');
+          const fetchRes = await fetch(`/api/transcripts/${fileName}/report`);
+          const reportData = await fetchRes.json();
+          showReport(fileName, reportData);
+        } else {
+          throw new Error(genData.error || 'Failed to generate report');
+        }
+      }
+    } else {
+      const errorData = await res.json();
+      throw new Error(errorData.error || 'Failed to retrieve report status');
+    }
+  } catch (err) {
+    alert(`Error: ${err.message}`);
+    console.error('[Report] Error:', err);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+/**
+ * Displays the report markdown and speaker talk-time progress bars inside the reportModal
+ */
+function showReport(fileName, { report, analytics }) {
+  reportModalTitle.textContent = `Report: ${fileName}`;
+  reportSpeakerStats.innerHTML = '';
+
+  if (analytics && analytics.length > 0) {
+    analytics.forEach(speaker => {
+      const row = document.createElement('div');
+      row.className = 'speaker-stats-row';
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'speaker-stats-name';
+      nameSpan.textContent = speaker.name;
+
+      const outerBar = document.createElement('div');
+      outerBar.className = 'speaker-stats-bar-outer';
+
+      const innerBar = document.createElement('div');
+      innerBar.className = 'speaker-stats-bar-inner';
+      innerBar.style.width = `${speaker.percentage}%`;
+      innerBar.style.backgroundColor = getSpeakerBorderColor(speaker.name);
+
+      outerBar.appendChild(innerBar);
+
+      const valSpan = document.createElement('span');
+      valSpan.className = 'speaker-stats-val';
+      valSpan.textContent = `${speaker.percentage}%`;
+
+      row.appendChild(nameSpan);
+      row.appendChild(outerBar);
+      row.appendChild(valSpan);
+      reportSpeakerStats.appendChild(row);
+    });
+  } else {
+    reportSpeakerStats.innerHTML = '<p style="font-size: 0.8125rem; color: var(--text-light); text-align: center;">No speaker metrics found.</p>';
+  }
+
+  // Render markdown text to HTML (XSS escaped first)
+  reportContent.innerHTML = renderMarkdownToHtml(report);
+
+  reportModalDownloadBtn.onclick = () => downloadReportFile(fileName, report);
+  reportModal.classList.remove('hidden');
+}
+
+/**
+ * Triggers file download of the raw report markdown
+ */
+function downloadReportFile(fileName, content) {
+  const blob = new Blob([content], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName.replace('.jsonl', '_report.md');
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Safe, lightweight markdown-to-HTML parser that escapes XSS payloads first
+ */
+function renderMarkdownToHtml(md) {
+  if (!md) return '';
+  
+  // 1. Escape HTML entities to secure against XSS
+  let html = md
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  // 2. Process markdown syntax line-by-line
+  const lines = html.split('\n');
+  let inTable = false;
+  let inList = false;
+  let tableHtml = '';
+  
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i].trim();
+    
+    // Lists (* item)
+    if (line.startsWith('* ')) {
+      if (inTable) {
+        tableHtml += '</tbody></table>';
+        inTable = false;
+        lines[i - 1] += '\n' + tableHtml;
+        tableHtml = '';
+      }
+      const content = line.substring(2).trim();
+      line = `<li>${content}</li>`;
+      if (!inList) {
+        inList = true;
+        line = `<ul>${line}`;
+      }
+    } else {
+      if (inList) {
+        line = `</ul>${line}`;
+        inList = false;
+      }
+    }
+
+    // Tables (| cell | cell |)
+    if (line.startsWith('|') && line.endsWith('|')) {
+      if (line.includes('---')) {
+        lines[i] = '';
+        continue;
+      }
+      const cells = line.split('|').slice(1, -1).map(c => c.trim());
+      const tag = inTable ? 'td' : 'th';
+      const rowContent = cells.map(c => `<${tag}>${c}</${tag}>`).join('');
+      
+      if (!inTable) {
+        inTable = true;
+        tableHtml = `<table><thead><tr>${rowContent}</tr></thead><tbody>`;
+      } else {
+        tableHtml += `<tr>${rowContent}</tr>`;
+      }
+      lines[i] = '';
+      continue;
+    } else {
+      if (inTable) {
+        tableHtml += '</tbody></table>';
+        inTable = false;
+        lines[i] = tableHtml + '\n' + line;
+        tableHtml = '';
+        continue;
+      }
+    }
+
+    // Bold text (**text**)
+    line = line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+    // Headings (###, ##, #)
+    if (line.startsWith('### ')) {
+      line = `<h3>${line.substring(4)}</h3>`;
+    } else if (line.startsWith('## ')) {
+      line = `<h2>${line.substring(3)}</h2>`;
+    } else if (line.startsWith('# ')) {
+      line = `<h1>${line.substring(2)}</h1>`;
+    } 
+    // Blockquote (> text)
+    else if (line.startsWith('&gt; ')) {
+      line = `<blockquote>${line.substring(5)}</blockquote>`;
+    }
+    // Standard Paragraph text
+    else if (line.length > 0 && !line.startsWith('<')) {
+      line = `<p>${line}</p>`;
+    }
+
+    lines[i] = line;
+  }
+
+  // Close open lists and tables
+  if (inList) {
+    lines[lines.length - 1] += '</ul>';
+  }
+  if (inTable) {
+    tableHtml += '</tbody></table>';
+    lines[lines.length - 1] += '\n' + tableHtml;
+  }
+
+  return lines.join('\n');
 }
