@@ -430,7 +430,14 @@ async function loadTranscriptsHistory() {
         
         const date = document.createElement('span');
         date.className = 'history-date';
-        date.textContent = `${new Date(item.created).toLocaleString()} | ${(item.size / 1024).toFixed(1)} KB`;
+        
+        let metaInfo = '';
+        if (item.isDbBacked) {
+          metaInfo = `Cloud DB | ${item.status}`;
+        } else {
+          metaInfo = `${(item.size / 1024).toFixed(1)} KB`;
+        }
+        date.textContent = `${new Date(item.created).toLocaleString()} | ${metaInfo}`;
         
         details.appendChild(title);
         details.appendChild(date);

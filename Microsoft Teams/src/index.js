@@ -10,6 +10,7 @@ function parseArgs() {
     headless: process.env.HEADLESS !== 'false',
     channel: process.env.BROWSER_CHANNEL || null,
     login: false,
+    guest: false,
     capture: 'captions', // Default capture source
     outputPath: process.env.OUTPUT_PATH || './transcript.jsonl'
   };
@@ -26,6 +27,10 @@ function parseArgs() {
         break;
       case '--headful':
         config.headless = false;
+        break;
+      case '--guest':
+      case '-g':
+        config.guest = true;
         break;
       case '--channel':
       case '-c':
@@ -113,7 +118,8 @@ async function main() {
     headless: config.headless,
     channel: config.channel,
     captureSource: config.capture,
-    outputPath: config.outputPath
+    outputPath: config.outputPath,
+    guest: config.guest
   });
 
   process.on('SIGINT', async () => {

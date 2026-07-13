@@ -11,6 +11,7 @@ export class BotLifecycle {
     this.channel = config.channel;
     this.captureSource = config.captureSource || 'captions';
     this.outputPath = config.outputPath || './transcript.jsonl';
+    this.isGuest = config.isGuest || config.guest || false;
 
     this.bot = null;
     this.capture = null;
@@ -24,7 +25,8 @@ export class BotLifecycle {
 
     this.bot = new TeamsBot(this.meetingUrl, this.botName, {
       headless: this.headless,
-      channel: this.channel
+      channel: this.channel,
+      isGuest: this.isGuest
     });
 
     await this.bot.launch();

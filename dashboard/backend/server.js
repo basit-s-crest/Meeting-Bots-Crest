@@ -10,6 +10,8 @@ import dotenv from 'dotenv';
 import { processManager } from './process-manager.js';
 import { deepgramProxy } from './deepgram-proxy.js';
 import { generateFirefliesReport, calculateSpeakerStats } from './report-generator.js';
+import { supabase } from './supabase-client.js';
+import { uploadReport } from './supabase-helper.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -154,41 +156,135 @@ app.get('/api/sessions', (req, res) => {
 /**
  * REST API: Get saved transcripts
  */
-app.get('/api/transcripts', (req, res) => {
+app.get('/api/transcripts', async (req, res) => {
   const transcriptsDir = path.join(__dirname, 'transcripts');
-  if (!fs.existsSync(transcriptsDir)) {
-    return res.json({ transcripts: [] });
+  
+  // Read local files as fallback/legacy check
+  let localFiles = [];
+  try {
+    if (fs.existsSync(transcriptsDir)) {
+      localFiles = fs.readdirSync(transcriptsDir).filter(f => f.endsWith('.jsonl'));
+    }
+  } catch (err) {
+    console.error('[Server] Failed to read local transcripts directory:', err.message);
   }
 
   try {
-    const files = fs.readdirSync(transcriptsDir).filter(f => f.endsWith('.jsonl'));
-    const list = files.map(f => {
-      const stats = fs.statSync(path.join(transcriptsDir, f));
-      return {
-        fileName: f,
-        sessionId: f.replace(/^(teams|meet|zoom)_/, '').replace(/\.jsonl$/, ''),
-        created: stats.birthtime,
-        size: stats.size
-      };
-    });
+    // 1. Fetch sessions from Supabase database
+    const { data: dbSessions, error } = await supabase
+      .from('meeting_sessions')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    // Track session_ids to avoid showing duplicates
+    const dbSessionIds = new Set(dbSessions.map(s => s.session_id));
+
+    // Convert dbSessions to the format expected by the frontend
+    const list = dbSessions.map(s => ({
+      fileName: `${s.bot_type}_${s.session_id}.jsonl`,
+      sessionId: s.session_id,
+      created: s.created_at,
+      size: 0, // DB-backed files sizes are fetched from storage metadata if needed
+      isDbBacked: true,
+      botType: s.bot_type,
+      status: s.status,
+      transcriptFileUrl: s.transcript_file_url,
+      reportFileUrl: s.report_file_url
+    }));
+
+    // 2. Add local files that are not in the database (legacy support)
+    for (const f of localFiles) {
+      const match = f.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
+      if (match) {
+        const [_, type, sessionId] = match;
+        if (!dbSessionIds.has(sessionId)) {
+          try {
+            const stats = fs.statSync(path.join(transcriptsDir, f));
+            list.push({
+              fileName: f,
+              sessionId: sessionId,
+              created: stats.birthtime,
+              size: stats.size,
+              isDbBacked: false,
+              botType: type,
+              status: 'completed'
+            });
+          } catch (e) {
+            // Ignore missing file stats
+          }
+        }
+      }
+    }
+
+    // Sort final combined list by created date descending
+    list.sort((a, b) => new Date(b.created) - new Date(a.created));
+
     res.json({ transcripts: list });
   } catch (err) {
-    res.status(500).json({ error: `Failed to read transcripts directory: ${err.message}` });
+    console.warn('[Server] Supabase transcripts fetch failed, falling back to local files:', err.message);
+    
+    // Fallback: list local files only
+    const list = localFiles.map(f => {
+      try {
+        const stats = fs.statSync(path.join(transcriptsDir, f));
+        return {
+          fileName: f,
+          sessionId: f.replace(/^(teams|meet|zoom)_/, '').replace(/\.jsonl$/, ''),
+          created: stats.birthtime,
+          size: stats.size,
+          isDbBacked: false
+        };
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
+
+    list.sort((a, b) => new Date(b.created) - new Date(a.created));
+    res.json({ transcripts: list });
   }
 });
 
 /**
  * REST API: Read individual transcript file
  */
-app.get('/api/transcripts/:filename', (req, res) => {
+app.get('/api/transcripts/:filename', async (req, res) => {
   const filename = req.params.filename;
-  const filePath = path.join(__dirname, 'transcripts', filename);
-
-  if (!fs.existsSync(filePath) || path.relative(path.join(__dirname, 'transcripts'), filePath).startsWith('..')) {
-    return res.status(404).json({ error: 'Transcript file not found' });
+  
+  if (!/^[a-zA-Z0-9_\-\.]+$/.test(filename) || filename.includes('..') || !filename.endsWith('.jsonl')) {
+    return res.status(400).json({ error: 'Invalid or unauthorized file name' });
   }
 
+  const transcriptsDir = path.join(__dirname, 'transcripts');
+  const filePath = path.join(transcriptsDir, filename);
+
   try {
+    // 1. Try to fetch from Supabase storage URL
+    const match = filename.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
+    if (match) {
+      const [_, botType, sessionId] = match;
+      const { data: session, error } = await supabase
+        .from('meeting_sessions')
+        .select('transcript_file_url')
+        .eq('session_id', sessionId)
+        .single();
+      
+      if (!error && session && session.transcript_file_url) {
+        const fetchRes = await fetch(session.transcript_file_url);
+        if (fetchRes.ok) {
+          const content = await fetchRes.text();
+          const lines = content.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
+          return res.json({ lines });
+        }
+      }
+    }
+
+    // 2. Fallback to local filesystem
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Transcript file not found' });
+    }
+
     const content = fs.readFileSync(filePath, 'utf8');
     const lines = content.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
     res.json({ lines });
@@ -218,10 +314,18 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
   try {
     const reportMarkdown = await generateFirefliesReport(filePath);
     
-    // Save report file
+    // Save report file locally
     const reportFilename = filename.replace('.jsonl', '_report.md');
     const reportPath = path.join(transcriptsDir, reportFilename);
     fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
+
+    // Parse filename to update Supabase row and upload report
+    const match = filename.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
+    if (match) {
+      const [_, botType, sessionId] = match;
+      console.log(`[Server] Uploading report to Supabase for session: ${sessionId}`);
+      await uploadReport(sessionId, botType);
+    }
 
     res.json({ success: true });
   } catch (err) {
@@ -239,7 +343,7 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
 /**
  * REST API: Get post-meeting report and speaker analytics
  */
-app.get('/api/transcripts/:filename/report', (req, res) => {
+app.get('/api/transcripts/:filename/report', async (req, res) => {
   const filename = req.params.filename;
   
   // Sanitize: reject if it contains '..' or has non-alphanumeric/underscore/hyphen/dot characters
@@ -252,15 +356,56 @@ app.get('/api/transcripts/:filename/report', (req, res) => {
   const reportFilename = filename.replace('.jsonl', '_report.md');
   const reportPath = path.join(transcriptsDir, reportFilename);
 
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Transcript file not found' });
-  }
-
-  if (!fs.existsSync(reportPath)) {
-    return res.status(404).json({ error: 'Report not yet generated' });
-  }
-
   try {
+    // 1. Try to fetch from Supabase first
+    const match = filename.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
+    if (match) {
+      const [_, botType, sessionId] = match;
+      const { data: session, error } = await supabase
+        .from('meeting_sessions')
+        .select('report_file_url, transcript_file_url')
+        .eq('session_id', sessionId)
+        .single();
+      
+      if (!error && session && session.report_file_url) {
+        const reportRes = await fetch(session.report_file_url);
+        if (reportRes.ok) {
+          const reportMarkdown = await reportRes.text();
+          
+          // Get transcript contents to calculate statistics
+          let lines = [];
+          if (session.transcript_file_url) {
+            const transRes = await fetch(session.transcript_file_url);
+            if (transRes.ok) {
+              const transText = await transRes.text();
+              lines = transText.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
+            }
+          }
+          
+          // Local fallback for transcript calculations if storage fails
+          if (lines.length === 0 && fs.existsSync(filePath)) {
+            const fileContent = fs.readFileSync(filePath, 'utf8');
+            lines = fileContent.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
+          }
+
+          const stats = calculateSpeakerStats(lines);
+          return res.json({
+            report: reportMarkdown,
+            analytics: stats.analytics
+          });
+        }
+      }
+    }
+
+    // 2. Fallback to local files if not in database
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Transcript file not found' });
+    }
+
+    if (!fs.existsSync(reportPath)) {
+      return res.status(404).json({ error: 'Report not yet generated' });
+    }
+
     const reportMarkdown = fs.readFileSync(reportPath, 'utf8');
     
     // Calculate speaker statistics from source .jsonl file for the progress bars

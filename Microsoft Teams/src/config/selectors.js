@@ -7,6 +7,9 @@ export const SELECTORS = {
     camToggle: 'button[role="checkbox"][aria-label*="video" i], button[aria-label*="camera" i], button[data-tid="prejoin-play-video"]',
     micToggle: 'button[role="checkbox"][aria-label*="microphone" i], button[aria-label*="mic" i], button[data-tid="prejoin-mute-mic"]',
     
+    // Pre-join: guest entry name input
+    nameInput: 'input[data-tid="prejoin-display-name"], input[placeholder*="name" i], input#username, input[type="text"]',
+    
     // Pre-join: join submission
     joinNowBtn: 'button[data-tid="prejoin-join-button"], button:has-text("Join now"), button[aria-label*="Join meeting" i]',
   },

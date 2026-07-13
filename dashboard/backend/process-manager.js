@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { saveSessionStart, saveSessionEnd } from './supabase-helper.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -78,7 +79,8 @@ class ProcessManager {
         '--url', meetingUrl,
         '--name', botName,
         '--output', outputPath,
-        '--capture', 'captions'
+        '--capture', 'captions',
+        '--guest'
       ];
       if (!isHeadless) {
         args.push('--headful');
@@ -100,6 +102,11 @@ class ProcessManager {
       cwd,
       env,
       shell: isWin // Important for Windows to execute node command pathing cleanly
+    });
+
+    // Log active session startup to Supabase asynchronously
+    saveSessionStart(sessionId, botType, meetingUrl, botName).catch(err => {
+      console.error(`[ProcessManager] Supabase saveSessionStart error:`, err.message);
     });
 
     const sessionInfo = {
@@ -147,6 +154,11 @@ class ProcessManager {
         sessionInfo.onStatusCallback('stopped');
       }
       this.activeSessions.delete(sessionId);
+
+      // Log session end and upload transcript to Supabase asynchronously
+      saveSessionEnd(sessionId, botType).catch(err => {
+        console.error(`[ProcessManager] Supabase saveSessionEnd error:`, err.message);
+      });
     });
 
     // If Teams bot, we also set up a file tail watcher on the output JSONL file as a backup/primary data source

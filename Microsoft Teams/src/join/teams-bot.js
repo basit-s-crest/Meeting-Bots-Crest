@@ -26,6 +26,7 @@ export class TeamsBot {
     this.context = null;
     this.page = null;
     this.isLoginMode = options.isLoginMode === true;
+    this.isGuest = options.isGuest === true;
   }
 
   /**
@@ -52,10 +53,12 @@ export class TeamsBot {
       launchOptions.channel = this.channel;
     }
 
-    console.log(`[TeamsBot] Launching browser (headless: ${this.headless}, channel: ${this.channel || 'default'})`);
+    console.log(`[TeamsBot] Launching browser (headless: ${this.headless}, channel: ${this.channel || 'default'}, guest: ${this.isGuest})`);
+
+    const loadSession = !this.isLoginMode && !this.isGuest;
 
     // Strict startup verification: fail early if credentials/session file is missing in normal mode
-    if (!this.isLoginMode) {
+    if (loadSession) {
       if (!fs.existsSync(this.authPath)) {
         console.error(`\n[TeamsBot] ERROR: Saved session file (auth.json) not found at expected path: ${this.authPath}`);
         console.error('[TeamsBot] To create this session, please run first:');
@@ -73,7 +76,7 @@ export class TeamsBot {
       viewport: { width: 1280, height: 720 },
     };
 
-    if (!this.isLoginMode) {
+    if (loadSession) {
       console.log(`[TeamsBot] Loading session state from ${this.authPath}`);
       contextOptions.storageState = this.authPath;
     }
@@ -101,13 +104,16 @@ export class TeamsBot {
     // 1. Bypass "Open Microsoft Teams" landing page to use the web client
     await this.bypassAppLandingPage();
 
-    // 2. Disable camera and microphone in the pre-join lobby
+    // 2. Handle guest entry name input if in guest mode
+    await this.handleNameInput();
+
+    // 3. Disable camera and microphone in the pre-join lobby
     await this.handleMediaToggles();
 
-    // 3. Click "Join now"
+    // 4. Click "Join now"
     await this.clickJoinNow();
 
-    // 4. Handle lobby wait / admission
+    // 5. Handle lobby wait / admission
     await this.handleLobbyAdmission();
   }
 
@@ -127,6 +133,24 @@ export class TeamsBot {
       await this.page.waitForTimeout(5000);
     } catch (e) {
       console.log('[TeamsBot] No web client join button visible or already bypassed.');
+    }
+  }
+
+  /**
+   * Enters the guest display name if the name input field is visible.
+   */
+  async handleNameInput() {
+    if (!this.isGuest) return;
+
+    console.log('[TeamsBot] Checking for guest display name input field...');
+    try {
+      const selector = SELECTORS.join.nameInput;
+      await this.page.waitForSelector(selector, { timeout: 10000 });
+      console.log(`[TeamsBot] Guest name input found. Typing bot name: ${this.botName}`);
+      await this.page.fill(selector, this.botName);
+      await this.page.waitForTimeout(1000);
+    } catch (err) {
+      console.warn('[TeamsBot] Guest name input field not found or not interactable:', err.message);
     }
   }
 
