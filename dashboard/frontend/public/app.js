@@ -599,7 +599,7 @@ async function openReportFlow(fileName, button) {
       const data = await res.json();
       showReport(fileName, data);
     } else if (res.status === 404) {
-      const confirmGen = confirm('No report exists for this session. Would you like to generate one using Gemini? This may take several seconds.');
+      const confirmGen = confirm('No report exists for this session. Would you like to generate one using Groq AI? This may take several seconds.');
       if (confirmGen) {
         button.textContent = 'Generating...';
         

@@ -27,19 +27,26 @@ export class AudioChunker {
   }
 
   addSpeakerEvent({ speaker, timestamp }) {
-    // Close off the previous speaker interval at exactly this timestamp
+    // The DOM poll detects a speaker change with some latency (poll interval + debounce).
+    // To prevent User B's early chunks being attributed to User A, we back-date the
+    // previous speaker's end time by the approximate detection lag (poll interval = 150ms).
+    // This shifts the speaker boundary earlier so transition chunks go to the new speaker.
+    const DETECTION_LAG_MS = 150; // matches pollInterval in SpeakerDetector
+    const adjustedTimestamp = timestamp - DETECTION_LAG_MS;
+
+    // Close off the previous speaker interval at the adjusted (earlier) timestamp
     if (this.speakerHistory.length > 0) {
-      this.speakerHistory[this.speakerHistory.length - 1].endTime = timestamp;
+      this.speakerHistory[this.speakerHistory.length - 1].endTime = adjustedTimestamp;
     }
 
     if (speaker) {
       this.currentSpeaker = speaker;
-      this.speakerHistory.push({ speaker, startTime: timestamp, endTime: null });
+      // New speaker's interval starts at the adjusted (earlier) boundary
+      this.speakerHistory.push({ speaker, startTime: adjustedTimestamp, endTime: null });
     }
     // null speaker = silence gap — we close A's interval above but don't push
     // a null entry. The gap chunks will have no speaker match in getSpeakerForWindow,
-    // which is correct — the deepgram-proxy fallback then uses nearest-chunk (1.5s
-    // tolerance) to assign the new speaker B rather than reaching back to A.
+    // which is correct.
 
     // Keep last 30 seconds of history
     const cutoff = timestamp - 30000;

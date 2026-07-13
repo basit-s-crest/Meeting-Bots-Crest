@@ -14,8 +14,8 @@ import { generateFirefliesReport, calculateSpeakerStats } from './report-generat
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load env file from the root directory
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+// Load env file from the root directory (override: true ensures .env values take precedence over system env vars)
+dotenv.config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 console.log(`[Server] Loaded Deepgram API Key: ${DEEPGRAM_API_KEY ? 'Present (Configured)' : 'Missing'}`);
@@ -227,9 +227,9 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
   } catch (err) {
     console.error(`[Server] Report generation failed for ${filename}:`, err.message);
     
-    if (err.message.includes('GEMINI_API_KEY not set')) {
-      return res.status(503).json({ error: 'GEMINI_API_KEY not set in .env' });
-    } else if (err.message.includes('Gemini API Error')) {
+    if (err.message.includes('GROQ_API_KEY not set')) {
+      return res.status(503).json({ error: 'GROQ_API_KEY not set in .env' });
+    } else if (err.message.includes('Groq API Error')) {
       return res.status(503).json({ error: err.message });
     }
     res.status(500).json({ error: `Report generation failed: ${err.message}` });

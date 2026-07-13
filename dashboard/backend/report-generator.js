@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import Groq from 'groq-sdk';
 
 /**
  * Calculates word counts and talk-time percentages from transcript lines.
@@ -87,16 +87,16 @@ export function calculateSpeakerStats(lines) {
 }
 
 /**
- * Generates the full Fireflies-style markdown report using Gemini 2.5 Flash.
+ * Generates the full Fireflies-style markdown report using Groq (Llama 3.3 70B).
  * 
  * @param {string} transcriptPath - File path to the source .jsonl file.
  * @returns {Promise<string>} The generated markdown content.
  */
 export async function generateFirefliesReport(transcriptPath) {
-  // Ensure GEMINI_API_KEY is configured
-  const apiKey = process.env.GEMINI_API_KEY;
+  // Ensure GROQ_API_KEY is configured
+  const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY not set in .env');
+    throw new Error('GROQ_API_KEY not set in .env');
   }
 
   // Read and parse transcript file
@@ -142,25 +142,40 @@ Include a markdown table representing tasks assigned during the meeting:
 | Task Description | Assignee | Priority |
 | :--- | :--- | :--- |
 | [Detail of task] | [Full Name of Assignee] | [High/Medium/Low] |
-(If no tasks or action items were assigned, state "No action items were assigned.")
+(If no tasks or action items were assigned, state "No action items were assigned.")`;
 
-Here is the meeting transcript to summarize:
-${formattedTranscript}`;
-
-  // Call the Gemini API
+  // Call the Groq API
   let aiTextResponse = '';
   try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    const groq = new Groq({ apiKey });
     
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: systemPrompt }] }]
-    });
+    // Retry logic — Groq intermittently returns 'organization_restricted' under load
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const completion = await groq.chat.completions.create({
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `Here is the meeting transcript to summarize:\n${formattedTranscript}` }
+          ],
+          model: 'llama-3.3-70b-versatile',
+          temperature: 0.4,
+          max_tokens: 4096,
+        });
 
-    const response = await result.response;
-    aiTextResponse = response.text();
+        aiTextResponse = completion.choices[0]?.message?.content || '';
+        break; // Success — exit retry loop
+      } catch (retryErr) {
+        console.warn(`[ReportGenerator] Groq attempt ${attempt}/${maxRetries} failed: ${retryErr.message}`);
+        if (attempt === maxRetries) {
+          throw retryErr;
+        }
+        // Exponential backoff: 2s, 4s
+        await new Promise(r => setTimeout(r, 2000 * attempt));
+      }
+    }
   } catch (err) {
-    throw new Error(`Gemini API Error: ${err.message}`);
+    throw new Error(`Groq API Error: ${err.message}`);
   }
 
   // Compile final markdown report with Speaker Analytics header

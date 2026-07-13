@@ -146,22 +146,43 @@ class DeepgramProxy {
     }
 
     // 2. Gap fallback — timestamp falls between speaker intervals (transition window).
-    //    Find the NEAREST chunk with a speaker, but cap tolerance at 1.5s.
-    //    Prefer the chunk AFTER the gap (the new speaker) over the chunk BEFORE (old
-    //    speaker) by searching forward-first when the timestamp is past a chunk's end.
-    let bestChunk = null;
-    let bestDist = Infinity;
+    //    At speaker transitions, Deepgram may return a transcript whose `start` time
+    //    lands slightly before the new speaker's first chunk (processing latency).
+    //    Strategy: prefer the UPCOMING speaker (chunk whose start_ts is just ahead of
+    //    or equal to the transcript time) over the PREVIOUS speaker, within tolerance.
+    //    This prevents User B's first 1-2 chunks being attributed to User A.
+
+    const TRANSITION_TOLERANCE_SEC = 1.5;
+
+    // 2a. Look for a chunk that starts soon AFTER the transcript time (upcoming speaker).
+    //     This handles the case where Deepgram returns a result just before the new
+    //     speaker's chunk is registered.
+    let upcomingChunk = null;
+    let upcomingDist = Infinity;
+    for (let i = 0; i < history.length; i++) {
+      const c = history[i];
+      if (!c.speaker) continue;
+      // Chunk starts after or at the transcript time
+      if (c.start_ts >= absoluteTimeSec) {
+        const dist = c.start_ts - absoluteTimeSec;
+        if (dist < upcomingDist && dist <= TRANSITION_TOLERANCE_SEC) {
+          upcomingDist = dist;
+          upcomingChunk = c;
+        }
+      }
+    }
+    if (upcomingChunk) return upcomingChunk.speaker;
+
+    // 2b. Look for the most recent chunk that ended just before the transcript time.
+    //     Capped to TRANSITION_TOLERANCE_SEC to avoid stale attribution.
     for (let i = history.length - 1; i >= 0; i--) {
       const c = history[i];
       if (!c.speaker) continue;
-      const mid = (c.start_ts + c.end_ts) / 2;
-      const dist = Math.abs(absoluteTimeSec - mid);
-      if (dist < bestDist && dist <= 1.5) {
-        bestDist = dist;
-        bestChunk = c;
+      const gap = absoluteTimeSec - c.end_ts;
+      if (gap >= 0 && gap <= TRANSITION_TOLERANCE_SEC) {
+        return c.speaker;
       }
     }
-    if (bestChunk) return bestChunk.speaker;
 
     // 3. Last resort — most recent non-null speaker (capped at 2s ago to avoid
     //    stale attribution after a long silence).
