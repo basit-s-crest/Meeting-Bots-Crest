@@ -22,6 +22,16 @@ export class BotLifecycle {
     this.channel = config.channel || null;
     this.userDataDir = config.userDataDir || null;
     
+    // Audio processing configuration
+    this.audioProcessingConfig = {
+      enableAudioProcessing: config.enableAudioProcessing !== false,
+      enableVAD: config.enableVAD !== false,
+      enableNoiseReduction: config.enableNoiseReduction !== false,
+      enableNormalization: config.enableNormalization !== false,
+      enableAntiAliasing: config.enableAntiAliasing !== false,
+      enableAudioDiarization: config.enableAudioDiarization !== false
+    };
+    
     this.bot = null;
     this.audioCapture = null;
     this.speakerDetector = null;
@@ -127,18 +137,35 @@ export class BotLifecycle {
   }
 
   async initializeCapture() {
-    // 1. Set up chunker & output callbacks linking to already running output
-    this.chunker = new AudioChunker();
+    // 1. Set up chunker with audio processing options & output callbacks linking to already running output
+    this.chunker = new AudioChunker(this.audioProcessingConfig);
     this.chunker.onChunk = (chunk) => this.output?.send(chunk);
+
+    // Log audio processing configuration
+    console.log('[Lifecycle] Audio Processing Configuration:', this.audioProcessingConfig);
 
     // 2. Set callbacks on pre-initialized audio interceptor
     this.audioCapture.setCallbacks({
       onFrame: (frame) => this.chunker.addAudioFrame(frame),
       onError: (err) => console.error('[Lifecycle] Audio capture error:', err),
+      onRMSUpdate: (trackId, rms) => this.audioCapture.onRMSUpdate(trackId, rms),
     });
+    
+    // Set RMS callback on chunker to report back to audio capture for liveness tracking
+    this.chunker.onRMSUpdate = (trackId, rms) => {
+      this.audioCapture.onRMSUpdate(trackId, rms);
+    };
 
-    // 3. Set callback on pre-initialized speaker observer
-    this.speakerDetector.setCallback((data) => this.chunker.addSpeakerEvent(data));
+    // 3. Set callback on pre-initialized speaker observer with audio diarization sync
+    this.speakerDetector.setCallback((data) => {
+      // Add confidence and source to DOM-based speaker events
+      this.chunker.addSpeakerEvent({
+        speaker: data.speaker,
+        timestamp: data.timestamp,
+        confidence: data.confidence || 1.0,
+        source: 'dom'
+      });
+    });
 
     // 4. Click the Audio Join button (satisfies autoplay permissions and connects stream)
     const audioConnected = await this.bot.connectAudio();
@@ -149,7 +176,7 @@ export class BotLifecycle {
     // 5. Start captures
     await this.audioCapture.start();
     await this.speakerDetector.start();
-    console.log('[Lifecycle] Capture initialized and active');
+    console.log('[Lifecycle] Capture initialized and active with enhanced audio processing');
 
     // Diagnostic: take a screenshot of the active call after 10 seconds to inspect the view layout
     const page = this.bot.getPage();
@@ -164,6 +191,14 @@ export class BotLifecycle {
         console.error('[Lifecycle] Diagnostic screenshot failed:', e.message);
       }
     }, 10000);
+    
+    // Periodic statistics logging
+    setInterval(() => {
+      if (this.state === 'capturing') {
+        const stats = this.chunker.getStats();
+        console.log(`[Lifecycle] Stats - Chunks: ${stats.totalChunks}, Voice: ${stats.voiceChunks}, Silence: ${stats.silenceChunks}, Avg Gain: ${stats.avgGain.toFixed(2)}x`);
+      }
+    }, 30000); // Every 30 seconds
   }
 
   async stop() {
