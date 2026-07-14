@@ -8,6 +8,10 @@ window.speakerDetector = {
   lastCheckTime: 0,
   onSpeakerChange: null,
   isRunning: false,
+  speakerPersistence: new Map(), // Track speaker IDs across disconnects
+  speakerConfidence: 1.0,
+  consecutiveDetections: 0,
+  minConsecutiveForConfidence: 3,
 
   start(onChangeCallback) {
     this.onSpeakerChange = onChangeCallback;
@@ -50,6 +54,7 @@ window.speakerDetector = {
   checkSpeakerChange() {
     console.log('[Speaker Detector Hook] Running checkSpeakerChange() on: ' + window.location.href);
     let foundSpeaker = null;
+    let detectionMethod = null;
 
     // Strategy 1: Check for active speaker indicator banner or text in the DOM
     const talkingIndicator = document.querySelector('[class*="talking-indicator"], [class*="active-speaker-name"], .talking-indicator');
@@ -69,6 +74,7 @@ window.speakerDetector = {
           console.log('[Speaker Detector Hook] Strategy 1 found indicator for BOT: ' + candidateName + ' (skipped)');
         } else {
           foundSpeaker = candidateName;
+          detectionMethod = 'banner';
           console.log('[Speaker Detector Hook] Strategy 1 found indicator: ' + text + ' -> speaker: ' + foundSpeaker);
         }
       }
@@ -85,6 +91,7 @@ window.speakerDetector = {
       if (activeTile) {
         foundSpeaker = this.getParticipantName(activeTile);
         if (foundSpeaker) {
+          detectionMethod = 'active-tile';
           console.log('[Speaker Detector Hook] Strategy 2 found active tile (' + activeTile.className + ') -> speaker: ' + foundSpeaker);
         } else {
           console.log('[Speaker Detector Hook] Strategy 2 found active tile class but name was null/excluded.');
@@ -100,6 +107,7 @@ window.speakerDetector = {
         if (row) {
           foundSpeaker = this.getParticipantName(row);
           if (foundSpeaker) {
+            detectionMethod = 'mic-icon';
             console.log('[Speaker Detector Hook] Strategy 3 found active mic container -> speaker: ' + foundSpeaker);
           }
         }
@@ -108,14 +116,78 @@ window.speakerDetector = {
 
     console.log('[Speaker Detector Hook] checkSpeakerChange final result: ' + foundSpeaker);
     const now = Date.now();
+    
+    // Handle speaker changes with confidence tracking
     if (foundSpeaker !== this.currentSpeaker) {
       if (now - this.lastChangeTime > ${TIMEOUTS.speakerDebounce}) {
-        console.log('[Speaker Detector Hook] Emitting speaker change from ' + this.currentSpeaker + ' to ' + foundSpeaker);
+        // Apply speaker persistence (check if this is a returning speaker)
+        const persistentId = this.getSpeakerPersistentId(foundSpeaker);
+        
+        // Update consecutive detection counter
+        if (foundSpeaker) {
+          this.consecutiveDetections++;
+        } else {
+          this.consecutiveDetections = 0;
+        }
+        
+        // Calculate confidence based on consecutive detections
+        this.speakerConfidence = foundSpeaker ? 
+          Math.min(1.0, this.consecutiveDetections / this.minConsecutiveForConfidence) : 
+          0;
+        
+        console.log('[Speaker Detector Hook] Emitting speaker change from ' + this.currentSpeaker + ' to ' + foundSpeaker + ' (confidence: ' + (this.speakerConfidence * 100).toFixed(0) + '%, method: ' + detectionMethod + ')');
         this.currentSpeaker = foundSpeaker;
         this.lastChangeTime = now;
-        this.onSpeakerChange?.({ speaker: foundSpeaker, timestamp: now });
+        
+        this.onSpeakerChange?.({ 
+          speaker: foundSpeaker, 
+          timestamp: now,
+          confidence: this.speakerConfidence,
+          method: detectionMethod,
+          persistentId: persistentId
+        });
+      }
+    } else if (foundSpeaker) {
+      // Same speaker, increase confidence
+      this.consecutiveDetections++;
+      const newConfidence = Math.min(1.0, this.consecutiveDetections / this.minConsecutiveForConfidence);
+      
+      // Emit confidence update if significantly changed
+      if (Math.abs(newConfidence - this.speakerConfidence) > 0.2) {
+        this.speakerConfidence = newConfidence;
+        this.onSpeakerChange?.({ 
+          speaker: foundSpeaker, 
+          timestamp: now,
+          confidence: this.speakerConfidence,
+          method: detectionMethod,
+          persistentId: this.getSpeakerPersistentId(foundSpeaker)
+        });
       }
     }
+  },
+  
+  getSpeakerPersistentId(speakerName) {
+    if (!speakerName) return null;
+    
+    // Check if we've seen this speaker before
+    if (this.speakerPersistence.has(speakerName)) {
+      const data = this.speakerPersistence.get(speakerName);
+      data.lastSeen = Date.now();
+      data.appearances++;
+      return data.id;
+    }
+    
+    // New speaker, assign persistent ID
+    const id = 'speaker_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    this.speakerPersistence.set(speakerName, {
+      id: id,
+      firstSeen: Date.now(),
+      lastSeen: Date.now(),
+      appearances: 1
+    });
+    
+    console.log('[Speaker Detector Hook] Assigned persistent ID ' + id + ' to speaker: ' + speakerName);
+    return id;
   },
 
   getParticipantRawName(el) {
@@ -166,6 +238,14 @@ window.speakerDetector = {
     this.observer?.disconnect();
     this.observer = null;
     console.log('[Speaker Detector Hook] Stopped');
+    
+    // Log speaker persistence statistics
+    if (this.speakerPersistence.size > 0) {
+      console.log('[Speaker Detector Hook] Speaker Persistence Summary:');
+      this.speakerPersistence.forEach((data, name) => {
+        console.log('  ' + name + ' (ID: ' + data.id + '): ' + data.appearances + ' appearances');
+      });
+    }
   }
 };
 
