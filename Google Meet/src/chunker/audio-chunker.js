@@ -11,10 +11,26 @@ export class AudioChunker {
     this.currentSpeaker = null;
     this.speakerHistory = []; // { speaker, startTime, endTime }
     this.chunkId = 0;
-    this.startTime = Date.now();
+    this.bufferTimelineStart = null;
   }
 
   addAudioFrame(frame) {
+    const now = Date.now();
+    const frameSamples = frame.data.length;
+    const frameDurationMs = (frameSamples / frame.sampleRate) * 1000;
+
+    if (this.buffer.length === 0 || !this.bufferTimelineStart) {
+      this.bufferTimelineStart = now - frameDurationMs;
+    } else {
+      const expectedEnd = this.bufferTimelineStart + (this.buffer.length / SAMPLE_RATE) * 1000;
+      const delay = now - expectedEnd;
+      if (delay > 1000) {
+        console.log(`[AudioChunker] Audio gap of ${delay.toFixed(0)}ms detected. Flushing current buffer.`);
+        this.flush();
+        this.bufferTimelineStart = now - frameDurationMs;
+      }
+    }
+
     const newData = new Int16Array(frame.data);
     const newBuffer = new Int16Array(this.buffer.length + newData.length);
     newBuffer.set(this.buffer);
@@ -57,8 +73,13 @@ export class AudioChunker {
     const chunkData = this.buffer.slice(0, FRAMES_PER_CHUNK);
     this.buffer = this.buffer.slice(FRAMES_PER_CHUNK);
 
-    const chunkStart = this.startTime + (this.chunkId * CHUNK_MS);
-    const chunkEnd = chunkStart + CHUNK_MS;
+    const chunkDurationMs = (chunkData.length / SAMPLE_RATE) * 1000;
+    const chunkStart = this.bufferTimelineStart;
+    const chunkEnd = chunkStart + chunkDurationMs;
+    
+    // Advance timeline for the remaining buffer
+    this.bufferTimelineStart = chunkEnd;
+
     const speaker = this.getSpeakerForWindow(chunkStart, chunkEnd);
 
     // Calculate RMS energy of the Int16 samples

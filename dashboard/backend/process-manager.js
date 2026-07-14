@@ -96,7 +96,7 @@ class ProcessManager {
     console.log(`[ProcessManager] Working directory: ${cwd}`);
 
     // Ensure we preserve env variables but can override HEADLESS if necessary
-    const env = { ...process.env, HEADLESS: headlessFlag };
+    const env = { ...process.env, HEADLESS: headlessFlag, PARENT_PID: String(process.pid) };
 
     const child = spawn(nodeCmd, args, {
       cwd,
@@ -244,8 +244,24 @@ class ProcessManager {
         resolve();
       });
 
-      // Try SIGINT first (lets bot flush output files/gracefully leave)
-      child.kill('SIGINT');
+      // Try graceful stdin stop first
+      if (child.stdin && child.stdin.writable) {
+        console.log(`[ProcessManager] Sending graceful stop command to session ${sessionId} stdin`);
+        child.stdin.write('stop\n');
+      } else {
+        // Try SIGINT (fallback)
+        child.kill('SIGINT');
+      }
+
+      // Fallback SIGINT in case stdin didn't trigger exit immediately
+      setTimeout(() => {
+        if (!killed) {
+          console.log(`[ProcessManager] Graceful stop did not exit yet, sending SIGINT to ${sessionId}`);
+          try {
+            child.kill('SIGINT');
+          } catch {}
+        }
+      }, 1500);
 
       // Force kill fallback after 5 seconds
       setTimeout(() => {

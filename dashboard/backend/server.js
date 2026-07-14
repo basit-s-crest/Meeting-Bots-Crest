@@ -263,20 +263,24 @@ app.get('/api/transcripts/:filename', async (req, res) => {
     // 1. Try to fetch from Supabase storage URL
     const match = filename.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
     if (match) {
-      const [_, botType, sessionId] = match;
-      const { data: session, error } = await supabase
-        .from('meeting_sessions')
-        .select('transcript_file_url')
-        .eq('session_id', sessionId)
-        .single();
-      
-      if (!error && session && session.transcript_file_url) {
-        const fetchRes = await fetch(session.transcript_file_url);
-        if (fetchRes.ok) {
-          const content = await fetchRes.text();
-          const lines = content.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
-          return res.json({ lines });
+      try {
+        const [_, botType, sessionId] = match;
+        const { data: session, error } = await supabase
+          .from('meeting_sessions')
+          .select('transcript_file_url')
+          .eq('session_id', sessionId)
+          .single();
+        
+        if (!error && session && session.transcript_file_url) {
+          const fetchRes = await fetch(session.transcript_file_url);
+          if (fetchRes.ok) {
+            const content = await fetchRes.text();
+            const lines = content.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
+            return res.json({ lines });
+          }
         }
+      } catch (dbErr) {
+        console.warn(`[Server] Supabase transcript fetch failed for ${filename}, falling back to local files:`, dbErr.message);
       }
     }
 
@@ -360,40 +364,44 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
     // 1. Try to fetch from Supabase first
     const match = filename.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
     if (match) {
-      const [_, botType, sessionId] = match;
-      const { data: session, error } = await supabase
-        .from('meeting_sessions')
-        .select('report_file_url, transcript_file_url')
-        .eq('session_id', sessionId)
-        .single();
-      
-      if (!error && session && session.report_file_url) {
-        const reportRes = await fetch(session.report_file_url);
-        if (reportRes.ok) {
-          const reportMarkdown = await reportRes.text();
-          
-          // Get transcript contents to calculate statistics
-          let lines = [];
-          if (session.transcript_file_url) {
-            const transRes = await fetch(session.transcript_file_url);
-            if (transRes.ok) {
-              const transText = await transRes.text();
-              lines = transText.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
+      try {
+        const [_, botType, sessionId] = match;
+        const { data: session, error } = await supabase
+          .from('meeting_sessions')
+          .select('report_file_url, transcript_file_url')
+          .eq('session_id', sessionId)
+          .single();
+        
+        if (!error && session && session.report_file_url) {
+          const reportRes = await fetch(session.report_file_url);
+          if (reportRes.ok) {
+            const reportMarkdown = await reportRes.text();
+            
+            // Get transcript contents to calculate statistics
+            let lines = [];
+            if (session.transcript_file_url) {
+              const transRes = await fetch(session.transcript_file_url);
+              if (transRes.ok) {
+                const transText = await transRes.text();
+                lines = transText.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
+              }
             }
-          }
-          
-          // Local fallback for transcript calculations if storage fails
-          if (lines.length === 0 && fs.existsSync(filePath)) {
-            const fileContent = fs.readFileSync(filePath, 'utf8');
-            lines = fileContent.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
-          }
+            
+            // Local fallback for transcript calculations if storage fails
+            if (lines.length === 0 && fs.existsSync(filePath)) {
+              const fileContent = fs.readFileSync(filePath, 'utf8');
+              lines = fileContent.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
+            }
 
-          const stats = calculateSpeakerStats(lines);
-          return res.json({
-            report: reportMarkdown,
-            analytics: stats.analytics
-          });
+            const stats = calculateSpeakerStats(lines);
+            return res.json({
+              report: reportMarkdown,
+              analytics: stats.analytics
+            });
+          }
         }
+      } catch (dbErr) {
+        console.warn(`[Server] Supabase report fetch failed for ${filename}, falling back to local files:`, dbErr.message);
       }
     }
 
