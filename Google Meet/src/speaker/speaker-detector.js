@@ -20,6 +20,8 @@ export class SpeakerDetector {
     this.lastChangeTime = 0;
     this.pollInterval = null;
     this.botParticipantId = null; // Set once detected, then excluded permanently
+    this.emptyCallback = null;
+    this.solitudeTicks = 0;
   }
 
   async initialize() {
@@ -46,6 +48,10 @@ export class SpeakerDetector {
 
   setCallback(callback) {
     this.callback = callback;
+  }
+
+  setEmptyCallback(callback) {
+    this.emptyCallback = callback;
   }
 
   /**
@@ -94,6 +100,7 @@ export class SpeakerDetector {
       const botId = this.botParticipantId;
 
       const result = await this.page.evaluate((excludeId) => {
+        const participantCount = document.querySelectorAll('[data-participant-id]').length;
 
         function getNameFromTile(tile) {
           const moreBtn = tile.querySelector('[aria-label^="More options for"]');
@@ -122,7 +129,7 @@ export class SpeakerDetector {
           if (excludeId && tileId === excludeId) continue;
 
           const name = getNameFromTile(tile);
-          if (name) return { speaker: name, strategy: 'KUNJSe' };
+          if (name) return { speaker: name, strategy: 'KUNJSe', participantCount };
         }
 
         // ── Strategy 2: Mic-live fallback ─────────────────────────────────────
@@ -134,20 +141,36 @@ export class SpeakerDetector {
           for (const el of tile.querySelectorAll('[aria-label]')) {
             const lbl = el.getAttribute('aria-label') || '';
             const m = lbl.match(/^You can't remotely mute (.+?)'s microphone$/i);
-            if (m) return { speaker: m[1].trim(), strategy: 'mic-live' };
+            if (m) return { speaker: m[1].trim(), strategy: 'mic-live', participantCount };
             const m2 = lbl.match(/^Mute (.+)$/i);
             if (m2 && m2[1].trim().length > 1) {
-              return { speaker: m2[1].trim(), strategy: 'mute-btn' };
+              return { speaker: m2[1].trim(), strategy: 'mute-btn', participantCount };
             }
           }
         }
 
-        return null;
+        return { speaker: null, strategy: 'silence', participantCount };
 
       }, botId);
 
       const foundSpeaker = result ? result.speaker : null;
+      const participantCount = result ? result.participantCount : 0;
       const now = Date.now();
+
+      // Check for solitude (empty meeting)
+      if (this.botParticipantId && participantCount <= 1) {
+        this.solitudeTicks++;
+        // 200 ticks * 150ms = 30 seconds
+        if (this.solitudeTicks >= 200) {
+          console.warn(`[SpeakerDetector] Bot has been alone in the meeting for 30 seconds. Triggering empty meeting exit...`);
+          this.solitudeTicks = 0; // reset
+          if (this.emptyCallback) {
+            this.emptyCallback();
+          }
+        }
+      } else {
+        this.solitudeTicks = 0;
+      }
 
       if (foundSpeaker !== this.currentSpeaker) {
         if (now - this.lastChangeTime > TIMEOUTS.speakerDebounce) {

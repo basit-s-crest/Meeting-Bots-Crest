@@ -155,6 +155,11 @@ export class BotLifecycle {
       this.chunker.addSpeakerEvent(data);
     });
 
+    this.speakerDetector.setEmptyCallback(() => {
+      console.log('[BotLifecycle] Meeting is empty (only the bot remains). Shutting down bot...');
+      this.stop();
+    });
+
     // Start with retry logic for audio capture
     await this.startAudioWithRetry();
     await this.speakerDetector.start();

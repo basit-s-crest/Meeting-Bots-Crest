@@ -113,6 +113,38 @@ async function main() {
     userDataDir: config.userDataDir,
   });
 
+  // Monitor parent process death
+  const parentPid = parseInt(process.env.PARENT_PID || process.ppid, 10);
+  if (parentPid) {
+    const checkParentInterval = setInterval(async () => {
+      try {
+        process.kill(parentPid, 0);
+      } catch (err) {
+        console.warn(`[Bot] Parent process ${parentPid} detected dead. Shutting down gracefully...`);
+        clearInterval(checkParentInterval);
+        if (lifecycle) {
+          await lifecycle.stop().catch(() => {});
+        }
+        process.exit(0);
+      }
+    }, 2000);
+    checkParentInterval.unref();
+  }
+
+  // Listen for graceful stop command on stdin
+  if (!config.login) {
+    process.stdin.on('data', async (data) => {
+      const text = data.toString().trim();
+      if (text === 'stop') {
+        console.log('[Bot] Received stop command on stdin. Shutting down gracefully...');
+        if (lifecycle) {
+          await lifecycle.stop().catch(() => {});
+        }
+        process.exit(0);
+      }
+    });
+  }
+
   lifecycle.onStateChange((state) => console.log(`State: ${state}`));
 
   process.on('SIGINT', async () => {

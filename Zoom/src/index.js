@@ -39,6 +39,13 @@ function parseArgs() {
     headless: process.env.HEADLESS !== 'false',
     channel: process.env.BROWSER_CHANNEL || null,
     userDataDir: process.env.USER_DATA_DIR || null,
+    // Audio processing options
+    enableAudioProcessing: process.env.ENABLE_AUDIO_PROCESSING !== 'false',
+    enableVAD: process.env.ENABLE_VAD !== 'false',
+    enableNoiseReduction: process.env.ENABLE_NOISE_REDUCTION !== 'false',
+    enableNormalization: process.env.ENABLE_NORMALIZATION !== 'false',
+    enableAntiAliasing: process.env.ENABLE_ANTI_ALIASING !== 'false',
+    enableAudioDiarization: process.env.ENABLE_AUDIO_DIARIZATION !== 'false'
   };
 
   const args = process.argv.slice(2);
@@ -74,6 +81,24 @@ function parseArgs() {
       case '--user-data-dir':
         config.userDataDir = args[++i];
         break;
+      case '--disable-audio-processing':
+        config.enableAudioProcessing = false;
+        break;
+      case '--disable-vad':
+        config.enableVAD = false;
+        break;
+      case '--disable-noise-reduction':
+        config.enableNoiseReduction = false;
+        break;
+      case '--disable-normalization':
+        config.enableNormalization = false;
+        break;
+      case '--disable-anti-aliasing':
+        config.enableAntiAliasing = false;
+        break;
+      case '--disable-audio-diarization':
+        config.enableAudioDiarization = false;
+        break;
     }
   }
 
@@ -104,6 +129,13 @@ async function main() {
     headless: config.headless,
     channel: config.channel,
     userDataDir: config.userDataDir,
+    // Audio processing configuration
+    enableAudioProcessing: config.enableAudioProcessing,
+    enableVAD: config.enableVAD,
+    enableNoiseReduction: config.enableNoiseReduction,
+    enableNormalization: config.enableNormalization,
+    enableAntiAliasing: config.enableAntiAliasing,
+    enableAudioDiarization: config.enableAudioDiarization
   });
 
   lifecycle.onStateChange((state) => console.log(`[Lifecycle State Change] => ${state}`));

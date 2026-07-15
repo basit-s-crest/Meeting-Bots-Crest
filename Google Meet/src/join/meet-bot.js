@@ -257,6 +257,14 @@ export class MeetBot {
         );
       }
 
+      // Check for "Switch here" button (appears if the bot is already in the call in another context)
+      const switchBtn = await this.page.$('button:has-text("Switch here"), div[role="button"]:has-text("Switch here")');
+      if (switchBtn && await switchBtn.isVisible()) {
+        console.log('[MeetBot] Detected "Switch here" button. Clicking to switch session...');
+        await switchBtn.click();
+        await this.page.waitForTimeout(3000);
+      }
+
       const selectors = [
         'button:has-text("Ask to join")',
         'button:has-text("Join now")',
