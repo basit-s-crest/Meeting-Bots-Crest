@@ -1,5 +1,16 @@
 import { ICapture } from './capture-interface.js';
 import { SELECTORS } from '../config/selectors.js';
+import fs from 'fs';
+
+function logDebug(message) {
+  const logMsg = `[${new Date().toISOString()}] ${message}\n`;
+  console.log(message);
+  try {
+    fs.appendFileSync('C:\\Users\\IshitaBhojani\\Meeting-Bots-Crest\\dashboard\\backend\\transcripts\\captions_debug.log', logMsg, 'utf8');
+  } catch (e) {
+    // Ignore
+  }
+}
 
 const BROWSER_SCRAPER_SCRIPT = `
 window.teamsCaptionScraper = {
@@ -59,7 +70,12 @@ window.teamsCaptionScraper = {
     if (!this.isRunning) return;
 
     // Find all compact chat messages/caption elements
-    const blocks = Array.from(document.querySelectorAll('.fui-ChatMessageCompact, [data-tid="closed-caption-v2-message"], [class*="ChatMessageCompact" i]'));
+    let blocks = Array.from(document.querySelectorAll('.fui-ChatMessageCompact, [data-tid="closed-caption-v2-message"], [class*="ChatMessageCompact" i]'));
+
+    // Filter out nested blocks to prevent duplicate matching (e.g. fui-ChatMessageCompact__body matching wildcards)
+    blocks = blocks.filter(block => {
+      return !blocks.some(otherBlock => otherBlock !== block && otherBlock.contains(block));
+    });
 
     if (blocks.length > 0 && !this.hasDumpedOuterHTML) {
       const container = document.querySelector('[data-tid="closed-caption-renderer-wrapper"], [data-tid="closed-caption-v2-window-wrapper"], div.captions-render-area, div[class*="captions-container" i]');
@@ -80,7 +96,7 @@ window.teamsCaptionScraper = {
       // Find speaker element using distinct child selectors
       const speakerEl = block.querySelector('.fui-ChatMessageCompact__author, [data-tid="author"], [data-tid="closed-caption-v2-author"], .caption-speaker, .___1hdoxqz, span[class*="speaker" i], div[class*="speaker" i], span[class*="author" i], div[class*="author" i], strong');
       // Find text element using distinct child selectors
-      const textEl = block.querySelector('.fui-ChatMessageCompact__body, [data-tid="content"], [data-tid="closed-caption-v2-content"], .caption-text, div[class*="caption-text" i], span[class*="caption-text" i], span[class*="body" i], div[class*="body" i], span[class*="content" i], div[class*="content" i]');
+      const textEl = block.querySelector('[data-tid="closed-caption-text"], .fui-ChatMessageCompact__body, [data-tid="content"], [data-tid="closed-caption-v2-content"], .caption-text, div[class*="caption-text" i], span[class*="caption-text" i], span[class*="body" i], div[class*="body" i], span[class*="content" i], div[class*="content" i]');
 
       if (speakerEl && textEl) {
         const speaker = speakerEl.textContent.trim();
@@ -199,6 +215,9 @@ export class CaptionScraper extends ICapture {
   }
 
   async start() {
+    logDebug('[CaptionScraper] Waiting 5 seconds for call interface to settle...');
+    await this.page.waitForTimeout(5000);
+
     console.log('[CaptionScraper] Enabling Microsoft Teams live captions...');
     await this.enableCaptions().catch(err => {
       console.warn('[CaptionScraper] enableCaptions error:', err.message);
@@ -272,118 +291,200 @@ export class CaptionScraper extends ICapture {
     }
   }
 
+
   /**
    * Orchestrates clicking the menu options or keyboard shortcuts to turn on captions in Teams
    */
   async enableCaptions() {
-    // Strategy 1: Keyboard shortcut fallback (Ctrl+Shift+C is standard Teams web caption toggle)
-    console.log('[CaptionScraper] Triggering Ctrl+Shift+C live captions shortcut...');
-    await this.page.keyboard.press('Control+Shift+c');
-    await this.page.waitForTimeout(3000);
-
-    // Verify if captions container appears
-    let container = await this.page.$(SELECTORS.inCall.captionsContainer).catch(() => null);
-    if (container && await container.isVisible()) {
-      console.log('[CaptionScraper] Successfully enabled captions via keyboard shortcut!');
-      return;
-    }
-
-    // Strategy 2: Click through call settings menu
-    console.log('[CaptionScraper] Shortcut failed or container not visible. Attempting menu navigation...');
-    try {
-      // 1. Click "More" actions button
-      const moreBtnSelector = 'button#callingButtons-showMoreBtn, button[data-tid="more-actions-button"], button[aria-label*="More" i]';
-      const moreBtn = await this.page.waitForSelector(moreBtnSelector, { timeout: 8000 }).catch(() => null);
-      if (!moreBtn) {
-        throw new Error('More actions button not found');
-      }
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      logDebug(`[CaptionScraper] Starting enableCaptions procedure (attempt ${attempt}/3)...`);
       
-      console.log('[CaptionScraper] Clicking "More" button...');
-      await moreBtn.click().catch(() => {});
-      await this.page.waitForTimeout(1000);
-      
-      // Secondary click check: if menu didn't open, try force clicking or JS evaluation click
-      await this.page.evaluate((sel) => {
-        const btn = document.querySelector(sel);
-        if (btn) {
-          btn.click();
-          btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-        }
-      }, moreBtnSelector);
-      
-      await this.page.waitForTimeout(2000);
+      // Strategy 1: Keyboard shortcut fallback (Ctrl+Shift+C is standard Teams web caption toggle)
+      logDebug('[CaptionScraper] Triggering Ctrl+Shift+C live captions shortcut...');
+      await this.page.bringToFront().catch(() => {});
+      await this.page.focus('body').catch(() => {});
+      await this.page.keyboard.press('Control+Shift+c');
+      await this.page.waitForTimeout(3000);
 
-      // --- DUMP VISIBLE MENU ELEMENTS FOR DEBUGGING ---
-      console.log('[CaptionScraper] [DEBUG] Scanning DOM for active menu/popover elements...');
-      try {
-        const menuDump = await this.page.evaluate(() => {
-          // Query all potential interactive elements on the page
-          const candidates = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button, li, a, div[class*="menu" i] div, div[class*="popover" i] div, div[class*="flyout" i] div'));
-          return candidates
-            .filter(el => {
-              // Only keep elements that are visible and contain non-empty text content
-              const isVisible = el.offsetWidth > 0 || el.offsetHeight > 0;
-              const hasText = el.textContent && el.textContent.trim().length > 0;
-              return isVisible && hasText;
-            })
-            .map(el => ({
-              tagName: el.tagName,
-              text: el.textContent.trim().slice(0, 100),
-              ariaLabel: el.getAttribute('aria-label'),
-              role: el.getAttribute('role'),
-              id: el.id,
-              className: el.className,
-              dataTid: el.getAttribute('data-tid') || el.getAttribute('data-testid')
-            }))
-            // Filter unique entries based on text and tag
-            .filter((item, idx, arr) => arr.findIndex(t => t.text === item.text && t.tagName === item.tagName) === idx);
-        });
-        console.log('[CaptionScraper] [DEBUG] Clickable menu options discovered:', JSON.stringify(menuDump, null, 2));
-      } catch (dumpErr) {
-        console.error('[CaptionScraper] [DEBUG] Failed to dump menu items:', dumpErr.message);
-      }
-
-      // 2. Click the "Captions" menu item (#closed-captions-button)
-      const clickedCaptionsMenu = await this.page.evaluate(() => {
-        const btn = document.getElementById('closed-captions-button');
-        if (btn) {
-          btn.click();
-          btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-          return true;
-        }
-        return false;
-      });
-
-      if (clickedCaptionsMenu) {
-        console.log('[CaptionScraper] Clicked "Captions" menu item (#closed-captions-button).');
-        await this.page.waitForTimeout(2000);
-
-        // Check if there is a language confirmation dialog / popover
-        const clickedConfirm = await this.page.evaluate(() => {
-          const els = Array.from(document.querySelectorAll('button, div, span, [role="button"]'));
-          const confirmEl = els.find(el => /Confirm|OK|Turn on|Start/i.test(el.textContent || '') && (el.offsetWidth > 0 || el.offsetHeight > 0));
-          if (confirmEl) {
-            confirmEl.click();
-            confirmEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-            return true;
-          }
-          return false;
-        });
-
-        if (clickedConfirm) {
-          console.log('[CaptionScraper] Clicked language selection confirmation button.');
-          await this.page.waitForTimeout(2000);
-        } else {
-          console.log('[CaptionScraper] No language confirmation button detected.');
-        }
-
-        console.log('[CaptionScraper] Captions option triggered successfully.');
+      // Verify if captions container appears
+      let container = await this.page.$(SELECTORS.inCall.captionsContainer).catch(() => null);
+      if (container && await container.isVisible().catch(() => false)) {
+        logDebug('[CaptionScraper] Successfully enabled captions via keyboard shortcut!');
         return;
       }
 
-      throw new Error('Caption activation menu option not found or not clickable');
-    } catch (err) {
-      console.error('[CaptionScraper] Failed to enable live captions via menu navigation:', err.message);
+      // Strategy 2: Click through call settings menu
+      logDebug('[CaptionScraper] Shortcut failed or container not visible. Attempting menu navigation...');
+      try {
+        // 1. Click "More" actions button
+        const moreBtnSelector = 'button#callingButtons-showMoreBtn, button[data-tid="more-actions-button"], button[aria-label*="More" i]';
+        const moreBtn = await this.page.waitForSelector(moreBtnSelector, { timeout: 8000 }).catch(() => null);
+        if (!moreBtn) {
+          throw new Error('More actions button not found');
+        }
+        
+        logDebug('[CaptionScraper] Attempting to click "More" button via Playwright...');
+        await moreBtn.click({ force: true, timeout: 2000 }).catch(err => {
+          logDebug(`[CaptionScraper] Playwright click failed: ${err.message}`);
+        });
+        await this.page.waitForTimeout(500);
+
+        // Check if menu is opened (any item like "Language and speech" or "Device settings" visible)
+        let isMenuVisible = await this.page.evaluate(() => {
+          const els = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button'));
+          return els.some(el => /Language and speech|Captions|Device settings/i.test(el.textContent || '') && (el.offsetWidth > 0 || el.offsetHeight > 0));
+        });
+
+        if (!isMenuVisible) {
+          logDebug('[CaptionScraper] Menu not visible after Playwright click. Trying Mouse Event sequence...');
+          await this.page.evaluate((sel) => {
+            const btn = document.querySelector(sel);
+            if (btn) {
+              btn.focus();
+              const rect = btn.getBoundingClientRect();
+              const opts = { bubbles: true, cancelable: true, view: window, screenX: rect.left, screenY: rect.top, clientX: rect.left, clientY: rect.top };
+              btn.dispatchEvent(new MouseEvent('mousedown', opts));
+              btn.dispatchEvent(new MouseEvent('mouseup', opts));
+              btn.dispatchEvent(new MouseEvent('click', opts));
+            }
+          }, moreBtnSelector);
+          await this.page.waitForTimeout(1000);
+          
+          isMenuVisible = await this.page.evaluate(() => {
+            const els = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button'));
+            return els.some(el => /Language and speech|Captions|Device settings/i.test(el.textContent || '') && (el.offsetWidth > 0 || el.offsetHeight > 0));
+          });
+        }
+
+        if (!isMenuVisible) {
+          logDebug('[CaptionScraper] Menu still not visible. Trying keyboard Enter click...');
+          await moreBtn.focus().catch(() => {});
+          await this.page.keyboard.press('Enter').catch(() => {});
+          await this.page.waitForTimeout(1000);
+        }
+        logDebug('[CaptionScraper] Step 1: Scanning DOM for menu options...');
+        const menuItems = await this.page.evaluate(() => {
+          const els = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button, li, div[class*="menu" i] div, div[class*="popover" i] div'));
+          return els
+            .filter(el => el.offsetWidth > 0 || el.offsetHeight > 0)
+            .map(el => ({
+              text: (el.textContent || '').trim().slice(0, 100),
+              id: el.id,
+              role: el.getAttribute('role'),
+              className: el.className
+            }));
+        }).catch(() => []);
+        
+        logDebug(`[CaptionScraper] Found visible menu items: ${JSON.stringify(menuItems, null, 2)}`);
+
+        // Check which path we should take (direct Captions vs Language and Speech submenu)
+        const hasDirectCaptions = menuItems.some(item => /Captions/i.test(item.text) || item.id === 'closed-captions-button');
+        const hasLanguageSubmenu = menuItems.some(item => /Language and speech/i.test(item.text));
+
+        logDebug(`[CaptionScraper] Menu Analysis - hasDirectCaptions: ${hasDirectCaptions} | hasLanguageSubmenu: ${hasLanguageSubmenu}`);
+
+        let clickedCaptionsMenu = false;
+
+        if (hasLanguageSubmenu) {
+          // --- PATH A: Submenu flow ---
+          logDebug('[CaptionScraper] Step 2A: Clicking "Language and speech" submenu item...');
+          const langSubmenuSelector = 'div[role="menuitem"]:has-text("Language and speech"), [id*="speech" i], [aria-label*="Language and speech" i]';
+          await this.page.evaluate(() => {
+            const els = Array.from(document.querySelectorAll('[role="menuitem"], button, div'));
+            const target = els.find(el => /Language and speech/i.test(el.textContent || '') && (el.offsetWidth > 0 || el.offsetHeight > 0));
+            if (target) {
+              target.click();
+              target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            }
+          });
+          await this.page.waitForTimeout(2000);
+
+          // Verify "Turn on live captions" submenu item becomes visible
+          const subMenuItems = await this.page.evaluate(() => {
+            const els = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button'));
+            return els
+              .filter(el => el.offsetWidth > 0 || el.offsetHeight > 0)
+              .map(el => (el.textContent || '').trim());
+          }).catch(() => []);
+          logDebug(`[CaptionScraper] Submenu items visible: ${JSON.stringify(subMenuItems)}`);
+
+          const hasTurnOnCaptions = subMenuItems.some(text => /Turn on live captions/i.test(text));
+          logDebug(`[CaptionScraper] Step 3A: "Turn on live captions" visible: ${hasTurnOnCaptions}`);
+
+          if (hasTurnOnCaptions) {
+            logDebug('[CaptionScraper] Step 4A: Clicking "Turn on live captions"...');
+            await this.page.evaluate(() => {
+              const els = Array.from(document.querySelectorAll('[role="menuitem"], button'));
+              const target = els.find(el => /Turn on live captions/i.test(el.textContent || '') && (el.offsetWidth > 0 || el.offsetHeight > 0));
+              if (target) {
+                target.click();
+                target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              }
+            });
+            clickedCaptionsMenu = true;
+          }
+        } else {
+          // --- PATH B: Direct button flow ---
+          logDebug('[CaptionScraper] Step 2B: Clicking direct "Captions" button...');
+          clickedCaptionsMenu = await this.page.evaluate(() => {
+            const els = Array.from(document.querySelectorAll('[role="menuitem"], button'));
+            const target = els.find(el => (el.textContent || '').trim() === 'Captions' && (el.offsetWidth > 0 || el.offsetHeight > 0));
+            if (target) {
+              target.click();
+              target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              return true;
+            }
+            return false;
+          });
+        }
+
+        if (clickedCaptionsMenu) {
+          logDebug('[CaptionScraper] Triggered captions option. Checking for language selection dialog...');
+          await this.page.waitForTimeout(2000);
+          
+          // Check for Confirm spoken language dialog
+          const clickedConfirm = await this.page.evaluate(() => {
+            const els = Array.from(document.querySelectorAll('button, [role="button"]'));
+            const target = els.find(el => /Confirm|OK|Turn on|Start/i.test(el.textContent || '') && (el.offsetWidth > 0 || el.offsetHeight > 0));
+            if (target) {
+              target.click();
+              target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              return true;
+            }
+            return false;
+          });
+          
+          logDebug(`[CaptionScraper] Language confirmation dialog confirm button clicked: ${clickedConfirm}`);
+          await this.page.waitForTimeout(3000);
+
+          // Save a screenshot immediately after sequence finishes
+          const screenshotPath = 'C:\\Users\\IshitaBhojani\\Meeting-Bots-Crest\\dashboard\\backend\\transcripts\\captions_activation_result.png';
+          await this.page.screenshot({ path: screenshotPath }).catch(() => {});
+          logDebug(`[CaptionScraper] Saved activation sequence screenshot to: ${screenshotPath}`);
+
+          // Verify if captions container appears after trigger
+          const activeContainer = await this.page.$(SELECTORS.inCall.captionsContainer).catch(() => null);
+          if (activeContainer && await activeContainer.isVisible().catch(() => false)) {
+            logDebug('[CaptionScraper] Captions option triggered successfully and verified active!');
+            return;
+          }
+        }
+      } catch (err) {
+        logDebug(`[CaptionScraper] Error during menu navigation on attempt ${attempt}: ${err.message}`);
+      }
+
+      // If we got here, this attempt failed. Wait 3 seconds before retrying.
+      logDebug(`[CaptionScraper] Attempt ${attempt} failed. Waiting 3 seconds before next retry...`);
+      await this.page.waitForTimeout(3000);
+    }
+
+    // If all attempts failed, throw final error and take screenshot
+    logDebug('[CaptionScraper] All caption activation attempts failed.');
+    try {
+      await this.page.screenshot({ path: 'C:\\Users\\IshitaBhojani\\Meeting-Bots-Crest\\dashboard\\backend\\transcripts\\headless_fail_screenshot.png' });
+      logDebug('[CaptionScraper] Saved headless failure screenshot to: C:\\Users\\IshitaBhojani\\Meeting-Bots-Crest\\dashboard\\backend\\transcripts\\headless_fail_screenshot.png');
+    } catch (screenshotErr) {
+      logDebug(`[CaptionScraper] Failed to save failure screenshot: ${screenshotErr.message}`);
     }
   }
 

@@ -38,6 +38,7 @@ export class TeamsBot {
       args: [
         '--use-fake-ui-for-media-stream',
         '--use-fake-device-for-media-stream',
+        '--autoplay-policy=no-user-gesture-required',
         '--disable-blink-features=AutomationControlled',
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -45,7 +46,11 @@ export class TeamsBot {
         '--disable-gpu',
         '--no-first-run',
         '--no-default-browser-check',
-        '--window-size=1280,720',
+        '--window-size=1920,1080',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-background-timer-throttling',
+        '--disable-features=CalculateNativeWinOcclusion',
       ],
     };
 
@@ -73,7 +78,7 @@ export class TeamsBot {
     const contextOptions = {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       permissions: ['microphone', 'camera'],
-      viewport: { width: 1280, height: 720 },
+      viewport: { width: 1920, height: 1080 },
     };
 
     if (loadSession) {
@@ -82,6 +87,25 @@ export class TeamsBot {
     }
 
     this.context = await this.browser.newContext(contextOptions);
+
+    // Override page visibility and focus state to prevent Teams background throttling
+    await this.context.addInitScript(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        get: () => 'visible',
+        configurable: true
+      });
+      Object.defineProperty(document, 'hidden', {
+        get: () => false,
+        configurable: true
+      });
+      document.hasFocus = () => true;
+
+      // Stop visibility change events from bubbling/propagating to Teams scripts
+      window.addEventListener('visibilitychange', (e) => {
+        e.stopImmediatePropagation();
+      }, true);
+    });
+
     this.page = await this.context.newPage();
     this.page.setDefaultTimeout(TIMEOUTS.navigation);
 
@@ -101,8 +125,15 @@ export class TeamsBot {
     console.log(`[TeamsBot] Navigating to meeting URL: ${this.meetingUrl}`);
     await this.page.goto(this.meetingUrl, { waitUntil: 'domcontentloaded' });
 
+    // Log visibilityState inside the page context right after navigation
+    const visibilityState = await this.page.evaluate(() => document.visibilityState).catch(() => 'unknown');
+    console.log(`[TeamsBot] [DEBUG] Current document.visibilityState: ${visibilityState}`);
+
     // 1. Bypass "Open Microsoft Teams" landing page to use the web client
     await this.bypassAppLandingPage();
+
+    // Wait for the pre-join screen to be fully loaded and visible
+    await this.waitForPreJoinPageToLoad();
 
     // 2. Handle guest entry name input if in guest mode
     await this.handleNameInput();
@@ -118,6 +149,42 @@ export class TeamsBot {
   }
 
   /**
+   * Generously waits for the pre-join screen to finish loading from the spinner page
+   */
+  async waitForPreJoinPageToLoad() {
+    console.log('[TeamsBot] Waiting for pre-join lobby page elements to load...');
+    
+    // Log resolved URL and page title
+    const resolvedUrl = this.page.url();
+    const pageTitle = await this.page.title().catch(() => 'unknown');
+    console.log(`[TeamsBot] [DEBUG] Pre-join load check - Resolved URL: "${resolvedUrl}" | Page Title: "${pageTitle}"`);
+
+    // If guest, wait for name input to load; otherwise wait for join now button
+    const selector = this.isGuest ? SELECTORS.join.nameInput : SELECTORS.join.joinNowBtn;
+    
+    try {
+      await this.page.waitForSelector(selector, { state: 'visible', timeout: 45000 });
+      console.log('[TeamsBot] Pre-join lobby page loaded successfully.');
+    } catch (err) {
+      console.error('[TeamsBot] Fatal: pre-join page failed to load within 45s.', err.message);
+      try {
+        const screenshotPath = path.resolve(path.dirname(this.authPath), 'error_screenshot.png');
+        await this.page.screenshot({ path: screenshotPath });
+        console.log(`[TeamsBot] Saved loading failure screenshot to: ${screenshotPath}`);
+        
+        // Dump HTML page content on failure
+        const htmlPath = path.resolve(path.dirname(this.authPath), 'error_dom_dump.html');
+        const content = await this.page.content().catch(() => '');
+        fs.writeFileSync(htmlPath, content, 'utf8');
+        console.log(`[TeamsBot] Saved failure DOM HTML dump to: ${htmlPath}`);
+      } catch (sErr) {
+        console.error('[TeamsBot] Failed to save diagnostics:', sErr.message);
+      }
+      throw new Error(`Teams pre-join page failed to load: ${err.message}`);
+    }
+  }
+
+  /**
    * Bypasses the Microsoft Teams native app download / opening prompt.
    * Forces the browser to select the web client.
    */
@@ -126,13 +193,55 @@ export class TeamsBot {
     try {
       // Teams landing page requires a moment to load and present button options
       await this.page.waitForSelector(SELECTORS.join.joinOnWebBtn, { timeout: 15000 });
-      console.log('[TeamsBot] Landing page button found. Clicking web client join button...');
-      await this.page.click(SELECTORS.join.joinOnWebBtn);
+      console.log('[TeamsBot] Landing page button found. Attempting click...');
       
-      // Wait for navigation / rendering of pre-join screen
-      await this.page.waitForTimeout(5000);
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        // Try Playwright click (which understands Playwright-style selectors)
+        await this.page.click(SELECTORS.join.joinOnWebBtn, { force: true, timeout: 2000 }).catch(() => {});
+        
+        // Try JS-level click using standard browser-native element matching
+        await this.page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll('button'));
+          const target = btns.find(btn => {
+            const text = btn.textContent || '';
+            const dataTid = btn.getAttribute('data-tid') || '';
+            return dataTid === 'joinOnWeb' || 
+                   text.includes('Use Teams on the web') || 
+                   text.includes('Continue on this browser');
+          });
+          if (target) {
+            target.click();
+            target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          }
+        }).catch(() => {});
+        
+        // Wait and check if the button is gone or if name input is visible
+        await this.page.waitForTimeout(2000);
+        
+        const isStillVisible = await this.page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll('button'));
+          const target = btns.find(btn => {
+            const text = btn.textContent || '';
+            const dataTid = btn.getAttribute('data-tid') || '';
+            return dataTid === 'joinOnWeb' || 
+                   text.includes('Use Teams on the web') || 
+                   text.includes('Continue on this browser');
+          });
+          return !!(target && (target.offsetWidth > 0 || target.offsetHeight > 0));
+        });
+        
+        if (!isStillVisible) {
+          console.log('[TeamsBot] Successfully bypassed landing page (button is gone).');
+          break;
+        }
+        console.log(`[TeamsBot] Landing page button still visible (attempt ${attempt}/3). Retrying click...`);
+      }
+      
+      // Extra buffer wait for loading pre-join page
+      await this.page.waitForTimeout(3000);
     } catch (e) {
-      console.log('[TeamsBot] No web client join button visible or already bypassed.');
+      console.log('[TeamsBot] App landing bypass check completed or error encountered:', e.message);
+      console.error('[TeamsBot] App landing error details:', e);
     }
   }
 
@@ -145,12 +254,21 @@ export class TeamsBot {
     console.log('[TeamsBot] Checking for guest display name input field...');
     try {
       const selector = SELECTORS.join.nameInput;
-      await this.page.waitForSelector(selector, { timeout: 10000 });
+      await this.page.waitForSelector(selector, { state: 'visible', timeout: 10000 });
       console.log(`[TeamsBot] Guest name input found. Typing bot name: ${this.botName}`);
+      
+      await this.page.focus(selector);
       await this.page.fill(selector, this.botName);
       await this.page.waitForTimeout(1000);
     } catch (err) {
       console.warn('[TeamsBot] Guest name input field not found or not interactable:', err.message);
+      try {
+        const screenshotPath = path.resolve(path.dirname(this.authPath), 'error_screenshot.png');
+        await this.page.screenshot({ path: screenshotPath });
+        console.log(`[TeamsBot] Saved debug screenshot of the page to: ${screenshotPath}`);
+      } catch (screenshotErr) {
+        console.error('[TeamsBot] Failed to take debug screenshot:', screenshotErr.message);
+      }
     }
   }
 
@@ -185,64 +303,96 @@ export class TeamsBot {
     // Dump page elements to discover latest Teams selectors
     await this.dumpPreJoinElements();
 
-    // We try to turn off camera first
+    // Toggle video off
     try {
-      const camBtn = await this.page.waitForSelector(SELECTORS.join.camToggle, { timeout: 8000 }).catch(() => null);
-      if (camBtn && await camBtn.isVisible()) {
-        const ariaChecked = await camBtn.getAttribute('aria-checked');
-        const ariaPressed = await camBtn.getAttribute('aria-pressed');
-        if (ariaChecked === 'true' || ariaPressed === 'true') {
-          console.log('[TeamsBot] Camera is enabled. Clicking to toggle OFF...');
-          await camBtn.click();
-          await this.page.waitForTimeout(1000);
+      const videoSwitch = await this.page.$('input[data-tid="toggle-video"], button[data-tid="prejoin-play-video"]');
+      if (videoSwitch) {
+        const isChecked = await videoSwitch.evaluate(el => el.checked || el.getAttribute('aria-checked') === 'true');
+        if (isChecked) {
+          console.log('[TeamsBot] Video is enabled. Clicking to toggle OFF...');
+          await videoSwitch.click({ force: true }).catch(() => {});
+          await videoSwitch.evaluate(el => { if (el.checked || el.getAttribute('aria-checked') === 'true') el.click(); });
         } else {
-          console.log('[TeamsBot] Camera appears to be already disabled.');
+          console.log('[TeamsBot] Video is already disabled.');
         }
       } else {
-        // Fallback to keyboard shortcut if buttons aren't visible
-        console.log('[TeamsBot] Cam toggle button not found. Using Ctrl+Shift+O fallback...');
+        console.log('[TeamsBot] Video toggle switch not found. Pressing Ctrl+Shift+O fallback...');
+        await this.page.bringToFront().catch(() => {});
+        await this.page.focus('body').catch(() => {});
         await this.page.keyboard.press('Control+Shift+o');
-        await this.page.waitForTimeout(1000);
       }
     } catch (err) {
-      console.error('[TeamsBot] Error disabling camera:', err.message);
+      console.error('[TeamsBot] Error disabling video:', err.message);
     }
 
-    // Turn off mic
+    // Toggle mic off
     try {
-      const micBtn = await this.page.waitForSelector(SELECTORS.join.micToggle, { timeout: 5000 }).catch(() => null);
-      if (micBtn && await micBtn.isVisible()) {
-        const ariaChecked = await micBtn.getAttribute('aria-checked');
-        const ariaPressed = await micBtn.getAttribute('aria-pressed');
-        if (ariaChecked === 'true' || ariaPressed === 'true') {
+      const micSwitch = await this.page.$('input[data-tid="toggle-mute"], button[data-tid="prejoin-mute-mic"]');
+      if (micSwitch) {
+        const isChecked = await micSwitch.evaluate(el => el.checked || el.getAttribute('aria-checked') === 'true');
+        if (isChecked) {
           console.log('[TeamsBot] Microphone is enabled. Clicking to toggle OFF...');
-          await micBtn.click();
-          await this.page.waitForTimeout(1000);
+          await micSwitch.click({ force: true }).catch(() => {});
+          await micSwitch.evaluate(el => { if (el.checked || el.getAttribute('aria-checked') === 'true') el.click(); });
         } else {
-          console.log('[TeamsBot] Microphone appears to be already disabled.');
+          console.log('[TeamsBot] Microphone is already disabled.');
         }
       } else {
-        // Fallback to keyboard shortcut
-        console.log('[TeamsBot] Mic toggle button not found. Using Ctrl+Shift+M fallback...');
+        console.log('[TeamsBot] Mic toggle switch not found. Pressing Ctrl+Shift+M fallback...');
+        await this.page.bringToFront().catch(() => {});
+        await this.page.focus('body').catch(() => {});
         await this.page.keyboard.press('Control+Shift+m');
-        await this.page.waitForTimeout(1000);
       }
     } catch (err) {
       console.error('[TeamsBot] Error disabling microphone:', err.message);
     }
+    
+    await this.page.waitForTimeout(1000);
   }
 
   async clickJoinNow() {
     console.log('[TeamsBot] Attempting to click "Join now"...');
     try {
-      await this.page.waitForSelector(SELECTORS.join.joinNowBtn, { state: 'visible', timeout: 10000 });
-      await this.page.click(SELECTORS.join.joinNowBtn);
-      console.log('[TeamsBot] Success: Clicked "Join now" button.');
-    } catch (err) {
-      console.log('[TeamsBot] "Join now" button not found or not clickable via selectors:', err.message);
-      console.log('[TeamsBot] Triggering fallback: Pressing [Enter] key to submit pre-join form...');
+      const selector = SELECTORS.join.joinNowBtn;
+      await this.page.waitForSelector(selector, { state: 'visible', timeout: 10000 });
+      
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        // Try Playwright click
+        await this.page.click(selector, { force: true, timeout: 2000 }).catch(() => {});
+        
+        // Try JS-level click with full mouse event dispatch sequence (mousedown -> mouseup -> click)
+        await this.page.evaluate(() => {
+          const btn = document.querySelector('button[data-tid="prejoin-join-button"]');
+          if (btn) {
+            btn.click();
+            btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+            btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          }
+        }).catch(() => {});
+        
+        // Wait to see if we transitioned
+        await this.page.waitForTimeout(3000);
+        
+        // Check if button is still visible/present
+        const isStillVisible = await this.page.evaluate(() => {
+          const btn = document.querySelector('button[data-tid="prejoin-join-button"]');
+          return !!(btn && (btn.offsetWidth > 0 || btn.offsetHeight > 0));
+        });
+        
+        if (!isStillVisible) {
+          console.log('[TeamsBot] Successfully clicked "Join now" (button is gone).');
+          return;
+        }
+        
+        console.log(`[TeamsBot] "Join now" button still visible (attempt ${attempt}/3). Retrying click...`);
+      }
+      
+      // Fallback: press Enter on the page
+      console.log('[TeamsBot] Pressing Enter key as final fallback...');
       await this.page.keyboard.press('Enter');
-      console.log('[TeamsBot] Fallback [Enter] key pressed.');
+    } catch (err) {
+      console.error('[TeamsBot] Fatal error clicking "Join now":', err.message);
     }
   }
 
@@ -253,8 +403,11 @@ export class TeamsBot {
   async handleLobbyAdmission() {
     console.log('[TeamsBot] Verifying connection/lobby state...');
     const startTime = Date.now();
+    let checks = 0;
     
     while (Date.now() - startTime < TIMEOUTS.join) {
+      checks++;
+      
       // Check multiple indicators for inside-the-call state
       const hangupBtn = await this.page.$(SELECTORS.inCall.leaveBtn).catch(() => null);
       const hangupVisible = hangupBtn ? await hangupBtn.isVisible().catch(() => false) : false;
@@ -286,6 +439,13 @@ export class TeamsBot {
         console.log('[TeamsBot] Currently in the lobby. Waiting for admission...');
       } else {
         console.log('[TeamsBot] Transitioning states or on pre-join screen. Checking status...');
+        if (checks === 4) {
+          try {
+            const screenshotPath = path.resolve(path.dirname(this.authPath), 'lobby_transition_screenshot.png');
+            await this.page.screenshot({ path: screenshotPath });
+            console.log(`[TeamsBot] Saved lobby transition screenshot to: ${screenshotPath}`);
+          } catch (sErr) {}
+        }
       }
 
       await this.page.waitForTimeout(TIMEOUTS.lobbyPoll);

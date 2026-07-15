@@ -80,7 +80,8 @@ class ProcessManager {
         '--name', botName,
         '--output', outputPath,
         '--capture', 'captions',
-        '--guest'
+        '--guest',
+        '--channel', 'chrome'
       ];
       if (!isHeadless) {
         args.push('--headful');
@@ -244,8 +245,13 @@ class ProcessManager {
         resolve();
       });
 
-      // Try SIGINT first (lets bot flush output files/gracefully leave)
-      child.kill('SIGINT');
+      if (process.platform === 'win32') {
+        // Windows needs taskkill with /t to kill the child processes spawned via shell: true
+        console.log(`[ProcessManager] Killing process tree for session ${sessionId} via taskkill`);
+        spawn('taskkill', ['/pid', String(child.pid), '/f', '/t']);
+      } else {
+        child.kill('SIGINT');
+      }
 
       // Force kill fallback after 5 seconds
       setTimeout(() => {

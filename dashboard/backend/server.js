@@ -12,6 +12,7 @@ import { deepgramProxy } from './deepgram-proxy.js';
 import { generateFirefliesReport, calculateSpeakerStats } from './report-generator.js';
 import { supabase } from './supabase-client.js';
 import { uploadReport } from './supabase-helper.js';
+import { saveMarkdownAsDocx } from './docx-generator.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -65,10 +66,20 @@ function broadcastToClients(sessionId, type, data) {
  * REST API: Start a bot session
  */
 app.post('/api/sessions/start', async (req, res) => {
-  const { botType, meetingUrl, botName, isHeadless } = req.body;
+  let { botType, meetingUrl, botName, isHeadless } = req.body;
 
   if (!botType || !meetingUrl) {
     return res.status(400).json({ error: 'Missing required parameters: botType and meetingUrl' });
+  }
+
+  // Auto-detect and correct bot type based on URL structure to prevent mismatched bot launching
+  const lowerUrl = meetingUrl.toLowerCase();
+  if (lowerUrl.includes('meet.google.com') && botType !== 'google-meet') {
+    botType = 'google-meet';
+  } else if (lowerUrl.includes('zoom.us') && botType !== 'zoom') {
+    botType = 'zoom';
+  } else if ((lowerUrl.includes('teams.microsoft.com') || lowerUrl.includes('teams.live.com') || lowerUrl.includes('/meet/')) && botType !== 'teams') {
+    botType = 'teams';
   }
 
   // Google Meet and Zoom require Deepgram transcription, so verify API key
@@ -319,6 +330,15 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
     const reportPath = path.join(transcriptsDir, reportFilename);
     fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
 
+    // Generate and save docx file locally
+    try {
+      const docxFilename = filename.replace('.jsonl', '_report.docx');
+      const docxPath = path.join(transcriptsDir, docxFilename);
+      await saveMarkdownAsDocx(reportMarkdown, docxPath);
+    } catch (docxErr) {
+      console.error(`[Server] Failed to generate DOCX report:`, docxErr.message);
+    }
+
     // Parse filename to update Supabase row and upload report
     const match = filename.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
     if (match) {
@@ -419,6 +439,48 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: `Failed to retrieve report: ${err.message}` });
+  }
+});
+
+/**
+ * REST API: Download generated docx report file
+ */
+app.get('/api/transcripts/:filename/docx', async (req, res) => {
+  const filename = req.params.filename;
+  
+  if (!/^[a-zA-Z0-9_\-\.]+$/.test(filename) || filename.includes('..') || !filename.endsWith('.jsonl')) {
+    return res.status(400).json({ error: 'Invalid or unauthorized file name' });
+  }
+
+  const transcriptsDir = path.join(__dirname, 'transcripts');
+  const docxFilename = filename.replace('.jsonl', '_report.docx');
+  const filePath = path.join(transcriptsDir, docxFilename);
+
+  try {
+    // 1. Try to check if it's DB-backed and we should redirect to Supabase URL
+    const match = filename.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
+    if (match) {
+      const [_, botType, sessionId] = match;
+      const { data: session, error } = await supabase
+        .from('meeting_sessions')
+        .select('report_file_url')
+        .eq('session_id', sessionId)
+        .single();
+      
+      if (!error && session && session.report_file_url) {
+        const docxUrl = session.report_file_url.replace('_report.md', '_report.docx');
+        return res.redirect(docxUrl);
+      }
+    }
+
+    // 2. Fallback to local filesystem
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Word Document not found' });
+    }
+
+    res.download(filePath, docxFilename);
+  } catch (err) {
+    res.status(500).json({ error: `Failed to download Word Document: ${err.message}` });
   }
 });
 

@@ -16,7 +16,16 @@ export class BotLifecycle {
     this.bot = null;
     this.capture = null;
     this.output = null;
-    this.state = 'idle'; // idle, joining, capturing, stopping, stopped
+    this._state = 'idle'; // idle, joining, capturing, stopping, stopped
+  }
+
+  get state() {
+    return this._state;
+  }
+
+  set state(newValue) {
+    this._state = newValue;
+    console.log(`[Lifecycle] State transition: ${newValue}`);
   }
 
   async start() {

@@ -45,6 +45,7 @@ const reportContent = document.getElementById('reportContent');
 const reportModalCloseBtn = document.getElementById('reportModalCloseBtn');
 const reportModalCloseBtn2 = document.getElementById('reportModalCloseBtn2');
 const reportModalDownloadBtn = document.getElementById('reportModalDownloadBtn');
+const reportModalDownloadDocxBtn = document.getElementById('reportModalDownloadDocxBtn');
 
 let currentViewedLines = [];
 
@@ -56,6 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Bind events
   launchForm.addEventListener('submit', handleLaunch);
   stopBtn.addEventListener('click', handleStop);
+  meetingUrlInput.addEventListener('input', autoDetectPlatform);
   modalCloseBtn.addEventListener('click', () => historyModal.classList.add('hidden'));
   modalDownloadBtn.addEventListener('click', downloadCurrentTranscript);
   
@@ -75,10 +77,27 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 /**
+ * Automatically select the correct meeting platform dropdown option based on URL patterns
+ */
+function autoDetectPlatform() {
+  const url = meetingUrlInput.value.trim().toLowerCase();
+  if (url.includes('meet.google.com')) {
+    botTypeSelect.value = 'google-meet';
+  } else if (url.includes('zoom.us')) {
+    botTypeSelect.value = 'zoom';
+  } else if (url.includes('teams.microsoft.com') || url.includes('teams.live.com') || url.includes('/meet/')) {
+    botTypeSelect.value = 'teams';
+  }
+}
+
+/**
  * Handle launching a bot process
  */
 async function handleLaunch(e) {
   e.preventDefault();
+  
+  // Auto-correct any mismatched platform selections
+  autoDetectPlatform();
   
   const payload = {
     botType: botTypeSelect.value,
@@ -681,7 +700,21 @@ function showReport(fileName, { report, analytics }) {
   reportContent.innerHTML = renderMarkdownToHtml(report);
 
   reportModalDownloadBtn.onclick = () => downloadReportFile(fileName, report);
+  reportModalDownloadDocxBtn.onclick = () => downloadReportDocxFile(fileName);
   reportModal.classList.remove('hidden');
+}
+
+/**
+ * Triggers file download of the Word Docx report
+ */
+function downloadReportDocxFile(fileName) {
+  const url = `/api/transcripts/${fileName}/docx`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName.replace('.jsonl', '_report.docx');
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 }
 
 /**

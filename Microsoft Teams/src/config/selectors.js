@@ -11,7 +11,7 @@ export const SELECTORS = {
     nameInput: 'input[data-tid="prejoin-display-name"], input[placeholder*="name" i], input#username, input[type="text"]',
     
     // Pre-join: join submission
-    joinNowBtn: 'button[data-tid="prejoin-join-button"], button:has-text("Join now"), button[aria-label*="Join meeting" i]',
+    joinNowBtn: 'button[data-tid="prejoin-join-button"], button:has-text("Join now"), button[aria-label*="Join meeting" i]:not([data-tid="joinOnWeb"])',
   },
   inCall: {
     // Indicator that we've successfully joined the call
@@ -24,7 +24,7 @@ export const SELECTORS = {
     turnOnCaptionsBtn: 'button:has-text("Turn on live captions"), button[aria-label*="Turn on live captions" i]',
     
     // Captions elements
-    captionsContainer: 'div[data-tid="captions-container"], div.captions-render-area, div[class*="captions-container" i]',
+    captionsContainer: '[data-tid="closed-caption-renderer-wrapper"], [data-tid="closed-caption-v2-window-wrapper"], div[data-tid="captions-container"], div.captions-render-area, div[class*="captions-container" i]',
     captionText: 'div[class*="caption-text" i], span[class*="caption-text" i], .caption-text',
     captionSpeaker: '.___1hdoxqz, div[class*="speaker" i], span[class*="speaker" i], .caption-speaker, strong',
   },

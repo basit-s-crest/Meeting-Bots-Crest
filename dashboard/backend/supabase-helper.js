@@ -47,7 +47,14 @@ async function uploadToStorage(localPath, storageName) {
     
     // Determine mime-type based on extension
     const ext = path.extname(localPath);
-    const contentType = ext === '.jsonl' ? 'application/json' : 'text/markdown';
+    let contentType = 'text/plain';
+    if (ext === '.jsonl') {
+      contentType = 'application/json';
+    } else if (ext === '.md') {
+      contentType = 'text/markdown';
+    } else if (ext === '.docx') {
+      contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    }
 
     // Upload to bucket (using upsert: true to overwrite if it already exists)
     const { data, error } = await supabase.storage
@@ -132,6 +139,19 @@ export async function uploadReport(sessionId, botType) {
     } catch (e) {
       console.warn(`[Supabase] Local report file not found for upload: ${reportFilename}`);
       return null;
+    }
+
+    // Upload the docx report as well if it exists
+    const docxFilename = `${botType}_${sessionId}_report.docx`;
+    const localDocxPath = path.join(TRANSCRIPTS_DIR, docxFilename);
+    try {
+      const statsDocx = await fs.stat(localDocxPath);
+      if (statsDocx.isFile()) {
+        console.log(`[Supabase] Uploading docx report file to cloud: ${docxFilename}`);
+        await uploadToStorage(localDocxPath, docxFilename);
+      }
+    } catch (e) {
+      console.log(`[Supabase] Local docx report file not found or not created: ${docxFilename}`);
     }
 
     if (publicUrl) {
