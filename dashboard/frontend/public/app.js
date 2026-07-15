@@ -12,6 +12,10 @@ const botNameInput = document.getElementById('botName');
 const headlessCheckbox = document.getElementById('headless');
 const submitBtn = document.getElementById('submitBtn');
 
+const googleDriveStatusBadge = document.getElementById('googleDriveStatusBadge');
+const connectDriveBtn = document.getElementById('connectDriveBtn');
+const googleDriveFolderInput = document.getElementById('googleDriveFolder');
+
 const globalStatusDot = document.getElementById('globalStatusDot');
 const globalStatusText = document.getElementById('globalStatusText');
 const speakerAvatar = document.getElementById('speakerAvatar');
@@ -58,6 +62,15 @@ document.addEventListener('DOMContentLoaded', () => {
   launchForm.addEventListener('submit', handleLaunch);
   stopBtn.addEventListener('click', handleStop);
   meetingUrlInput.addEventListener('input', autoDetectPlatform);
+  
+  // Check Google Drive status and bind connection click
+  checkGoogleDriveStatus();
+  if (connectDriveBtn) {
+    connectDriveBtn.addEventListener('click', () => {
+      window.location.href = '/api/auth/google';
+    });
+  }
+  
   modalCloseBtn.addEventListener('click', () => historyModal.classList.add('hidden'));
   modalDownloadBtn.addEventListener('click', downloadCurrentTranscript);
   
@@ -99,11 +112,23 @@ async function handleLaunch(e) {
   // Auto-correct any mismatched platform selections
   autoDetectPlatform();
   
+  const folderUrl = googleDriveFolderInput ? googleDriveFolderInput.value.trim() : '';
+  let googleDriveFolderId = null;
+  if (folderUrl) {
+    const match = folderUrl.match(/folders\/([a-zA-Z0-9_-]+)/);
+    if (!match) {
+      alert("Invalid Google Drive folder URL. It should look like: https://drive.google.com/drive/folders/FOLDER_ID");
+      return;
+    }
+    googleDriveFolderId = match[1];
+  }
+  
   const payload = {
     botType: botTypeSelect.value,
     meetingUrl: meetingUrlInput.value.trim(),
     botName: botNameInput.value.trim(),
-    isHeadless: headlessCheckbox.checked
+    isHeadless: headlessCheckbox.checked,
+    googleDriveFolderId: googleDriveFolderId
   };
 
   setFormDisabled(true);
@@ -835,4 +860,27 @@ function renderMarkdownToHtml(md) {
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Check if the user is connected to Google Drive and update the UI status badge
+ */
+async function checkGoogleDriveStatus() {
+  try {
+    const res = await fetch('/api/auth/google/status');
+    const data = await res.json();
+    if (googleDriveStatusBadge && connectDriveBtn) {
+      if (data.connected) {
+        googleDriveStatusBadge.textContent = 'Connected';
+        googleDriveStatusBadge.className = 'status-badge connected';
+        connectDriveBtn.textContent = 'Reconnect Google Drive';
+      } else {
+        googleDriveStatusBadge.textContent = 'Not Connected';
+        googleDriveStatusBadge.className = 'status-badge disconnected';
+        connectDriveBtn.textContent = 'Connect Google Drive';
+      }
+    }
+  } catch (err) {
+    console.error('Failed to check Google Drive status:', err);
+  }
 }

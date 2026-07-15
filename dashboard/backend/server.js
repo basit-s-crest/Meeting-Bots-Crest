@@ -13,6 +13,7 @@ import { generateFirefliesReport, calculateSpeakerStats } from './report-generat
 import { supabase } from './supabase-client.js';
 import { uploadReport } from './supabase-helper.js';
 import { saveMarkdownAsDocx } from './docx-generator.js';
+import { getOAuth2Client, saveRefreshToken, loadRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,6 +30,51 @@ app.use(express.json());
 // Serve static frontend files
 const frontendPublicPath = path.resolve(__dirname, '../frontend/public');
 app.use(express.static(frontendPublicPath));
+
+// Google Drive OAuth Routes
+app.get('/api/auth/google', (req, res) => {
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !process.env.GOOGLE_REDIRECT_URI) {
+    return res.status(500).send('Google Client credentials are not configured in the .env file.');
+  }
+  try {
+    const oauth2Client = getOAuth2Client();
+    const authUrl = oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      prompt: 'consent',
+      scope: ['https://www.googleapis.com/auth/drive.file']
+    });
+    res.redirect(authUrl);
+  } catch (err) {
+    console.error('[Server] Failed to generate Google auth URL:', err.message);
+    res.status(500).send('Google authentication initiation failed.');
+  }
+});
+
+app.get('/api/auth/google/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) {
+    return res.status(400).send('Missing authorization code in query.');
+  }
+  try {
+    const oauth2Client = getOAuth2Client();
+    const { tokens } = await oauth2Client.getToken(code);
+    if (tokens.refresh_token) {
+      saveRefreshToken(tokens.refresh_token);
+    } else {
+      console.log('[Google Auth] No refresh token returned in callback.');
+    }
+    res.redirect('/');
+  } catch (err) {
+    console.error('[Server] Google OAuth callback code exchange failed:', err.message);
+    res.status(500).send('Google authentication failed during code exchange.');
+  }
+});
+
+app.get('/api/auth/google/status', (req, res) => {
+  const token = loadRefreshToken();
+  const configured = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+  res.json({ connected: !!token && configured });
+});
 
 const server = createServer(app);
 const wss = new WebSocketServer({ noServer: true });
@@ -66,7 +112,7 @@ function broadcastToClients(sessionId, type, data) {
  * REST API: Start a bot session
  */
 app.post('/api/sessions/start', async (req, res) => {
-  let { botType, meetingUrl, botName, isHeadless } = req.body;
+  let { botType, meetingUrl, botName, isHeadless, googleDriveFolderId } = req.body;
 
   if (!botType || !meetingUrl) {
     return res.status(400).json({ error: 'Missing required parameters: botType and meetingUrl' });
@@ -98,7 +144,8 @@ app.post('/api/sessions/start', async (req, res) => {
       meetingUrl,
       botName: botName || 'Meeting Bot',
       isHeadless: isHeadless !== false,
-      wsPort
+      wsPort,
+      googleDriveFolderId
     });
 
     // Handle process events/callbacks
@@ -349,6 +396,21 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
       const [_, botType, sessionId] = match;
       console.log(`[Server] Uploading report to Supabase for session: ${sessionId}`);
       await uploadReport(sessionId, botType);
+    }
+
+    // Upload reports to Google Drive if metadata exists with folder ID
+    const metadataPath = path.join(transcriptsDir, filename.replace('.jsonl', '_metadata.json'));
+    if (fs.existsSync(metadataPath)) {
+      try {
+        const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+        if (metadata.googleDriveFolderId) {
+          uploadReportToGoogleDrive(filename, metadata.googleDriveFolderId).catch(err => {
+            console.error(`[Server] Google Drive report upload failed:`, err.message);
+          });
+        }
+      } catch (err) {
+        console.error(`[Server] Failed to process Google Drive report upload:`, err.message);
+      }
     }
 
     res.json({ success: true });

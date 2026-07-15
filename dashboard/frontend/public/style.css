@@ -816,3 +816,48 @@ input:checked + .slider:before {
   background: #edf2f7;
   color: var(--text-main);
 }
+
+/* Cloud Integrations Styling */
+.status-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.25rem;
+}
+.status-badge.connected {
+  background-color: var(--accent-success-light);
+  color: var(--accent-success);
+  border: 1px solid rgba(16, 185, 129, 0.15);
+}
+.status-badge.disconnected {
+  background-color: var(--accent-danger-light);
+  color: var(--accent-danger);
+  border: 1px solid rgba(239, 68, 68, 0.15);
+}
+.integration-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.google-drive-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid var(--border-color);
+  padding: 0.5rem;
+  border-radius: 0.375rem;
+  background-color: var(--bg-app);
+}
+.integration-icon {
+  font-size: 1.2rem;
+}
+.integration-name {
+  flex-grow: 1;
+  margin-left: 0.5rem;
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+.btn-full-width {
+  width: 100%;
+}
+

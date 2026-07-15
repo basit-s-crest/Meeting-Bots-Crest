@@ -34,6 +34,21 @@
     <!-- Left Column: Controls and Settings -->
     <section class="left-panel">
       
+      <!-- Google Drive Connection Card -->
+      <div class="glass-card">
+        <h2 class="card-title">Cloud Integrations</h2>
+        <div class="integration-status">
+          <div class="google-drive-status">
+            <span class="integration-icon">📁</span>
+            <span class="integration-name">Google Drive</span>
+            <span id="googleDriveStatusBadge" class="status-badge disconnected">Checking...</span>
+          </div>
+          <button type="button" id="connectDriveBtn" class="btn btn-secondary btn-full-width" style="margin-top: 1rem;">
+            Connect Google Drive
+          </button>
+        </div>
+      </div>
+      
       <!-- Launch Bot Panel -->
       <div class="glass-card">
         <h2 class="card-title">Orchestrate a Bot</h2>
@@ -55,6 +70,11 @@
           <div class="form-group">
             <label for="botName">Bot Display Name</label>
             <input type="text" id="botName" value="Antigravity transcriber">
+          </div>
+          
+          <div class="form-group">
+            <label for="googleDriveFolder">Google Drive Folder URL (optional)</label>
+            <input type="url" id="googleDriveFolder" placeholder="https://drive.google.com/drive/folders/FOLDER_ID">
           </div>
           
           <div class="form-row">

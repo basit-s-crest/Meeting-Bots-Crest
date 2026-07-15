@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { saveSessionStart, saveSessionEnd } from './supabase-helper.js';
+import { uploadTranscriptToGoogleDrive } from './google-drive-helper.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,7 +24,7 @@ class ProcessManager {
   /**
    * Spawns the requested meeting bot process.
    */
-  spawnBot(sessionId, { botType, meetingUrl, botName, isHeadless, wsPort }) {
+  spawnBot(sessionId, { botType, meetingUrl, botName, isHeadless, wsPort, googleDriveFolderId }) {
     if (this.activeSessions.has(sessionId)) {
       throw new Error(`Session ${sessionId} is already active.`);
     }
@@ -118,10 +119,22 @@ class ProcessManager {
       outputPath: outputPath,
       tailInterval: null,
       onTranscriptCallback: null,
-      onStatusCallback: null
+      onStatusCallback: null,
+      googleDriveFolderId
     };
 
     this.activeSessions.set(sessionId, sessionInfo);
+
+    // Save session Google Drive folder metadata companion file
+    if (googleDriveFolderId) {
+      const metadataPath = path.join(TRANSCRIPTS_DIR, `${botType}_${sessionId}_metadata.json`);
+      try {
+        fs.writeFileSync(metadataPath, JSON.stringify({ googleDriveFolderId }, null, 2), 'utf8');
+        console.log(`[ProcessManager] Saved session metadata to: ${metadataPath}`);
+      } catch (err) {
+        console.error(`[ProcessManager] Failed to save session metadata:`, err.message);
+      }
+    }
 
     // Capture logs
     child.stdout.on('data', (data) => {
@@ -160,6 +173,14 @@ class ProcessManager {
       saveSessionEnd(sessionId, botType).catch(err => {
         console.error(`[ProcessManager] Supabase saveSessionEnd error:`, err.message);
       });
+
+      // Upload to Google Drive if folder ID is configured for this session
+      const driveFolderId = sessionInfo.googleDriveFolderId;
+      if (driveFolderId) {
+        uploadTranscriptToGoogleDrive(sessionId, botType, driveFolderId).catch(err => {
+          console.error(`[ProcessManager] Google Drive upload error for session ${sessionId}:`, err.message);
+        });
+      }
     });
 
     // If Teams bot, we also set up a file tail watcher on the output JSONL file as a backup/primary data source
