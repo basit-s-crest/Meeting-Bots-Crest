@@ -63,7 +63,8 @@ async function main() {
     const bot = new MeetBot('https://accounts.google.com/', 'Login Session', {
       headless: false,
       channel: config.channel || 'chrome',
-      authPath: config.authPath
+      authPath: config.authPath,
+      isLoginMode: true
     });
     
     try {

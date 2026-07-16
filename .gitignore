@@ -8,3 +8,5 @@ session_capture_*
 *.wav
 transcripts/
 google_refresh_token.json
+Google Meet/auth.json
+auth.json
