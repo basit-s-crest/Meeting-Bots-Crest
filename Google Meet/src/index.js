@@ -11,7 +11,7 @@ function parseArgs() {
     outputPort: parseInt(process.env.OUTPUT_PORT || '8080'),
     headless: process.env.HEADLESS !== 'false',
     channel: process.env.BROWSER_CHANNEL || 'chrome',
-    userDataDir: process.env.USER_DATA_DIR || null,
+    authPath: process.env.AUTH_PATH || null,
     login: false,
   };
 
@@ -40,11 +40,8 @@ function parseArgs() {
       case '-c':
         config.channel = args[++i];
         break;
-      case '--persist':
-        config.userDataDir = config.userDataDir || './.user_data';
-        break;
-      case '--user-data-dir':
-        config.userDataDir = args[++i];
+      case '--auth-path':
+        config.authPath = args[++i];
         break;
       case '--login':
         config.login = true;
@@ -66,7 +63,7 @@ async function main() {
     const bot = new MeetBot('https://accounts.google.com/', 'Login Session', {
       headless: false,
       channel: config.channel || 'chrome',
-      userDataDir: config.userDataDir || './.user_data'
+      authPath: config.authPath
     });
     
     try {
@@ -86,19 +83,23 @@ async function main() {
         });
       });
       
-      console.log('Closing browser and saving session...');
+      console.log('Saving session...');
+      await bot.saveSession();
+      console.log('Closing browser...');
       await bot.close();
       console.log('Session saved! You can now run the bot normally.');
       process.exit(0);
     } catch (err) {
       console.error('Login session failed:', err);
-      await bot.close();
+      try {
+        await bot.close();
+      } catch {}
       process.exit(1);
     }
   }
 
   if (!config.meetingUrl) {
-    console.error('Usage: node src/index.js --url <meeting-url> [--name <bot-name>] [--output <websocket|callback>] [--port <port>] [--headful] [--channel <chrome|msedge>] [--persist] [--user-data-dir <path>] [--login]');
+    console.error('Usage: node src/index.js --url <meeting-url> [--name <bot-name>] [--output <websocket|callback>] [--port <port>] [--headful] [--channel <chrome|msedge>] [--auth-path <path>] [--login]');
     console.error('Or set MEETING_URL environment variable');
     process.exit(1);
   }
@@ -110,7 +111,7 @@ async function main() {
     outputConfig: { port: config.outputPort },
     headless: config.headless,
     channel: config.channel,
-    userDataDir: config.userDataDir,
+    authPath: config.authPath,
   });
 
   // Monitor parent process death

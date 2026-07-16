@@ -15,7 +15,7 @@ export class BotLifecycle {
     this.outputConfig = config.outputConfig || {};
     this.headless = config.headless !== false;
     this.channel = config.channel || null;
-    this.userDataDir = config.userDataDir || null;
+    this.authPath = config.authPath || null;
     
     this.bot = null;
     this.audioCapture = null;
@@ -31,7 +31,7 @@ export class BotLifecycle {
     this.bot = new MeetBot(this.meetingUrl, this.botName, {
       headless: this.headless,
       channel: this.channel,
-      userDataDir: this.userDataDir
+      authPath: this.authPath
     });
     await this.bot.launch();
 

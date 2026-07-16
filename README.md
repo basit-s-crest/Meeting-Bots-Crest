@@ -83,6 +83,25 @@ Make sure browser drivers are installed via Playwright:
 npx playwright install chrome
 ```
 
+### First-Time Bot Authentication (First-time Login)
+To ensure the bots can access meetings under authenticated accounts, you must run the login setup once before running them in the background.
+
+* **Google Meet Bot:**
+  Run the following command to log in manually. This opens a headful browser and saves the persistent `auth.json` file:
+  ```bash
+  cd "Google Meet"
+  node src/index.js --login
+  ```
+  *(Log in in the browser, then return to the terminal and press ENTER to save the session).*
+
+* **Microsoft Teams Bot:**
+  Run the following command to log in manually. This creates the persistent `auth.json` file:
+  ```bash
+  cd "Microsoft Teams"
+  node src/index.js --login
+  ```
+  *(Log in in the browser, then return to the terminal and press ENTER to save the session).*
+
 ---
 
 ## 3. Running the Dashboard Local Server

@@ -1,4 +1,7 @@
 import { chromium } from 'playwright';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { SELECTORS, TIMEOUTS } from '../config/selectors.js';
 
 export class MeetBot {
@@ -7,10 +10,17 @@ export class MeetBot {
     this.botName = botName;
     this.headless = options.headless !== false;
     this.channel = options.channel || null;
-    this.userDataDir = options.userDataDir || null;
+    
+    // Resolve auth.json path
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const defaultAuthPath = path.resolve(__dirname, '../../auth.json');
+    this.authPath = path.resolve(options.authPath || defaultAuthPath);
+
     this.browser = null;
     this.page = null;
     this.context = null;
+    this.isLoginMode = options.isLoginMode === true;
   }
 
   async launch() {
@@ -33,24 +43,33 @@ export class MeetBot {
       launchOptions.channel = this.channel;
     }
 
-    if (this.userDataDir) {
-      console.log(`Launching browser with persistent context (headless: ${this.headless}, channel: ${this.channel || 'default'}) in dir: ${this.userDataDir}`);
-      this.context = await chromium.launchPersistentContext(this.userDataDir, {
-        ...launchOptions,
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        viewport: { width: 1280, height: 720 },
-        permissions: ['microphone', 'camera'],
-      });
-      this.browser = null;
-    } else {
-      console.log(`Launching browser (headless: ${this.headless}, channel: ${this.channel || 'default'})...`);
-      this.browser = await chromium.launch(launchOptions);
-      this.context = await this.browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        permissions: ['microphone', 'camera'],
-        viewport: { width: 1280, height: 720 },
-      });
+    const loadSession = !this.isLoginMode;
+
+    if (loadSession) {
+      if (!fs.existsSync(this.authPath)) {
+        console.error(`\n[MeetBot] ERROR: Saved session file (auth.json) not found at expected path: ${this.authPath}`);
+        console.error('[MeetBot] To create this session, please run first:');
+        console.error('    node src/index.js --login');
+        console.error('[MeetBot] Exiting process to avoid unauthenticated runtime failure.\n');
+        throw new Error(`CRITICAL: Saved session state (auth.json) not found at: ${this.authPath}`);
+      }
     }
+
+    console.log(`[MeetBot] Launching browser (headless: ${this.headless}, channel: ${this.channel || 'default'})`);
+    this.browser = await chromium.launch(launchOptions);
+
+    const contextOptions = {
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      permissions: ['microphone', 'camera'],
+      viewport: { width: 1280, height: 720 },
+    };
+
+    if (loadSession) {
+      console.log(`[MeetBot] Loading session state from ${this.authPath}`);
+      contextOptions.storageState = this.authPath;
+    }
+
+    this.context = await this.browser.newContext(contextOptions);
 
     const pages = this.context.pages();
     this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
@@ -364,6 +383,22 @@ export class MeetBot {
 
     console.log('Could not confirm in-call state, proceeding anyway...');
     await this.page.waitForTimeout(3000);
+  }
+
+  async saveSession() {
+    if (!this.context) {
+      throw new Error('No browser context active to save session.');
+    }
+    
+    // Ensure parent directory exists
+    const dir = path.dirname(this.authPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    console.log(`[MeetBot] Saving active session state to: ${this.authPath}`);
+    await this.context.storageState({ path: this.authPath });
+    console.log('[MeetBot] Session saved successfully.');
   }
 
   async leave() {
