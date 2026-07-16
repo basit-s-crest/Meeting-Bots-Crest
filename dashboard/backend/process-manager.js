@@ -3,7 +3,9 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { saveSessionStart, saveSessionEnd } from './supabase-helper.js';
-import { uploadTranscriptToGoogleDrive } from './google-drive-helper.js';
+import { uploadTranscriptToGoogleDrive, uploadReportToGoogleDrive } from './google-drive-helper.js';
+import { generateReportWithFallback } from './report-generator.js';
+import { saveMarkdownAsDocx } from './docx-generator.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -103,7 +105,7 @@ class ProcessManager {
     const child = spawn(nodeCmd, args, {
       cwd,
       env,
-      shell: isWin // Important for Windows to execute node command pathing cleanly
+      shell: false
     });
 
     // Log active session startup to Supabase asynchronously
@@ -174,13 +176,44 @@ class ProcessManager {
         console.error(`[ProcessManager] Supabase saveSessionEnd error:`, err.message);
       });
 
-      // Upload to Google Drive if folder ID is configured for this session
-      const driveFolderId = sessionInfo.googleDriveFolderId;
-      if (driveFolderId) {
-        uploadTranscriptToGoogleDrive(sessionId, botType, driveFolderId).catch(err => {
-          console.error(`[ProcessManager] Google Drive upload error for session ${sessionId}:`, err.message);
-        });
-      }
+      // Auto-generate combined report/transcript and sync to Google Drive
+      const filename = `${botType}_${sessionId}.jsonl`;
+      const localTranscriptPath = path.join(TRANSCRIPTS_DIR, filename);
+
+      (async () => {
+        try {
+          // Wait briefly to ensure file descriptors are completely flushed/closed by the child
+          await new Promise(r => setTimeout(r, 1000));
+
+          if (!fs.existsSync(localTranscriptPath)) {
+            console.warn(`[ProcessManager] Transcript file not found at exit: ${localTranscriptPath}`);
+            return;
+          }
+
+          console.log(`[ProcessManager] Auto-generating combined report and transcript for session ${sessionId}...`);
+          const reportMarkdown = await generateReportWithFallback(localTranscriptPath);
+          
+          // Save markdown locally
+          const reportFilename = `${botType}_${sessionId}_report.md`;
+          const reportPath = path.join(TRANSCRIPTS_DIR, reportFilename);
+          fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
+
+          // Save DOCX locally
+          const docxFilename = `${botType}_${sessionId}_report.docx`;
+          const docxPath = path.join(TRANSCRIPTS_DIR, docxFilename);
+          await saveMarkdownAsDocx(reportMarkdown, docxPath);
+          console.log(`[ProcessManager] Local report and DOCX generated successfully for ${sessionId}`);
+
+          // Upload to Google Drive if folder ID is configured
+          const driveFolderId = sessionInfo.googleDriveFolderId;
+          if (driveFolderId) {
+            console.log(`[ProcessManager] Uploading combined document to Google Drive folder: ${driveFolderId}`);
+            await uploadReportToGoogleDrive(filename, driveFolderId);
+          }
+        } catch (err) {
+          console.error(`[ProcessManager] Auto-report generation/Drive sync failed for ${sessionId}:`, err.message);
+        }
+      })();
     });
 
     // If Teams bot, we also set up a file tail watcher on the output JSONL file as a backup/primary data source
@@ -266,41 +299,70 @@ class ProcessManager {
         resolve();
       });
 
-      if (process.platform === 'win32') {
-        // Windows needs taskkill with /t to kill the child processes spawned via shell: true
-        console.log(`[ProcessManager] Killing process tree for session ${sessionId} via taskkill`);
-        spawn('taskkill', ['/pid', String(child.pid), '/f', '/t']);
-      } else {
-        child.kill('SIGINT');
-      }
-      // Try graceful stdin stop first
-      if (child.stdin && child.stdin.writable) {
-        console.log(`[ProcessManager] Sending graceful stop command to session ${sessionId} stdin`);
-        child.stdin.write('stop\n');
-      } else {
-        // Try SIGINT (fallback)
-        child.kill('SIGINT');
-      }
-
-      // Fallback SIGINT in case stdin didn't trigger exit immediately
-      setTimeout(() => {
-        if (!killed) {
-          console.log(`[ProcessManager] Graceful stop did not exit yet, sending SIGINT to ${sessionId}`);
-          try {
+      if (session.type === 'teams') {
+        console.log(`[ProcessManager] Sending graceful stop command to Teams session ${sessionId} stdin`);
+        
+        if (child.stdin && child.stdin.writable) {
+          child.stdin.write('stop\n');
+        } else {
+          // If stdin is not writable, send SIGINT (or fallback to taskkill if on Windows after timeout)
+          if (process.platform !== 'win32') {
             child.kill('SIGINT');
-          } catch {}
+          }
         }
-      }, 1500);
 
-      // Force kill fallback after 5 seconds
-      setTimeout(() => {
-        if (!killed) {
-          console.log(`[ProcessManager] Force killing session ${sessionId} with SIGKILL`);
-          child.kill('SIGKILL');
-          this.activeSessions.delete(sessionId);
-          resolve();
+        // Fallback force kill after 3 seconds if not already exited
+        setTimeout(() => {
+          if (!killed) {
+            console.log(`[ProcessManager] Teams graceful stop timed out after 3s, force killing...`);
+            if (process.platform === 'win32') {
+              spawn('taskkill', ['/pid', String(child.pid), '/f', '/t']);
+            } else {
+              child.kill('SIGKILL');
+            }
+            this.activeSessions.delete(sessionId);
+            resolve();
+          }
+        }, 3000);
+        
+      } else {
+        // ORIGINAL BEHAVIOR FOR MEET/ZOOM
+        if (process.platform === 'win32') {
+          // Windows needs taskkill with /t to kill the child processes spawned via shell: true
+          console.log(`[ProcessManager] Killing process tree for session ${sessionId} via taskkill`);
+          spawn('taskkill', ['/pid', String(child.pid), '/f', '/t']);
+        } else {
+          child.kill('SIGINT');
         }
-      }, 5000);
+        // Try graceful stdin stop first
+        if (child.stdin && child.stdin.writable) {
+          console.log(`[ProcessManager] Sending graceful stop command to session ${sessionId} stdin`);
+          child.stdin.write('stop\n');
+        } else {
+          // Try SIGINT (fallback)
+          child.kill('SIGINT');
+        }
+
+        // Fallback SIGINT in case stdin didn't trigger exit immediately
+        setTimeout(() => {
+          if (!killed) {
+            console.log(`[ProcessManager] Graceful stop did not exit yet, sending SIGINT to ${sessionId}`);
+            try {
+              child.kill('SIGINT');
+            } catch {}
+          }
+        }, 1500);
+
+        // Force kill fallback after 5 seconds
+        setTimeout(() => {
+          if (!killed) {
+            console.log(`[ProcessManager] Force killing session ${sessionId} with SIGKILL`);
+            child.kill('SIGKILL');
+            this.activeSessions.delete(sessionId);
+            resolve();
+          }
+        }, 5000);
+      }
     });
   }
 

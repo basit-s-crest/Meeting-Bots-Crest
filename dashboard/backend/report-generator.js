@@ -125,19 +125,19 @@ export async function generateFirefliesReport(transcriptPath) {
 
 The report MUST include exactly the following sections in this exact order:
 
-### Executive Summary
-[Provide a clear 3-sentence summary of what the meeting was about, the main discussion, and the final outcomes.]
+## Summary
+[Provide a clear summary of what the meeting was about, the main discussion, and the final outcomes, using standard paragraphs. If there are distinct sections, group them with sub-headings like 'Initial participant status', etc. as seen in the text.]
 
-### Meeting Chapters & Outline
+## Meeting Chapters & Outline
 * **[StartTimestamp - EndTimestamp] Topic Title**: Concise description of what was discussed during this period and details from the conversation.
-* **[StartTimestamp - EndTimestamp] Topic Title**: Concise description of what was discussed during this period and details from the conversation.
+Format the timestamp in 12-hour clock (e.g. 01:12:15 pm - 01:13:09 pm).
 
-### Key Decisions
+## Key Decisions
 * **Decision 1**: Clear explanation of the decision.
 * **Decision 2**: Clear explanation of the decision.
 (If no explicit decisions were made, state "No explicit decisions were finalized during this meeting.")
 
-### Action Items Table
+## Action Items Table
 Include a markdown table representing tasks assigned during the meeting:
 | Task Description | Assignee | Priority |
 | :--- | :--- | :--- |
@@ -178,19 +178,87 @@ Include a markdown table representing tasks assigned during the meeting:
     throw new Error(`Groq API Error: ${err.message}`);
   }
 
-  // Compile final markdown report with Speaker Analytics header
-  const stats = calculateSpeakerStats(lines);
-  
-  let finalReport = `# Meeting Report & Analysis\n\n`;
-  finalReport += `## Speaker Analytics\n`;
-  stats.analytics.forEach(speaker => {
-    const timeInfo = stats.totalDurationMs > 0 
-      ? ` (${speaker.percentage}% talk-time)` 
-      : ` (${speaker.percentage}% of words spoken)`;
-    finalReport += `* **${speaker.name}**: Spoke ${speaker.wordCount} words${timeInfo}\n`;
-  });
-  
-  finalReport += `\n---\n\n## AI Insights\n\n${aiTextResponse}`;
+  // Compile final markdown report dynamically formatting the meeting start time as title
+  let dateObj = new Date();
+  if (lines[0] && lines[0].timestamp) {
+    dateObj = new Date(lines[0].timestamp);
+  }
 
-  return finalReport;
+  const monthName = dateObj.toLocaleDateString('en-US', { month: 'short' });
+  const dayVal = dateObj.getDate();
+  const yearVal = dateObj.getFullYear();
+  const hoursVal = String(dateObj.getHours()).padStart(2, '0');
+  const minutesVal = String(dateObj.getMinutes()).padStart(2, '0');
+
+  let tzVal = 'IST';
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' }).formatToParts(dateObj);
+    const tzPart = parts.find(p => p.type === 'timeZoneName');
+    if (tzPart) {
+      tzVal = tzPart.value;
+    }
+  } catch (err) {}
+
+  const titleStr = `Meeting ${monthName} ${dayVal}, ${yearVal} at ${hoursVal}:${minutesVal} ${tzVal}`;
+
+  let finalReport = `# ${titleStr}\n\n`;
+  finalReport += `Meeting records 📘 Transcript\n\n`;
+  finalReport += `${aiTextResponse.trim()}\n\n`;
+  finalReport += `---\n\n`;
+  finalReport += `## Transcript\n\n`;
+
+  // Format and append full transcript
+  lines.forEach(line => {
+    finalReport += `**${line.speaker || 'Unknown'}**: ${line.text || ''}\n\n`;
+  });
+
+  return finalReport.trim() + '\n';
+}
+
+export async function generateReportWithFallback(transcriptPath) {
+  try {
+    return await generateFirefliesReport(transcriptPath);
+  } catch (err) {
+    console.warn(`[ReportGenerator] AI report generation failed, using fallback: ${err.message}`);
+    
+    // Fallback report (no Groq key or API failure)
+    const fileContent = await fs.readFile(transcriptPath, 'utf8');
+    const lines = fileContent.split('\n')
+      .filter(line => line.trim().length > 0)
+      .map(JSON.parse);
+
+    let dateObj = new Date();
+    if (lines[0] && lines[0].timestamp) {
+      dateObj = new Date(lines[0].timestamp);
+    }
+
+    const monthName = dateObj.toLocaleDateString('en-US', { month: 'short' });
+    const dayVal = dateObj.getDate();
+    const yearVal = dateObj.getFullYear();
+    const hoursVal = String(dateObj.getHours()).padStart(2, '0');
+    const minutesVal = String(dateObj.getMinutes()).padStart(2, '0');
+
+    let tzVal = 'IST';
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' }).formatToParts(dateObj);
+      const tzPart = parts.find(p => p.type === 'timeZoneName');
+      if (tzPart) {
+        tzVal = tzPart.value;
+      }
+    } catch (tzErr) {}
+
+    const titleStr = `Meeting ${monthName} ${dayVal}, ${yearVal} at ${hoursVal}:${minutesVal} ${tzVal}`;
+
+    let fallbackReport = `# ${titleStr}\n\n`;
+    fallbackReport += `Meeting records 📘 Transcript\n\n`;
+    fallbackReport += `## Summary\n\nNo AI summary generated for this meeting.\n\n`;
+    fallbackReport += `---\n\n`;
+    fallbackReport += `## Transcript\n\n`;
+
+    lines.forEach(line => {
+      fallbackReport += `**${line.speaker || 'Unknown'}**: ${line.text || ''}\n\n`;
+    });
+
+    return fallbackReport.trim() + '\n';
+  }
 }

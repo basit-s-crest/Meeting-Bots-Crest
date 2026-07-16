@@ -105,6 +105,7 @@ export async function convertMarkdownToDocx(markdownContent) {
     // Heading 2
     if (line.startsWith('## ')) {
       const text = line.substring(3).trim();
+      const pageBreak = text.toLowerCase() === 'transcript';
       children.push(new Paragraph({
         children: [
           new TextRun({
@@ -115,7 +116,8 @@ export async function convertMarkdownToDocx(markdownContent) {
             color: "2563EB" // Royal Blue
           })
         ],
-        spacing: { before: 360, after: 120 }
+        spacing: { before: 360, after: 120 },
+        pageBreakBefore: pageBreak
       }));
       i++;
       continue;
@@ -170,8 +172,16 @@ export async function convertMarkdownToDocx(markdownContent) {
         const docxRows = rows.map((rowCells, rIndex) => {
           const isHeader = rIndex === 0;
           return new TableRow({
-            children: rowCells.map(cellText => {
+            children: rowCells.map((cellText, cellIndex) => {
+              let widthVal = 60;
+              if (cellIndex === 1) widthVal = 25;
+              if (cellIndex === 2) widthVal = 15;
+              
               return new TableCell({
+                width: {
+                  size: widthVal,
+                  type: WidthType.PERCENTAGE
+                },
                 children: [
                   new Paragraph({
                     children: [
