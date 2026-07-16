@@ -52,29 +52,10 @@ GOOGLE_REDIRECT_URI="http://localhost:3000/api/auth/google/callback"
 
 ## 2. Installation
 
-Install dependencies across all directories before starting:
+Install dependencies across all directories in a single command from the root folder (uses npm workspaces):
 
 ```bash
-# Install root dependencies
-npm install
-
-# Install Microsoft Teams bot dependencies
-cd "Microsoft Teams"
-npm install
-cd ..
-
-# Install Google Meet bot dependencies
-cd "Google Meet"
-npm install
-cd ..
-
-# Install Zoom bot dependencies
-cd "Zoom"
-npm install
-cd ..
-
-# Install Dashboard Backend dependencies
-cd "dashboard/backend"
+# Install dependencies for all subfolders recursively
 npm install
 ```
 
@@ -82,6 +63,25 @@ Make sure browser drivers are installed via Playwright:
 ```bash
 npx playwright install chrome
 ```
+
+### First-Time Bot Authentication (First-time Login)
+To ensure the bots can access meetings under authenticated accounts, you must run the login setup once before running them in the background.
+
+* **Google Meet Bot:**
+  Run the following command to log in manually. This opens a headful browser and saves the persistent `auth.json` file:
+  ```bash
+  cd "Google Meet"
+  node src/index.js --login
+  ```
+  *(Log in in the browser, then return to the terminal and press ENTER to save the session).*
+
+* **Microsoft Teams Bot:**
+  Run the following command to log in manually. This creates the persistent `auth.json` file:
+  ```bash
+  cd "Microsoft Teams"
+  node src/index.js --login
+  ```
+  *(Log in in the browser, then return to the terminal and press ENTER to save the session).*
 
 ---
 

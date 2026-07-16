@@ -47,7 +47,6 @@ class ProcessManager {
         '--name', botName,
         '--output', 'websocket',
         '--port', String(wsPort),
-        '--user-data-dir', './.user_data',
         '--channel', 'chrome'
       ];
       if (!isHeadless) {
