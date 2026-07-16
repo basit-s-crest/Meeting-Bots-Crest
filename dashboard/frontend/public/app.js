@@ -3,6 +3,7 @@ let activeSessionId = null;
 let activeBotType = null;
 let socket = null;
 let visualizerTimeout = null;
+let currentReportFileName = null;
 
 // UI elements
 const launchForm = document.getElementById('launchForm');
@@ -53,6 +54,18 @@ const reportModalDownloadDocxBtn = document.getElementById('reportModalDownloadD
 
 let currentViewedLines = [];
 
+// Report Scheduling elements
+const reportSchedulingCard = document.getElementById('reportSchedulingCard');
+const reportSchedulingRawMention = document.getElementById('reportSchedulingRawMention');
+const reportSchedTitle = document.getElementById('reportSchedTitle');
+const reportSchedZoomLink = document.getElementById('reportSchedZoomLink');
+const reportSchedDate = document.getElementById('reportSchedDate');
+const reportSchedTime = document.getElementById('reportSchedTime');
+const reportSchedConfirmBtn = document.getElementById('reportSchedConfirmBtn');
+const reportSchedDismissBtn = document.getElementById('reportSchedDismissBtn');
+const reportSchedSuccess = document.getElementById('reportSchedSuccess');
+const reportSchedForm = document.getElementById('reportSchedForm');
+
 // Initialize Dashboard
 document.addEventListener('DOMContentLoaded', () => {
   loadActiveSessions();
@@ -77,6 +90,21 @@ document.addEventListener('DOMContentLoaded', () => {
   // Bind report close events
   reportModalCloseBtn.addEventListener('click', () => reportModal.classList.add('hidden'));
   reportModalCloseBtn2.addEventListener('click', () => reportModal.classList.add('hidden'));
+  
+  if (reportSchedConfirmBtn) {
+    reportSchedConfirmBtn.addEventListener('click', handleReportSchedConfirm);
+  }
+  if (reportSchedDismissBtn) {
+    reportSchedDismissBtn.addEventListener('click', handleReportSchedDismiss);
+  }
+  if (reportSchedTitle && reportSchedDate && reportSchedTime) {
+    const validate = () => {
+      reportSchedConfirmBtn.disabled = !(reportSchedTitle.value.trim() && reportSchedDate.value && reportSchedTime.value);
+    };
+    reportSchedTitle.addEventListener('input', validate);
+    reportSchedDate.addEventListener('input', validate);
+    reportSchedTime.addEventListener('input', validate);
+  }
   
   // Close modal on background click
   window.addEventListener('click', (e) => {
@@ -650,24 +678,20 @@ async function openReportFlow(fileName, button) {
       const data = await res.json();
       showReport(fileName, data);
     } else if (res.status === 404) {
-      const confirmGen = confirm('No report exists for this session. Would you like to generate one using Groq AI? This may take several seconds.');
-      if (confirmGen) {
-        button.textContent = 'Generating...';
-        
-        const genRes = await fetch(`/api/transcripts/${fileName}/generate-report`, {
-          method: 'POST'
-        });
+      button.textContent = 'Generating...';
+      
+      const genRes = await fetch(`/api/transcripts/${fileName}/generate-report`, {
+        method: 'POST'
+      });
 
-        const genData = await genRes.json();
-        
-        if (genRes.ok && genData.success) {
-          alert('Report generated successfully!');
-          const fetchRes = await fetch(`/api/transcripts/${fileName}/report`);
-          const reportData = await fetchRes.json();
-          showReport(fileName, reportData);
-        } else {
-          throw new Error(genData.error || 'Failed to generate report');
-        }
+      const genData = await genRes.json();
+      
+      if (genRes.ok && genData.success) {
+        const fetchRes = await fetch(`/api/transcripts/${fileName}/report`);
+        const reportData = await fetchRes.json();
+        showReport(fileName, reportData);
+      } else {
+        throw new Error(genData.error || 'Failed to generate report');
       }
     } else {
       const errorData = await res.json();
@@ -685,7 +709,8 @@ async function openReportFlow(fileName, button) {
 /**
  * Displays the report markdown and speaker talk-time progress bars inside the reportModal
  */
-function showReport(fileName, { report, analytics }) {
+function showReport(fileName, { report, analytics, scheduling }) {
+  currentReportFileName = fileName;
   reportModalTitle.textContent = `Report: ${fileName}`;
   reportSpeakerStats.innerHTML = '';
 
@@ -723,6 +748,26 @@ function showReport(fileName, { report, analytics }) {
 
   // Render markdown text to HTML (XSS escaped first)
   reportContent.innerHTML = renderMarkdownToHtml(report);
+
+  // Show/Hide scheduling card
+  if (reportSchedulingCard) {
+    if (scheduling && scheduling.scheduling_detected && scheduling.status === 'pending') {
+      reportSchedulingRawMention.textContent = `"${scheduling.scheduling.raw_mention || ''}"`;
+      reportSchedTitle.value = scheduling.scheduling.title || '';
+      reportSchedDate.value = scheduling.scheduling.date || '';
+      reportSchedTime.value = scheduling.scheduling.time || '';
+      reportSchedZoomLink.value = '';
+      
+      // Perform initial validation
+      reportSchedConfirmBtn.disabled = !(reportSchedTitle.value.trim() && reportSchedDate.value && reportSchedTime.value);
+      
+      if (reportSchedSuccess) reportSchedSuccess.classList.add('hidden');
+      if (reportSchedForm) reportSchedForm.classList.remove('hidden');
+      reportSchedulingCard.classList.remove('hidden');
+    } else {
+      reportSchedulingCard.classList.add('hidden');
+    }
+  }
 
   reportModalDownloadBtn.onclick = () => downloadReportFile(fileName, report);
   reportModalDownloadDocxBtn.onclick = () => downloadReportDocxFile(fileName);
@@ -882,5 +927,87 @@ async function checkGoogleDriveStatus() {
     }
   } catch (err) {
     console.error('Failed to check Google Drive status:', err);
+  }
+}
+
+/**
+ * Send report scheduling suggestion confirmation request to backend.
+ */
+async function handleReportSchedConfirm() {
+  const title = reportSchedTitle.value.trim();
+  const date = reportSchedDate.value;
+  const time = reportSchedTime.value;
+  const zoomLink = reportSchedZoomLink.value.trim();
+  
+  if (!title || !date || !time) {
+    alert("Title, Date, and Time are required.");
+    return;
+  }
+  
+  reportSchedConfirmBtn.disabled = true;
+  reportSchedDismissBtn.disabled = true;
+  const originalBtnText = reportSchedConfirmBtn.textContent;
+  reportSchedConfirmBtn.textContent = 'Adding to Calendar...';
+  
+  try {
+    const res = await fetch('/api/calendar/confirm-report-schedule', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: currentReportFileName,
+        title,
+        date,
+        time,
+        zoomLink
+      })
+    });
+    
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data.error || 'Failed to confirm suggestion');
+    }
+    
+    if (reportSchedForm) reportSchedForm.classList.add('hidden');
+    if (reportSchedSuccess) reportSchedSuccess.classList.remove('hidden');
+  } catch (err) {
+    alert(`Error: ${err.message}`);
+  } finally {
+    reportSchedConfirmBtn.disabled = false;
+    reportSchedDismissBtn.disabled = false;
+    reportSchedConfirmBtn.textContent = originalBtnText;
+  }
+}
+
+/**
+ * Send report scheduling suggestion dismissal request to backend.
+ */
+async function handleReportSchedDismiss() {
+  if (!currentReportFileName) return;
+  
+  reportSchedConfirmBtn.disabled = true;
+  reportSchedDismissBtn.disabled = true;
+  
+  try {
+    const res = await fetch('/api/calendar/dismiss-report-schedule', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: currentReportFileName
+      })
+    });
+    
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data.error || 'Failed to dismiss suggestion');
+    }
+    
+    if (reportSchedulingCard) {
+      reportSchedulingCard.classList.add('hidden');
+    }
+  } catch (err) {
+    alert(`Error: ${err.message}`);
+  } finally {
+    reportSchedConfirmBtn.disabled = false;
+    reportSchedDismissBtn.disabled = false;
   }
 }
