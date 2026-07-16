@@ -14,6 +14,7 @@ import { supabase } from './supabase-client.js';
 import { uploadReport } from './supabase-helper.js';
 import { saveMarkdownAsDocx } from './docx-generator.js';
 import { getOAuth2Client, saveRefreshToken, loadRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
+import { calendarRouter } from './calendar/calendar-router.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,6 +31,9 @@ app.use(express.json());
 // Serve static frontend files
 const frontendPublicPath = path.resolve(__dirname, '../frontend/public');
 app.use(express.static(frontendPublicPath));
+
+// Google Calendar Scheduling Routes
+app.use('/api/calendar', calendarRouter);
 
 // Google Drive OAuth Routes
 app.get('/api/auth/google', (req, res) => {
@@ -368,26 +372,79 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
 
   const transcriptsDir = path.join(__dirname, 'transcripts');
   const filePath = path.join(transcriptsDir, filename);
+  const reportFilename = filename.replace('.jsonl', '_report.md');
+  const reportPath = path.join(transcriptsDir, reportFilename);
+  const schedulingFilename = filename.replace('.jsonl', '_report_scheduling.json');
+  const schedulingPath = path.join(transcriptsDir, schedulingFilename);
+
+  // 1. REPORT CACHING CHECK:
+  if (fs.existsSync(reportPath)) {
+    console.log(`[Server] Report already exists for ${filename}. Loading cached files.`);
+    try {
+      const reportMarkdown = fs.readFileSync(reportPath, 'utf8');
+      let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
+      if (fs.existsSync(schedulingPath)) {
+        schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+      }
+      return res.json({
+        success: true,
+        cached: true,
+        report: reportMarkdown,
+        scheduling: schedulingData
+      });
+    } catch (cacheErr) {
+      console.error('[Server] Failed to read cached files:', cacheErr.message);
+    }
+  }
+
+  // TODO: Add a future explicit endpoint like POST /api/transcripts/:filename/regenerate-report to force regeneration
 
   if (!fs.existsSync(filePath)) {
     return res.status(404).json({ error: 'Transcript file not found' });
   }
 
   try {
-    const reportMarkdown = await generateFirefliesReport(filePath);
+    const { markdown, scheduling } = await generateFirefliesReport(filePath);
     
     // Save report file locally
-    const reportFilename = filename.replace('.jsonl', '_report.md');
-    const reportPath = path.join(transcriptsDir, reportFilename);
-    fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
+    fs.writeFileSync(reportPath, markdown, 'utf8');
 
     // Generate and save docx file locally
     try {
       const docxFilename = filename.replace('.jsonl', '_report.docx');
       const docxPath = path.join(transcriptsDir, docxFilename);
-      await saveMarkdownAsDocx(reportMarkdown, docxPath);
+      await saveMarkdownAsDocx(markdown, docxPath);
     } catch (docxErr) {
       console.error(`[Server] Failed to generate DOCX report:`, docxErr.message);
+    }
+
+    // Save scheduling data companion JSON with status: "pending"
+    let schedulingData = {
+      scheduling_detected: false,
+      scheduling: null,
+      status: 'none'
+    };
+
+    let existingActioned = false;
+    if (fs.existsSync(schedulingPath)) {
+      try {
+        const oldData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+        if (oldData.status === 'confirmed' || oldData.status === 'dismissed') {
+          existingActioned = true;
+          schedulingData = oldData;
+        }
+      } catch (e) {}
+    }
+
+    if (!existingActioned && scheduling && scheduling.scheduling_detected) {
+      schedulingData = {
+        scheduling_detected: true,
+        scheduling: scheduling.scheduling,
+        status: 'pending'
+      };
+      fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
+    } else if (!existingActioned) {
+      fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
     }
 
     // Parse filename to update Supabase row and upload report
@@ -413,14 +470,27 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
       }
     }
 
-    res.json({ success: true });
+    res.json({
+      success: true,
+      report: markdown,
+      scheduling: schedulingData
+    });
   } catch (err) {
-    console.error(`[Server] Report generation failed for ${filename}:`, err.message);
+    console.error('[Server] Failed to generate report:', err.message);
     
-    if (err.message.includes('GROQ_API_KEY not set')) {
-      return res.status(503).json({ error: 'GROQ_API_KEY not set in .env' });
-    } else if (err.message.includes('Groq API Error')) {
-      return res.status(503).json({ error: err.message });
+    if (fs.existsSync(reportPath)) {
+      console.log('[Server] Found existing report file after failure, returning success as fallback.');
+      let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
+      if (fs.existsSync(schedulingPath)) {
+        try {
+          schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+        } catch (e) {}
+      }
+      return res.json({
+        success: true,
+        report: fs.readFileSync(reportPath, 'utf8'),
+        scheduling: schedulingData
+      });
     }
     res.status(500).json({ error: `Report generation failed: ${err.message}` });
   }
@@ -441,6 +511,18 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
   const filePath = path.join(transcriptsDir, filename);
   const reportFilename = filename.replace('.jsonl', '_report.md');
   const reportPath = path.join(transcriptsDir, reportFilename);
+  const schedulingFilename = filename.replace('.jsonl', '_report_scheduling.json');
+  const schedulingPath = path.join(transcriptsDir, schedulingFilename);
+
+  // Load scheduling data
+  let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
+  if (fs.existsSync(schedulingPath)) {
+    try {
+      schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+    } catch (e) {
+      console.error('[Server] Failed to parse companion scheduling JSON:', e.message);
+    }
+  }
 
   try {
     // 1. Try to fetch from Supabase first
@@ -478,7 +560,8 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
             const stats = calculateSpeakerStats(lines);
             return res.json({
               report: reportMarkdown,
-              analytics: stats.analytics
+              analytics: stats.analytics,
+              scheduling: schedulingData
             });
           }
         }
@@ -505,7 +588,8 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
 
     res.json({
       report: reportMarkdown,
-      analytics: stats.analytics
+      analytics: stats.analytics,
+      scheduling: schedulingData
     });
   } catch (err) {
     res.status(500).json({ error: `Failed to retrieve report: ${err.message}` });
