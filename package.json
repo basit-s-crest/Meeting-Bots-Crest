@@ -1,0 +1,10 @@
+{
+  "name": "meeting-bots-crest-root",
+  "private": true,
+  "workspaces": [
+    "Google Meet",
+    "Microsoft Teams",
+    "Zoom",
+    "dashboard/backend"
+  ]
+}

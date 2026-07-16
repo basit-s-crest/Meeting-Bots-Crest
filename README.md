@@ -52,29 +52,10 @@ GOOGLE_REDIRECT_URI="http://localhost:3000/api/auth/google/callback"
 
 ## 2. Installation
 
-Install dependencies across all directories before starting:
+Install dependencies across all directories in a single command from the root folder (uses npm workspaces):
 
 ```bash
-# Install root dependencies
-npm install
-
-# Install Microsoft Teams bot dependencies
-cd "Microsoft Teams"
-npm install
-cd ..
-
-# Install Google Meet bot dependencies
-cd "Google Meet"
-npm install
-cd ..
-
-# Install Zoom bot dependencies
-cd "Zoom"
-npm install
-cd ..
-
-# Install Dashboard Backend dependencies
-cd "dashboard/backend"
+# Install dependencies for all subfolders recursively
 npm install
 ```
 
