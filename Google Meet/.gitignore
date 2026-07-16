@@ -25,3 +25,4 @@ session_capture_*
 *.wav
 meet_dom_dump_*
 meet_diagnostic_*
+auth.json

@@ -121,8 +121,49 @@ export async function generateFirefliesReport(transcriptPath) {
     return `[${timeStr}] ${line.speaker}: ${line.text}`;
   }).join('\n');
 
-  const systemPrompt = `You are a professional meeting assistant. Review the transcript of the meeting below and produce a structured, high-quality meeting report in markdown format.
+  // Extract reference date and time in the configured CALENDAR_TIMEZONE
+  const tz = process.env.CALENDAR_TIMEZONE || 'Asia/Kolkata';
+  let referenceDateStr = 'unknown';
+  let referenceTimeStr = 'unknown';
+  
+  if (lines.length > 0 && lines[0].timestamp) {
+    try {
+      const firstTs = new Date(lines[0].timestamp);
+      const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      });
+      const parts = formatter.formatToParts(firstTs);
+      const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+      referenceDateStr = `${p.year}-${p.month}-${p.day}`;
+      referenceTimeStr = `${p.hour}:${p.minute}`;
+    } catch (e) {
+      console.warn('[Report Generator] Failed to parse reference date/time from transcript:', e.message);
+    }
+  }
 
+  const systemPrompt = `You are a professional meeting assistant. Review the transcript of the meeting below and produce a structured, high-quality meeting report and detect any scheduling intent.
+
+You MUST respond with a JSON object containing exactly the following keys:
+{
+  "summary": "The full Markdown report",
+  "scheduling_detected": true or false,
+  "scheduling": {
+    "date": "YYYY-MM-DD",
+    "time": "HH:MM",
+    "timezone": "The reference meeting's timezone",
+    "title": "Clean, best-guess title for the meeting",
+    "raw_mention": "The exact sentence/phrase from the transcript that triggered this detection"
+  }
+}
+
+Guidelines for "summary":
 The report MUST include exactly the following sections in this exact order:
 
 ## Summary
@@ -134,7 +175,6 @@ Format the timestamp in 12-hour clock (e.g. 01:12:15 pm - 01:13:09 pm).
 
 ## Key Decisions
 * **Decision 1**: Clear explanation of the decision.
-* **Decision 2**: Clear explanation of the decision.
 (If no explicit decisions were made, state "No explicit decisions were finalized during this meeting.")
 
 ## Action Items Table
@@ -142,10 +182,27 @@ Include a markdown table representing tasks assigned during the meeting:
 | Task Description | Assignee | Priority |
 | :--- | :--- | :--- |
 | [Detail of task] | [Full Name of Assignee] | [High/Medium/Low] |
-(If no tasks or action items were assigned, state "No action items were assigned.")`;
+
+Guidelines for "scheduling_detected" and "scheduling":
+- Set "scheduling_detected" to true ONLY if there is an explicit request/mention in the transcript to schedule a future meeting or event.
+- If "scheduling_detected" is true, populate the "scheduling" object. If false, set "scheduling" to null.
+- "date": Resolve any relative dates (like "tomorrow", "next Tuesday", "July 20") to an absolute ISO date format (YYYY-MM-DD), using the Reference Date of the meeting as the base.
+- "time": Resolve any times mentioned (like "at 5pm", "at 3") to HH:MM (24-hour format) in the meeting's local time. If no specific time is mentioned, set "time" to null.
+- "timezone": Set this to the reference meeting's timezone.
+- "title": Generate a clean, descriptive meeting title based on the context of the conversation. Do not include date/time in the title.
+- "raw_mention": Extract the actual sentence/phrase from the transcript that triggered the scheduling detection.
+
+Reference Date of the meeting (the date the meeting actually occurred in local time): ${referenceDateStr}
+Reference Time of the meeting: ${referenceTimeStr}
+Meeting Timezone: ${tz}`;
 
   // Call the Groq API
-  let aiTextResponse = '';
+  let resultJson = {
+    summary: '',
+    scheduling_detected: false,
+    scheduling: null
+  };
+
   try {
     const groq = new Groq({ apiKey });
     
@@ -159,11 +216,13 @@ Include a markdown table representing tasks assigned during the meeting:
             { role: 'user', content: `Here is the meeting transcript to summarize:\n${formattedTranscript}` }
           ],
           model: 'llama-3.3-70b-versatile',
+          response_format: { type: "json_object" },
           temperature: 0.4,
           max_tokens: 4096,
         });
 
-        aiTextResponse = completion.choices[0]?.message?.content || '';
+        const rawContent = completion.choices[0]?.message?.content || '{}';
+        resultJson = JSON.parse(rawContent);
         break; // Success — exit retry loop
       } catch (retryErr) {
         console.warn(`[ReportGenerator] Groq attempt ${attempt}/${maxRetries} failed: ${retryErr.message}`);
@@ -175,7 +234,13 @@ Include a markdown table representing tasks assigned during the meeting:
       }
     }
   } catch (err) {
-    throw new Error(`Groq API Error: ${err.message}`);
+    console.error(`[ReportGenerator] Failed to call Groq or parse response: ${err.message}`);
+    // Default scheduling_detected to false on error/timeout as per requirement
+    resultJson = {
+      summary: `Failed to generate AI insights due to an error: ${err.message}`,
+      scheduling_detected: false,
+      scheduling: null
+    };
   }
 
   // Compile final markdown report dynamically formatting the meeting start time as title
@@ -203,7 +268,7 @@ Include a markdown table representing tasks assigned during the meeting:
 
   let finalReport = `# ${titleStr}\n\n`;
   finalReport += `Meeting records 📘 Transcript\n\n`;
-  finalReport += `${aiTextResponse.trim()}\n\n`;
+  finalReport += `${resultJson.summary.trim()}\n\n`;
   finalReport += `---\n\n`;
   finalReport += `## Transcript\n\n`;
 
@@ -212,7 +277,13 @@ Include a markdown table representing tasks assigned during the meeting:
     finalReport += `**${line.speaker || 'Unknown'}**: ${line.text || ''}\n\n`;
   });
 
-  return finalReport.trim() + '\n';
+  return {
+    markdown: finalReport.trim() + '\n',
+    scheduling: {
+      scheduling_detected: resultJson.scheduling_detected || false,
+      scheduling: resultJson.scheduling || null
+    }
+  };
 }
 
 export async function generateReportWithFallback(transcriptPath) {
@@ -259,6 +330,12 @@ export async function generateReportWithFallback(transcriptPath) {
       fallbackReport += `**${line.speaker || 'Unknown'}**: ${line.text || ''}\n\n`;
     });
 
-    return fallbackReport.trim() + '\n';
+    return {
+      markdown: fallbackReport.trim() + '\n',
+      scheduling: {
+        scheduling_detected: false,
+        scheduling: null
+      }
+    };
   }
 }

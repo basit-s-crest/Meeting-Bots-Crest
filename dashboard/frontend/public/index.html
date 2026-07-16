@@ -190,6 +190,48 @@
             <!-- Dynamic progress bars go here -->
           </div>
         </div>
+        
+        <!-- Scheduling Suggestion Card -->
+        <div id="reportSchedulingCard" class="glass-card hidden" style="border: 1px solid rgba(99, 102, 241, 0.4); background: rgba(99, 102, 241, 0.04); margin-bottom: 1.5rem; padding: 1.25rem; border-radius: 8px;">
+          <!-- Success State -->
+          <div id="reportSchedSuccess" class="hidden">
+            <h3 style="color: #10b981; margin: 0; display: flex; align-items: center; gap: 0.5rem; font-size: 1.15rem; font-weight: 600;">
+              ✓ Added to Google Calendar!
+            </h3>
+          </div>
+          <!-- Form State -->
+          <div id="reportSchedForm">
+            <h3 style="margin-top: 0; color: #4f46e5; display: flex; align-items: center; gap: 0.5rem; font-size: 1.15rem; font-weight: 600;">
+              📅 Detected Scheduling Intent
+            </h3>
+            <p style="color: #1e293b; font-size: 0.95rem; font-style: italic; background: rgba(99, 102, 241, 0.08); border-left: 4px solid #6366f1; padding: 0.6rem 0.85rem; border-radius: 4px; margin: 0.5rem 0; font-weight: 500;" id="reportSchedulingRawMention">
+              "..."
+            </p>
+            <div class="scheduling-edit-fields" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1.25rem;">
+              <div class="form-group" style="display: flex; flex-direction: column;">
+                <label style="font-size: 0.85rem; color: #475569; margin-bottom: 0.25rem; font-weight: 600;">Meeting Title</label>
+                <input type="text" id="reportSchedTitle" style="padding: 0.5rem 0.75rem; border-radius: 6px; background: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; font-family: inherit; font-size: 0.9rem;">
+              </div>
+              <div class="form-group" style="display: flex; flex-direction: column;">
+                <label style="font-size: 0.85rem; color: #475569; margin-bottom: 0.25rem; font-weight: 600;">Zoom Link (optional)</label>
+                <input type="url" id="reportSchedZoomLink" placeholder="https://zoom.us/j/..." style="padding: 0.5rem 0.75rem; border-radius: 6px; background: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; font-family: inherit; font-size: 0.9rem;">
+              </div>
+              <div class="form-group" style="display: flex; flex-direction: column;">
+                <label style="font-size: 0.85rem; color: #475569; margin-bottom: 0.25rem; font-weight: 600;">Date</label>
+                <input type="date" id="reportSchedDate" style="padding: 0.5rem 0.75rem; border-radius: 6px; background: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; font-family: inherit; font-size: 0.9rem;">
+              </div>
+              <div class="form-group" style="display: flex; flex-direction: column;">
+                <label style="font-size: 0.85rem; color: #475569; margin-bottom: 0.25rem; font-weight: 600;">Time (24h)</label>
+                <input type="time" id="reportSchedTime" style="padding: 0.5rem 0.75rem; border-radius: 6px; background: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; font-family: inherit; font-size: 0.9rem;">
+              </div>
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1.25rem; border-top: 1px solid rgba(0, 0, 0, 0.05); padding-top: 1rem;">
+              <button id="reportSchedDismissBtn" class="btn btn-secondary" style="padding: 0.5rem 1.25rem; font-size: 0.85rem; border-radius: 6px; background: #f8fafc; border: 1px solid #cbd5e1; color: #475569; font-weight: 500; cursor: pointer;">Dismiss</button>
+              <button id="reportSchedConfirmBtn" class="btn btn-primary" style="padding: 0.5rem 1.25rem; font-size: 0.85rem; border-radius: 6px; background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border: none; font-weight: 500; cursor: pointer;">Confirm & Add to Calendar</button>
+            </div>
+          </div>
+        </div>
+
         <hr class="report-divider">
         <div class="report-section">
           <h3 class="section-subtitle">AI Summary & Highlights</h3>

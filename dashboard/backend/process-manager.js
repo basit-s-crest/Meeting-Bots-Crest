@@ -49,7 +49,6 @@ class ProcessManager {
         '--name', botName,
         '--output', 'websocket',
         '--port', String(wsPort),
-        '--user-data-dir', './.user_data',
         '--channel', 'chrome'
       ];
       if (!isHeadless) {
@@ -191,7 +190,7 @@ class ProcessManager {
           }
 
           console.log(`[ProcessManager] Auto-generating combined report and transcript for session ${sessionId}...`);
-          const reportMarkdown = await generateReportWithFallback(localTranscriptPath);
+          const { markdown: reportMarkdown, scheduling } = await generateReportWithFallback(localTranscriptPath);
           
           // Save markdown locally
           const reportFilename = `${botType}_${sessionId}_report.md`;
@@ -203,6 +202,22 @@ class ProcessManager {
           const docxPath = path.join(TRANSCRIPTS_DIR, docxFilename);
           await saveMarkdownAsDocx(reportMarkdown, docxPath);
           console.log(`[ProcessManager] Local report and DOCX generated successfully for ${sessionId}`);
+
+          // Save scheduling data companion JSON
+          const schedulingPath = path.join(TRANSCRIPTS_DIR, `${botType}_${sessionId}_scheduling.json`);
+          let schedulingData = {
+            scheduling_detected: false,
+            scheduling: null,
+            status: 'none'
+          };
+          if (scheduling && scheduling.scheduling_detected) {
+            schedulingData = {
+              scheduling_detected: true,
+              scheduling: scheduling.scheduling,
+              status: 'pending'
+            };
+          }
+          fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
 
           // Upload to Google Drive if folder ID is configured
           const driveFolderId = sessionInfo.googleDriveFolderId;
