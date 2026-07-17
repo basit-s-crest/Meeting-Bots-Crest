@@ -4,6 +4,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { saveSessionStart, saveSessionEnd } from './supabase-helper.js';
 import { uploadTranscriptToGoogleDrive } from './google-drive-helper.js';
+import { processMeeting } from './memory-client.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -172,6 +173,9 @@ class ProcessManager {
       saveSessionEnd(sessionId, botType).catch(err => {
         console.error(`[ProcessManager] Supabase saveSessionEnd error:`, err.message);
       });
+
+      // Trigger post-meeting extraction in the memory service
+      processMeeting(sessionId);
 
       // Upload to Google Drive if folder ID is configured for this session
       const driveFolderId = sessionInfo.googleDriveFolderId;

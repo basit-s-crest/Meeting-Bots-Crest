@@ -10,3 +10,13 @@ transcripts/
 google_refresh_token.json
 Google Meet/auth.json
 auth.json
+
+# Python memory service
+memory-service/.venv/
+memory-service/*.egg-info/
+**/__pycache__/
+
+# Idea files
+.commandcode/
+*.md_
+

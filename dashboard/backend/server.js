@@ -15,6 +15,7 @@ import { uploadReport } from './supabase-helper.js';
 import { saveMarkdownAsDocx } from './docx-generator.js';
 import { getOAuth2Client, saveRefreshToken, loadRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { calendarRouter } from './calendar/calendar-router.js';
+import { ingestSegment, queryMemory, processMeeting, getProjectMemory } from './memory-client.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,6 +35,25 @@ app.use(express.static(frontendPublicPath));
 
 // Google Calendar Scheduling Routes
 app.use('/api/calendar', calendarRouter);
+
+// Memory Service Routes (cross-meeting query + project memory)
+app.post('/api/memory/query', async (req, res) => {
+  try {
+    const result = await queryMemory(req.body);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/memory/projects/:id', async (req, res) => {
+  try {
+    const data = await getProjectMemory(req.params.id);
+    res.json(data || {});
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Google Drive OAuth Routes
 app.get('/api/auth/google', (req, res) => {
@@ -160,6 +180,15 @@ app.post('/api/sessions/start', async (req, res) => {
     sessionInfo.onTranscriptCallback = (transcriptEvent) => {
       // Teams returns transcripts directly
       broadcastToClients(sessionId, 'transcript', transcriptEvent);
+      if (transcriptEvent.isFinal) {
+        ingestSegment(sessionId, {
+          speaker: transcriptEvent.speaker,
+          text: transcriptEvent.text,
+          startTs: 0,
+          endTs: 0,
+          isFinal: true,
+        });
+      }
     };
 
     // If Google Meet or Zoom, we connect to their WebSocket stream to extract audio and push to Deepgram
@@ -671,6 +700,14 @@ function connectToBotAudioStream(sessionId, wsPort) {
           // Write to local jsonl file if final
           if (event.isFinal) {
             logStream.write(JSON.stringify(event) + '\n');
+            // Push to memory service for cross-meeting search
+            ingestSegment(sessionId, {
+              speaker: event.speaker,
+              text: event.text,
+              startTs: 0,
+              endTs: 0,
+              isFinal: true,
+            });
           }
         },
         onError: (err) => {
