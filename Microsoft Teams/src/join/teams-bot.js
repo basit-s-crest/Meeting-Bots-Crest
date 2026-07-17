@@ -478,15 +478,90 @@ export class TeamsBot {
    */
   async leave() {
     try {
-      console.log('[TeamsBot] Leaving meeting...');
-      const leaveBtn = await this.page.$(SELECTORS.inCall.leaveBtn);
-      if (leaveBtn) {
-        await leaveBtn.click();
-        await this.page.waitForTimeout(1000);
+      console.log('[TeamsBot] [LEAVE] Initiating leave sequence.');
+      
+      // Take pre-leave screenshot if page is available
+      if (this.page && !this.page.isClosed()) {
+        const beforePicPath = 'C:\\Users\\IshitaBhojani\\.gemini\\antigravity-ide\\brain\\b3046ec9-e9ff-476f-8255-4ba860bd50de\\leave_before.png';
+        console.log(`[TeamsBot] [LEAVE] Saving pre-leave screenshot to: ${beforePicPath}`);
+        await this.page.screenshot({ path: beforePicPath }).catch(err => {
+          console.warn('[TeamsBot] [LEAVE] Failed to take pre-leave screenshot:', err.message);
+        });
+      }
+
+      const selectors = [
+        'button#hangup-button',
+        'button[data-tid="hangup-button"]',
+        'button[aria-label*="Leave" i]',
+        'button[aria-label*="Hang up" i]',
+        'button:has-text("Leave")',
+        'button:has-text("Hang up")',
+        'button[data-tid="prejoin-cancel-button"]',
+        'button:has-text("Cancel")'
+      ];
+
+      let clicked = false;
+      for (const sel of selectors) {
+        try {
+          const btn = this.page.locator(sel).first();
+          if (btn && await btn.isVisible()) {
+            console.log(`[TeamsBot] [LEAVE] Found button with selector: ${sel}`);
+            
+            try {
+              console.log(`[TeamsBot] [LEAVE] Attempting standard Playwright click on: ${sel}`);
+              await btn.click({ force: true, timeout: 2000 });
+              console.log(`[TeamsBot] [LEAVE] Standard click on ${sel} completed.`);
+              clicked = true;
+            } catch (clickErr) {
+              console.log(`[TeamsBot] [LEAVE] Playwright click failed: ${clickErr.message}. Attempting JS mouse event sequence...`);
+              await this.page.evaluate((s) => {
+                let el;
+                if (s.includes(':has-text')) {
+                  const match = s.match(/:has-text\("([^"]+)"\)/);
+                  const text = match ? match[1] : '';
+                  const btns = Array.from(document.querySelectorAll('button, div[role="button"]'));
+                  el = btns.find(b => (b.textContent || '').includes(text));
+                } else {
+                  el = document.querySelector(s);
+                }
+                if (el) {
+                  el.focus();
+                  el.click();
+                  el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                  el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                  el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                }
+              }, sel);
+              console.log(`[TeamsBot] [LEAVE] JS mouse event click sequence executed.`);
+              clicked = true;
+            }
+
+            if (clicked) {
+              await this.page.waitForTimeout(2000);
+              break;
+            }
+          }
+        } catch (selErr) {
+          console.warn(`[TeamsBot] [LEAVE] Error evaluating selector ${sel}:`, selErr.message);
+        }
+      }
+
+      if (!clicked) {
+        console.warn('[TeamsBot] [LEAVE] No visible leave button found in the page context.');
+      } else {
+        // Take post-leave screenshot if page is still open
+        if (this.page && !this.page.isClosed()) {
+          const afterPicPath = 'C:\\Users\\IshitaBhojani\\.gemini\\antigravity-ide\\brain\\b3046ec9-e9ff-476f-8255-4ba860bd50de\\leave_after.png';
+          console.log(`[TeamsBot] [LEAVE] Saving post-leave screenshot to: ${afterPicPath}`);
+          await this.page.screenshot({ path: afterPicPath }).catch(err => {
+            console.warn('[TeamsBot] [LEAVE] Failed to take post-leave screenshot (page may have already closed):', err.message);
+          });
+        }
       }
     } catch (err) {
-      console.warn('[TeamsBot] Error clicking leave button:', err.message);
+      console.warn('[TeamsBot] [LEAVE] Exception in leave sequence:', err.message);
     }
+    
     await this.close();
   }
 

@@ -122,6 +122,20 @@ async function main() {
     guest: config.guest
   });
 
+  // Listen for graceful stop command on stdin
+  if (!config.login) {
+    process.stdin.on('data', async (data) => {
+      const text = data.toString().trim();
+      if (text === 'stop') {
+        console.log('[TeamsBot] Received stop command on stdin. Shutting down gracefully...');
+        if (lifecycle) {
+          await lifecycle.stop().catch(() => {});
+        }
+        process.exit(0);
+      }
+    });
+  }
+
   process.on('SIGINT', async () => {
     console.log('[TeamsBot] Received SIGINT. Shutting down gracefully...');
     await lifecycle.stop();
