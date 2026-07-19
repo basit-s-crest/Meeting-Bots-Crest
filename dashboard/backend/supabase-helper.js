@@ -15,7 +15,7 @@ const TRANSCRIPTS_DIR = path.resolve(__dirname, 'transcripts');
  * @param {string} meetingUrl 
  * @param {string} botName 
  */
-export async function saveSessionStart(sessionId, botType, meetingUrl, botName) {
+export async function saveSessionStart(sessionId, botType, meetingUrl, botName, projectId) {
   try {
     const { error } = await supabase
       .from('meeting_sessions')
@@ -24,7 +24,8 @@ export async function saveSessionStart(sessionId, botType, meetingUrl, botName) 
         bot_type: botType,
         meeting_url: meetingUrl,
         bot_name: botName || 'Meeting Bot',
-        status: 'capturing'
+        status: 'capturing',
+        project_id: projectId
       });
 
     if (error) throw error;

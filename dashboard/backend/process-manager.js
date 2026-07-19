@@ -6,7 +6,6 @@ import { saveSessionStart, saveSessionEnd } from './supabase-helper.js';
 import { uploadTranscriptToGoogleDrive, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { generateReportWithFallback } from './report-generator.js';
 import { saveMarkdownAsDocx } from './docx-generator.js';
-import { uploadTranscriptToGoogleDrive } from './google-drive-helper.js';
 import { processMeeting } from './memory-client.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -28,7 +27,7 @@ class ProcessManager {
   /**
    * Spawns the requested meeting bot process.
    */
-  spawnBot(sessionId, { botType, meetingUrl, botName, isHeadless, wsPort, googleDriveFolderId }) {
+  spawnBot(sessionId, { botType, meetingUrl, botName, isHeadless, wsPort, googleDriveFolderId, projectId }) {
     if (this.activeSessions.has(sessionId)) {
       throw new Error(`Session ${sessionId} is already active.`);
     }
@@ -110,7 +109,7 @@ class ProcessManager {
     });
 
     // Log active session startup to Supabase asynchronously
-    saveSessionStart(sessionId, botType, meetingUrl, botName).catch(err => {
+    saveSessionStart(sessionId, botType, meetingUrl, botName, projectId).catch(err => {
       console.error(`[ProcessManager] Supabase saveSessionStart error:`, err.message);
     });
 

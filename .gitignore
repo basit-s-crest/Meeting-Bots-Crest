@@ -20,3 +20,6 @@ memory-service/*.egg-info/
 .commandcode/
 *.md_
 
+# Backups
+dashboard/frontend_backup/
+

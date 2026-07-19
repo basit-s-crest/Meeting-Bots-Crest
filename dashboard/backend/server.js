@@ -6,6 +6,7 @@ import fs from 'fs';
 import net from 'net';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import cors from 'cors';
 
 import { processManager } from './process-manager.js';
 import { deepgramProxy } from './deepgram-proxy.js';
@@ -27,6 +28,7 @@ const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 console.log(`[Server] Loaded Deepgram API Key: ${DEEPGRAM_API_KEY ? 'Present (Configured)' : 'Missing'}`);
 
 const app = express();
+app.use(cors({ origin: 'http://localhost:3001', credentials: true }));
 app.use(express.json());
 
 // Serve static frontend files
@@ -51,6 +53,37 @@ app.get('/api/memory/projects/:id', async (req, res) => {
     const data = await getProjectMemory(req.params.id);
     res.json(data || {});
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET list of all projects
+app.get('/api/projects', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('projects')
+      .select('*');
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    console.error('[Server] GET /api/projects error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST create a new project
+app.post('/api/projects', async (req, res) => {
+  try {
+    const { name, description } = req.body;
+    const { data, error } = await supabase
+      .from('projects')
+      .insert({ name, description })
+      .select()
+      .single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error('[Server] POST /api/projects error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -136,7 +169,7 @@ function broadcastToClients(sessionId, type, data) {
  * REST API: Start a bot session
  */
 app.post('/api/sessions/start', async (req, res) => {
-  let { botType, meetingUrl, botName, isHeadless, googleDriveFolderId } = req.body;
+  let { botType, meetingUrl, botName, isHeadless, googleDriveFolderId, projectId } = req.body;
 
   if (!botType || !meetingUrl) {
     return res.status(400).json({ error: 'Missing required parameters: botType and meetingUrl' });
@@ -169,7 +202,8 @@ app.post('/api/sessions/start', async (req, res) => {
       botName: botName || 'Meeting Bot',
       isHeadless: isHeadless !== false,
       wsPort,
-      googleDriveFolderId
+      googleDriveFolderId,
+      projectId
     });
 
     // Handle process events/callbacks
@@ -262,11 +296,16 @@ app.get('/api/transcripts', async (req, res) => {
 
   try {
     // 1. Fetch sessions from Supabase database
-    const { data: dbSessions, error } = await supabase
+    let dbQuery = supabase
       .from('meeting_sessions')
       .select('*')
       .order('created_at', { ascending: false });
 
+    if (req.query.projectId) {
+      dbQuery = dbQuery.eq('project_id', req.query.projectId);
+    }
+
+    const { data: dbSessions, error } = await dbQuery;
     if (error) throw error;
 
     // Track session_ids to avoid showing duplicates
