@@ -78,7 +78,7 @@ def _extract_keywords(question: str) -> str:
         "discuss", "discussed", "discussing", "mention", "mentioned",
         "talk", "talked", "talking", "say", "said", "saying",
     }
-    words = q.lower().split()
+    words = question.lower().split()
     keywords = [w for w in words if w not in stop_words and len(w) > 2]
     return " ".join(keywords[:5]) if keywords else ""
 
@@ -155,7 +155,8 @@ async def _query_structured(project_id: str, intent: str) -> dict:
 
 async def _query_semantic(project_id: str | None, question: str) -> dict:
     """Strategy B: pgvector semantic search + keyword hybrid."""
-    q_embedding = embed(question)
+    # bge-small-en-v1.5 expects a query instruction prefix for retrieval.
+    q_embedding = embed(f"Represent this sentence for searching relevant passages: {question}")
     keyword = _extract_keywords(question)
 
     try:

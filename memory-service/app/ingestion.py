@@ -1,7 +1,7 @@
 import json
 
 import redis.asyncio as redis
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Body
 
 from app.config import REDIS_URL
 from app.database import get_db
@@ -22,12 +22,12 @@ def get_redis() -> redis.Redis:
 
 @router.post("/ingest")
 async def ingest_segment(
-    session_id: str,
-    speaker: str,
-    text: str,
-    start_ts: float = 0.0,
-    end_ts: float = 0.0,
-    is_final: bool = True,
+    session_id: str = Body(...),
+    speaker: str = Body(...),
+    text: str = Body(...),
+    start_ts: float = Body(0.0),
+    end_ts: float = Body(0.0),
+    is_final: bool = Body(True),
     background_tasks: BackgroundTasks = None,
 ):
     """Receive a transcript segment. Push to Redis, then async insert to Postgres."""

@@ -13,7 +13,7 @@ import { deepgramProxy } from './deepgram-proxy.js';
 import { generateFirefliesReport, calculateSpeakerStats } from './report-generator.js';
 import { supabase } from './supabase-client.js';
 import { uploadReport } from './supabase-helper.js';
-import { saveMarkdownAsDocx } from './docx-generator.js';
+import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
 import { getOAuth2Client, saveRefreshToken, loadRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { calendarRouter } from './calendar/calendar-router.js';
 import { ingestSegment, queryMemory, processMeeting, getProjectMemory } from './memory-client.js';
@@ -282,18 +282,6 @@ app.get('/api/sessions', (req, res) => {
  * REST API: Get saved transcripts
  */
 app.get('/api/transcripts', async (req, res) => {
-  const transcriptsDir = path.join(__dirname, 'transcripts');
-  
-  // Read local files as fallback/legacy check
-  let localFiles = [];
-  try {
-    if (fs.existsSync(transcriptsDir)) {
-      localFiles = fs.readdirSync(transcriptsDir).filter(f => f.endsWith('.jsonl'));
-    }
-  } catch (err) {
-    console.error('[Server] Failed to read local transcripts directory:', err.message);
-  }
-
   try {
     // 1. Fetch sessions from Supabase database
     let dbQuery = supabase
@@ -308,9 +296,6 @@ app.get('/api/transcripts', async (req, res) => {
     const { data: dbSessions, error } = await dbQuery;
     if (error) throw error;
 
-    // Track session_ids to avoid showing duplicates
-    const dbSessionIds = new Set(dbSessions.map(s => s.session_id));
-
     // Convert dbSessions to the format expected by the frontend
     const list = dbSessions.map(s => ({
       fileName: `${s.bot_type}_${s.session_id}.jsonl`,
@@ -324,55 +309,10 @@ app.get('/api/transcripts', async (req, res) => {
       reportFileUrl: s.report_file_url
     }));
 
-    // 2. Add local files that are not in the database (legacy support)
-    for (const f of localFiles) {
-      const match = f.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
-      if (match) {
-        const [_, type, sessionId] = match;
-        if (!dbSessionIds.has(sessionId)) {
-          try {
-            const stats = fs.statSync(path.join(transcriptsDir, f));
-            list.push({
-              fileName: f,
-              sessionId: sessionId,
-              created: stats.birthtime,
-              size: stats.size,
-              isDbBacked: false,
-              botType: type,
-              status: 'completed'
-            });
-          } catch (e) {
-            // Ignore missing file stats
-          }
-        }
-      }
-    }
-
-    // Sort final combined list by created date descending
-    list.sort((a, b) => new Date(b.created) - new Date(a.created));
-
     res.json({ transcripts: list });
   } catch (err) {
-    console.warn('[Server] Supabase transcripts fetch failed, falling back to local files:', err.message);
-    
-    // Fallback: list local files only
-    const list = localFiles.map(f => {
-      try {
-        const stats = fs.statSync(path.join(transcriptsDir, f));
-        return {
-          fileName: f,
-          sessionId: f.replace(/^(teams|meet|zoom)_/, '').replace(/\.jsonl$/, ''),
-          created: stats.birthtime,
-          size: stats.size,
-          isDbBacked: false
-        };
-      } catch {
-        return null;
-      }
-    }).filter(Boolean);
-
-    list.sort((a, b) => new Date(b.created) - new Date(a.created));
-    res.json({ transcripts: list });
+    console.error('[Server] Supabase transcripts fetch failed:', err.message);
+    res.status(500).json({ error: `Failed to fetch transcripts: ${err.message}` });
   }
 });
 
@@ -391,7 +331,7 @@ app.get('/api/transcripts/:filename', async (req, res) => {
 
   try {
     // 1. Try to fetch from Supabase storage URL
-    const match = filename.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
+    const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
     if (match) {
       try {
         const [_, botType, sessionId] = match;
@@ -445,80 +385,110 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
   const schedulingFilename = filename.replace('.jsonl', '_report_scheduling.json');
   const schedulingPath = path.join(transcriptsDir, schedulingFilename);
 
-  // 1. REPORT CACHING CHECK:
-  if (fs.existsSync(reportPath)) {
-    console.log(`[Server] Report already exists for ${filename}. Loading cached files.`);
+  // Parse filename to query Supabase if it's DB-backed
+  const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+  let dbSession = null;
+  let botType = 'meet';
+  let sessionId = null;
+  if (match) {
+    const [_, type, sid] = match;
+    botType = type;
+    sessionId = sid;
     try {
-      const reportMarkdown = fs.readFileSync(reportPath, 'utf8');
-      let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
-      if (fs.existsSync(schedulingPath)) {
-        schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+      const { data, error } = await supabase
+        .from('meeting_sessions')
+        .select('report_file_url, transcript_file_url')
+        .eq('session_id', sessionId)
+        .single();
+      if (!error && data) {
+        dbSession = data;
       }
-      return res.json({
-        success: true,
-        cached: true,
-        report: reportMarkdown,
-        scheduling: schedulingData
-      });
-    } catch (cacheErr) {
-      console.error('[Server] Failed to read cached files:', cacheErr.message);
+    } catch (dbErr) {
+      console.warn(`[Server] Supabase session fetch failed in generate-report for ${filename}:`, dbErr.message);
+    }
+  }
+
+  // 1. REPORT CACHING CHECK (Supabase first):
+  if (dbSession && dbSession.report_file_url) {
+    try {
+      console.log(`[Server] Report already exists in Supabase for ${filename}. Fetching...`);
+      const reportRes = await fetch(dbSession.report_file_url);
+      if (reportRes.ok) {
+        const reportMarkdown = await reportRes.text();
+        
+        // Fetch scheduling companion JSON from storage (replace report.md with scheduling.json)
+        let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
+        const schedUrl = dbSession.report_file_url.replace('/report.md', '/scheduling.json');
+        try {
+          const schedRes = await fetch(schedUrl);
+          if (schedRes.ok) {
+            schedulingData = await schedRes.json();
+          }
+        } catch (e) {
+          console.warn(`[Server] Failed to fetch scheduling companion from Supabase:`, e.message);
+        }
+
+        return res.json({
+          success: true,
+          cached: true,
+          report: reportMarkdown,
+          scheduling: schedulingData
+        });
+      }
+    } catch (fetchErr) {
+      console.error(`[Server] Failed to fetch report from Supabase:`, fetchErr.message);
     }
   }
 
   // TODO: Add a future explicit endpoint like POST /api/transcripts/:filename/regenerate-report to force regeneration
 
+  // 2. TRANSCRIPT CHECK (Local check with Supabase download fallback):
+  let isTranscriptTemp = false;
   if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Transcript file not found' });
+    if (dbSession && dbSession.transcript_file_url) {
+      try {
+        console.log(`[Server] Local transcript missing, fetching from Supabase for ${filename}...`);
+        const transRes = await fetch(dbSession.transcript_file_url);
+        if (transRes.ok) {
+          const transContent = await transRes.text();
+          fs.writeFileSync(filePath, transContent, 'utf8');
+          isTranscriptTemp = true;
+          console.log(`[Server] Saved fetched transcript locally to: ${filePath}`);
+        } else {
+          return res.status(404).json({ error: `Transcript file not found locally or on Supabase (Status: ${transRes.status})` });
+        }
+      } catch (fetchErr) {
+        return res.status(500).json({ error: `Failed to fetch transcript from Supabase: ${fetchErr.message}` });
+      }
+    } else {
+      return res.status(404).json({ error: 'Transcript file not found' });
+    }
   }
 
   try {
     const { markdown, scheduling } = await generateFirefliesReport(filePath);
     
-    // Save report file locally
+    // Save report file locally temporarily
     fs.writeFileSync(reportPath, markdown, 'utf8');
 
-    // Generate and save docx file locally
-    try {
-      const docxFilename = filename.replace('.jsonl', '_report.docx');
-      const docxPath = path.join(transcriptsDir, docxFilename);
-      await saveMarkdownAsDocx(markdown, docxPath);
-    } catch (docxErr) {
-      console.error(`[Server] Failed to generate DOCX report:`, docxErr.message);
-    }
-
-    // Save scheduling data companion JSON with status: "pending"
+    // Save scheduling data companion JSON locally temporarily with status: "pending"
     let schedulingData = {
       scheduling_detected: false,
       scheduling: null,
       status: 'none'
     };
 
-    let existingActioned = false;
-    if (fs.existsSync(schedulingPath)) {
-      try {
-        const oldData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
-        if (oldData.status === 'confirmed' || oldData.status === 'dismissed') {
-          existingActioned = true;
-          schedulingData = oldData;
-        }
-      } catch (e) {}
-    }
-
-    if (!existingActioned && scheduling && scheduling.scheduling_detected) {
+    if (scheduling && scheduling.scheduling_detected) {
       schedulingData = {
         scheduling_detected: true,
         scheduling: scheduling.scheduling,
         status: 'pending'
       };
-      fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
-    } else if (!existingActioned) {
-      fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
     }
+    fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
 
-    // Parse filename to update Supabase row and upload report
-    const match = filename.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
-    if (match) {
-      const [_, botType, sessionId] = match;
+    // Update Supabase row and upload report
+    if (sessionId) {
       console.log(`[Server] Uploading report to Supabase for session: ${sessionId}`);
       await uploadReport(sessionId, botType);
     }
@@ -529,13 +499,34 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
       try {
         const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
         if (metadata.googleDriveFolderId) {
-          uploadReportToGoogleDrive(filename, metadata.googleDriveFolderId).catch(err => {
-            console.error(`[Server] Google Drive report upload failed:`, err.message);
-          });
+          // Generate temporary DOCX for Drive upload fallback if needed
+          const docxFilename = filename.replace('.jsonl', '_report.docx');
+          const docxPath = path.join(transcriptsDir, docxFilename);
+          try {
+            await saveMarkdownAsDocx(markdown, docxPath);
+          } catch (docxErr) {
+            console.error(`[Server] Failed to generate temp DOCX for Drive upload:`, docxErr.message);
+          }
+
+          // Await Drive upload
+          await uploadReportToGoogleDrive(filename, metadata.googleDriveFolderId);
+
+          // Clean up temp docx
+          if (fs.existsSync(docxPath)) fs.unlinkSync(docxPath);
         }
       } catch (err) {
         console.error(`[Server] Failed to process Google Drive report upload:`, err.message);
       }
+    }
+
+    // Strict Local Clean-up: Delete all local temp files immediately
+    try {
+      if (isTranscriptTemp && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      if (fs.existsSync(reportPath)) fs.unlinkSync(reportPath);
+      if (fs.existsSync(schedulingPath)) fs.unlinkSync(schedulingPath);
+      console.log(`[Server] Temp files cleaned up after report generation.`);
+    } catch (cleanErr) {
+      console.error(`[Server] Failed to clean up temp files:`, cleanErr.message);
     }
 
     res.json({
@@ -546,20 +537,13 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
   } catch (err) {
     console.error('[Server] Failed to generate report:', err.message);
     
-    if (fs.existsSync(reportPath)) {
-      console.log('[Server] Found existing report file after failure, returning success as fallback.');
-      let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
-      if (fs.existsSync(schedulingPath)) {
-        try {
-          schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
-        } catch (e) {}
-      }
-      return res.json({
-        success: true,
-        report: fs.readFileSync(reportPath, 'utf8'),
-        scheduling: schedulingData
-      });
-    }
+    // Clean up if we failed
+    try {
+      if (isTranscriptTemp && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      if (fs.existsSync(reportPath)) fs.unlinkSync(reportPath);
+      if (fs.existsSync(schedulingPath)) fs.unlinkSync(schedulingPath);
+    } catch (e) {}
+
     res.status(500).json({ error: `Report generation failed: ${err.message}` });
   }
 });
@@ -594,7 +578,7 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
 
   try {
     // 1. Try to fetch from Supabase first
-    const match = filename.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
+    const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
     if (match) {
       try {
         const [_, botType, sessionId] = match;
@@ -609,6 +593,17 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
           if (reportRes.ok) {
             const reportMarkdown = await reportRes.text();
             
+            // Fetch scheduling companion from Supabase Storage (replace report.md with scheduling.json)
+            const schedUrl = session.report_file_url.replace('/report.md', '/scheduling.json');
+            try {
+              const schedRes = await fetch(schedUrl);
+              if (schedRes.ok) {
+                schedulingData = await schedRes.json();
+              }
+            } catch (schedErr) {
+              console.warn(`[Server] Failed to fetch scheduling companion from Supabase:`, schedErr.message);
+            }
+
             // Get transcript contents to calculate statistics
             let lines = [];
             if (session.transcript_file_url) {
@@ -679,8 +674,8 @@ app.get('/api/transcripts/:filename/docx', async (req, res) => {
   const filePath = path.join(transcriptsDir, docxFilename);
 
   try {
-    // 1. Try to check if it's DB-backed and we should redirect to Supabase URL
-    const match = filename.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
+    // 1. Try to check if it's DB-backed and generate DOCX on-demand
+    const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
     if (match) {
       const [_, botType, sessionId] = match;
       const { data: session, error } = await supabase
@@ -690,17 +685,32 @@ app.get('/api/transcripts/:filename/docx', async (req, res) => {
         .single();
       
       if (!error && session && session.report_file_url) {
-        const docxUrl = session.report_file_url.replace('_report.md', '_report.docx');
-        return res.redirect(docxUrl);
+        // Fetch report markdown from Supabase
+        const reportRes = await fetch(session.report_file_url);
+        if (reportRes.ok) {
+          const reportMarkdown = await reportRes.text();
+          // Generate DOCX buffer on-demand
+          const docxBuffer = await convertMarkdownToDocx(reportMarkdown);
+          
+          res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+          res.setHeader('Content-Disposition', `attachment; filename="${filename.replace('.jsonl', '_report.docx')}"`);
+          return res.send(docxBuffer);
+        }
       }
     }
 
-    // 2. Fallback to local filesystem
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'Word Document not found' });
+    // 2. Fallback to local markdown file if not in database
+    const localReportPath = filePath.replace('_report.docx', '_report.md');
+    if (!fs.existsSync(localReportPath)) {
+      return res.status(404).json({ error: 'Report not yet generated' });
     }
 
-    res.download(filePath, docxFilename);
+    const reportMarkdown = fs.readFileSync(localReportPath, 'utf8');
+    const docxBuffer = await convertMarkdownToDocx(reportMarkdown);
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${docxFilename}"`);
+    return res.send(docxBuffer);
   } catch (err) {
     res.status(500).json({ error: `Failed to download Word Document: ${err.message}` });
   }
@@ -757,9 +767,27 @@ function connectToBotAudioStream(sessionId, wsPort) {
 
     botSocket.on('message', (data) => {
       try {
-        const chunk = JSON.parse(data.toString());
-        
-        // Log chunk metadata in the proxy (timings and speakers)
+        const msg = JSON.parse(data.toString());
+
+        // NEW: precise, unquantized speaker-turn boundary — this is now the
+        // ground-truth signal for speaker attribution. It arrives as its own
+        // message, independent of the 500ms audio chunk grid, so a speaker
+        // change is captured at the exact moment it was detected instead of
+        // being rounded to whichever chunk it happened to fall in.
+        if (msg.type === 'speaker_event') {
+          deepgramProxy.logSpeakerBoundary(sessionId, {
+            timestamp: msg.timestamp_ts,
+            speaker: msg.speaker
+          });
+          return;
+        }
+
+        // Everything else is an audio_chunk (existing path, unchanged except
+        // the type check above). chunk.speaker here is only a rough,
+        // majority-voted fallback now — logSpeakerBoundary is authoritative.
+        const chunk = msg;
+
+        // Log chunk metadata in the proxy (timings and speakers) — fallback only
         deepgramProxy.logChunkMetadata(sessionId, {
           start_ts: chunk.start_ts,
           end_ts: chunk.end_ts,

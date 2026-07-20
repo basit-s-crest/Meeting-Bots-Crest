@@ -152,7 +152,8 @@ export class BotLifecycle {
 
     this.speakerDetector.setCallback((data) => {
       console.log(`[BotLifecycle] Speaker event received: "${data.speaker}" at ${data.timestamp}`);
-      this.chunker.addSpeakerEvent(data);
+      this.chunker.addSpeakerEvent(data);   // still used for the chunk-level fallback speaker field
+      this.output?.sendSpeakerEvent(data);  // NEW: precise, unquantized signal for the backend
     });
 
     this.speakerDetector.setEmptyCallback(() => {

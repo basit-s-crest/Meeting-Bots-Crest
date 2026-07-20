@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { saveSessionStart, saveSessionEnd } from './supabase-helper.js';
+import { saveSessionStart, saveSessionEnd, uploadReport } from './supabase-helper.js';
 import { uploadTranscriptToGoogleDrive, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { generateReportWithFallback } from './report-generator.js';
 import { saveMarkdownAsDocx } from './docx-generator.js';
@@ -17,6 +17,48 @@ const TRANSCRIPTS_DIR = path.join(__dirname, 'transcripts');
 
 if (!fs.existsSync(TRANSCRIPTS_DIR)) {
   fs.mkdirSync(TRANSCRIPTS_DIR, { recursive: true });
+}
+
+function aggregateTranscriptFile(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const content = fs.readFileSync(filePath, 'utf8').trim();
+    if (!content) return;
+    const lines = content.split('\n');
+    const aggregated = [];
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const data = JSON.parse(line);
+        const speaker = data.speaker || 'Unknown';
+        const text = (data.text || '').trim();
+        if (!text) continue;
+        
+        const last = aggregated[aggregated.length - 1];
+        if (last && last.speaker === speaker) {
+          last.text += ' ' + text;
+        } else {
+          aggregated.push({
+            speaker,
+            text,
+            timestamp: data.timestamp
+          });
+        }
+      } catch (e) {
+        aggregated.push(line);
+      }
+    }
+    
+    const outputContent = aggregated.map(item => {
+      if (typeof item === 'string') return item;
+      return JSON.stringify(item);
+    }).join('\n') + '\n';
+    
+    fs.writeFileSync(filePath, outputContent, 'utf8');
+    console.log(`[ProcessManager] Successfully aggregated transcript file: ${filePath}`);
+  } catch (err) {
+    console.error(`[ProcessManager] Failed to aggregate transcript file:`, err.message);
+  }
 }
 
 class ProcessManager {
@@ -171,15 +213,6 @@ class ProcessManager {
       }
       this.activeSessions.delete(sessionId);
 
-      // Log session end and upload transcript to Supabase asynchronously
-      saveSessionEnd(sessionId, botType).catch(err => {
-        console.error(`[ProcessManager] Supabase saveSessionEnd error:`, err.message);
-      });
-
-      // Trigger post-meeting extraction in the memory service
-      processMeeting(sessionId);
-
-      // Auto-generate combined report/transcript and sync to Google Drive
       const filename = `${botType}_${sessionId}.jsonl`;
       const localTranscriptPath = path.join(TRANSCRIPTS_DIR, filename);
 
@@ -193,21 +226,27 @@ class ProcessManager {
             return;
           }
 
+          // Aggregate adjacent speaker turns in the transcript file
+          console.log(`[ProcessManager] Aggregating transcript file...`);
+          aggregateTranscriptFile(localTranscriptPath);
+
+          // Await Supabase log end and transcript upload
+          console.log(`[ProcessManager] Saving session end and uploading transcript to Supabase...`);
+          await saveSessionEnd(sessionId, botType);
+
           console.log(`[ProcessManager] Auto-generating combined report and transcript for session ${sessionId}...`);
           const { markdown: reportMarkdown, scheduling } = await generateReportWithFallback(localTranscriptPath);
           
-          // Save markdown locally
+          // Save markdown locally temporarily
           const reportFilename = `${botType}_${sessionId}_report.md`;
           const reportPath = path.join(TRANSCRIPTS_DIR, reportFilename);
           fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
 
-          // Save DOCX locally
-          const docxFilename = `${botType}_${sessionId}_report.docx`;
-          const docxPath = path.join(TRANSCRIPTS_DIR, docxFilename);
-          await saveMarkdownAsDocx(reportMarkdown, docxPath);
-          console.log(`[ProcessManager] Local report and DOCX generated successfully for ${sessionId}`);
+          // Await uploading report to Supabase Storage
+          console.log(`[ProcessManager] Uploading report to Supabase for session: ${sessionId}`);
+          await uploadReport(sessionId, botType);
 
-          // Save scheduling data companion JSON
+          // Save scheduling data companion JSON locally temporarily
           const schedulingPath = path.join(TRANSCRIPTS_DIR, `${botType}_${sessionId}_scheduling.json`);
           let schedulingData = {
             scheduling_detected: false,
@@ -226,9 +265,36 @@ class ProcessManager {
           // Upload to Google Drive if folder ID is configured
           const driveFolderId = sessionInfo.googleDriveFolderId;
           if (driveFolderId) {
+            // Generate temporary DOCX for Google Drive upload fallback if needed
+            const docxFilename = `${botType}_${sessionId}_report.docx`;
+            const docxPath = path.join(TRANSCRIPTS_DIR, docxFilename);
+            try {
+              console.log(`[ProcessManager] Generating temporary DOCX for Google Drive upload fallback...`);
+              await saveMarkdownAsDocx(reportMarkdown, docxPath);
+            } catch (docxErr) {
+              console.error(`[ProcessManager] Failed to generate temporary DOCX:`, docxErr.message);
+            }
+
             console.log(`[ProcessManager] Uploading combined document to Google Drive folder: ${driveFolderId}`);
             await uploadReportToGoogleDrive(filename, driveFolderId);
           }
+
+          // Strict Clean-up: Delete all local temp files immediately
+          try {
+            console.log(`[ProcessManager] Cleaning up local temporary files for session ${sessionId}...`);
+            if (fs.existsSync(localTranscriptPath)) fs.unlinkSync(localTranscriptPath);
+            if (fs.existsSync(reportPath)) fs.unlinkSync(reportPath);
+            if (fs.existsSync(schedulingPath)) fs.unlinkSync(schedulingPath);
+            
+            const docxFilename = `${botType}_${sessionId}_report.docx`;
+            const docxPath = path.join(TRANSCRIPTS_DIR, docxFilename);
+            if (fs.existsSync(docxPath)) fs.unlinkSync(docxPath);
+            
+            console.log(`[ProcessManager] Local storage successfully cleared for session ${sessionId}.`);
+          } catch (cleanErr) {
+            console.error(`[ProcessManager] Failed to clean up local files:`, cleanErr.message);
+          }
+
         } catch (err) {
           console.error(`[ProcessManager] Auto-report generation/Drive sync failed for ${sessionId}:`, err.message);
         }

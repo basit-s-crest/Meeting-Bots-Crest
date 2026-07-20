@@ -16,6 +16,10 @@ interface TranscriptLine {
   speaker: string;
   text: string;
   timestamp?: string;
+  /** Accumulated finalized text segments for this speaker block */
+  committedText: string;
+  /** The current interim (non-final) text being streamed */
+  interimText: string;
 }
 
 const BACKEND_URL = "http://localhost:3000";
@@ -133,20 +137,49 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
         if (msg.type === "status") {
           setBotStatus(msg.data.status);
         } else if (msg.type === "transcript") {
-          const transLine: TranscriptLine = {
-            speaker: msg.data.speaker || "Unknown",
-            text: msg.data.text || ""
-          };
+          const speaker = msg.data.speaker || "Unknown";
+          const text = msg.data.text || "";
+          const isFinal = msg.data.isFinal || false;
+
           setLiveLines(prev => {
-            if (prev.length > 0 && prev[prev.length - 1].speaker === transLine.speaker) {
+            const lastLine = prev.length > 0 ? prev[prev.length - 1] : null;
+
+            if (lastLine && lastLine.speaker === speaker) {
+              // Same speaker — update the current block
               const updated = [...prev];
-              updated[updated.length - 1] = transLine;
+              const currentBlock = { ...updated[updated.length - 1] };
+
+              if (isFinal) {
+                // Commit this text permanently and clear interim
+                currentBlock.committedText = currentBlock.committedText
+                  ? currentBlock.committedText + " " + text
+                  : text;
+                currentBlock.interimText = "";
+              } else {
+                // Update only the interim (in-progress) portion
+                currentBlock.interimText = text;
+              }
+
+              currentBlock.text = currentBlock.interimText
+                ? currentBlock.committedText + " " + currentBlock.interimText
+                : currentBlock.committedText;
+
+              updated[updated.length - 1] = currentBlock;
               return updated;
             } else {
-              return [...prev, transLine];
+              // New speaker — start a new block
+              const newBlock: TranscriptLine = {
+                speaker,
+                committedText: isFinal ? text : "",
+                interimText: isFinal ? "" : text,
+                text,
+                timestamp: new Date().toISOString()
+              };
+              return [...prev, newBlock];
             }
           });
-          setActiveSpeaker(transLine.speaker);
+
+          setActiveSpeaker(speaker);
         } else if (msg.type === "visualizer") {
           const visBars = document.querySelectorAll(".vis-bar-element");
           visBars.forEach((bar) => {
@@ -380,7 +413,12 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
                 liveLines.map((line, idx) => (
                   <div key={idx} className="border border-border bg-surface-2/50 rounded-xl p-4">
                     <span className="mb-1 block text-xs font-bold text-brand-600">{line.speaker}</span>
-                    <p className="text-sm leading-relaxed text-ink-soft">{line.text}</p>
+                    <p className="text-sm leading-relaxed text-ink-soft">
+                      {line.committedText}
+                      {line.interimText && (
+                        <span className="text-ink-faint italic">{line.committedText ? " " : ""}{line.interimText}</span>
+                      )}
+                    </p>
                   </div>
                 ))
               )}

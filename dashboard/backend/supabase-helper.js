@@ -94,8 +94,9 @@ export async function saveSessionEnd(sessionId, botType) {
     try {
       const stats = await fs.stat(localTranscriptPath);
       if (stats.isFile()) {
-        console.log(`[Supabase] Uploading transcript file to cloud: ${transcriptFilename}`);
-        publicUrl = await uploadToStorage(localTranscriptPath, transcriptFilename);
+        const storagePath = `sessions/${sessionId}/transcript.jsonl`;
+        console.log(`[Supabase] Uploading transcript file to cloud: ${storagePath}`);
+        publicUrl = await uploadToStorage(localTranscriptPath, storagePath);
       }
     } catch (e) {
       console.warn(`[Supabase] Local transcript file not found for upload: ${transcriptFilename}`);
@@ -134,28 +135,30 @@ export async function uploadReport(sessionId, botType) {
     try {
       const stats = await fs.stat(localReportPath);
       if (stats.isFile()) {
-        console.log(`[Supabase] Uploading report file to cloud: ${reportFilename}`);
-        publicUrl = await uploadToStorage(localReportPath, reportFilename);
+        const storagePath = `sessions/${sessionId}/report.md`;
+        console.log(`[Supabase] Uploading report file to cloud: ${storagePath}`);
+        publicUrl = await uploadToStorage(localReportPath, storagePath);
       }
     } catch (e) {
       console.warn(`[Supabase] Local report file not found for upload: ${reportFilename}`);
       return null;
     }
 
-    // Upload the docx report as well if it exists
-    const docxFilename = `${botType}_${sessionId}_report.docx`;
-    const localDocxPath = path.join(TRANSCRIPTS_DIR, docxFilename);
-    try {
-      const statsDocx = await fs.stat(localDocxPath);
-      if (statsDocx.isFile()) {
-        console.log(`[Supabase] Uploading docx report file to cloud: ${docxFilename}`);
-        await uploadToStorage(localDocxPath, docxFilename);
-      }
-    } catch (e) {
-      console.log(`[Supabase] Local docx report file not found or not created: ${docxFilename}`);
-    }
-
     if (publicUrl) {
+      // Upload scheduling data companion JSON if it exists
+      const schedulingFilename = `${botType}_${sessionId}_report_scheduling.json`;
+      const localSchedulingPath = path.join(TRANSCRIPTS_DIR, schedulingFilename);
+      try {
+        const statsSched = await fs.stat(localSchedulingPath);
+        if (statsSched.isFile()) {
+          const schedStoragePath = `sessions/${sessionId}/scheduling.json`;
+          console.log(`[Supabase] Uploading scheduling companion to cloud: ${schedStoragePath}`);
+          await uploadToStorage(localSchedulingPath, schedStoragePath);
+        }
+      } catch (e) {
+        console.log(`[Supabase] Local scheduling file not found or not created: ${schedulingFilename}`);
+      }
+
       const { error } = await supabase
         .from('meeting_sessions')
         .update({ report_file_url: publicUrl })

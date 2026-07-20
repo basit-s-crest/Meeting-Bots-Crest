@@ -21,7 +21,7 @@ class DeepgramProxy {
     };
 
     const dgSocket = new WebSocket(url, { headers });
-    
+
     const proxyState = {
       wsConnection: dgSocket,
       firstChunkTs: null,
@@ -35,7 +35,7 @@ class DeepgramProxy {
 
     dgSocket.on('open', () => {
       console.log(`[DeepgramProxy] Connected to Deepgram for session ${sessionId}`);
-      
+
       // Start keepalive ping loop every 3 seconds to prevent Deepgram idle timeout (10s limit)
       proxyState.keepAliveInterval = setInterval(() => {
         if (dgSocket.readyState === WebSocket.OPEN) {
@@ -47,7 +47,7 @@ class DeepgramProxy {
     dgSocket.on('message', (message) => {
       try {
         const response = JSON.parse(message.toString());
-        
+
         // Deepgram sends metadata and KeepAlive responses which we can filter out
         if (response.type === 'Metadata' || response.type === 'KeepAlive') {
           return;
@@ -58,7 +58,7 @@ class DeepgramProxy {
 
         const alternative = channel.alternatives?.[0];
         const transcript = alternative?.transcript;
-        
+
         if (transcript && transcript.trim().length > 0) {
           const isFinal = response.is_final || response.speech_final;
           const relativeStart = response.start;
@@ -90,7 +90,39 @@ class DeepgramProxy {
   }
 
   /**
+   * Log a precise speaker-turn boundary (from the bot's speaker_event message).
+   * This is the preferred, ground-truth path — it closes off the previous
+   * speaker's interval at the exact moment the new speaker was detected,
+   * instead of relying on 500ms audio-chunk majority voting.
+   */
+  logSpeakerBoundary(sessionId, { timestamp, speaker }) {
+    const proxy = this.activeProxies.get(sessionId);
+    if (!proxy) return;
+
+    if (proxy.firstChunkTs === null) {
+      proxy.firstChunkTs = timestamp;
+      console.log(`[DeepgramProxy][${sessionId}] Recorded first chunk starting epoch (from speaker_event): ${timestamp}`);
+    }
+
+    const history = proxy.chunkHistory;
+    if (history.length > 0 && history[history.length - 1].end_ts === Infinity) {
+      history[history.length - 1].end_ts = timestamp;
+    }
+
+    if (speaker) {
+      history.push({ start_ts: timestamp, end_ts: Infinity, speaker });
+    }
+
+    if (history.length > 7200) {
+      history.shift();
+    }
+  }
+
+  /**
    * Log bot chunk metadata (timestamps and speaker identity) to match against transcriptions later.
+   * NOTE: this is now a fallback path only, used if speaker_event messages are
+   * unavailable — logSpeakerBoundary (above) provides higher-precision data
+   * and should be preferred whenever the bot sends speaker_event messages.
    */
   logChunkMetadata(sessionId, { start_ts, end_ts, speaker }) {
     const proxy = this.activeProxies.get(sessionId);
@@ -204,7 +236,7 @@ class DeepgramProxy {
     if (!proxy) return;
 
     console.log(`[DeepgramProxy] Closing Deepgram session for ${sessionId}`);
-    
+
     if (proxy.keepAliveInterval) {
       clearInterval(proxy.keepAliveInterval);
     }

@@ -69,10 +69,11 @@ export class ChunkOutput {
 
   send(chunk) {
     const message = JSON.stringify({
+      type: 'audio_chunk',
       chunk_id: chunk.chunk_id,
       start_ts: chunk.start_ts,
       end_ts: chunk.end_ts,
-      speaker: chunk.speaker,
+      speaker: chunk.speaker, // rough fallback only — NOT ground truth, see speaker_event
       sample_rate: chunk.sample_rate,
       channels: chunk.channels,
       format: chunk.format,
@@ -89,6 +90,32 @@ export class ChunkOutput {
         }
       } catch (err) {
         console.error('[ChunkOutput] Error sending to client:', err.message);
+      }
+    }
+  }
+
+  /**
+   * Broadcasts a precise speaker-turn boundary the moment it's detected,
+   * decoupled from the 500ms audio chunk grid. This is the ground-truth
+   * signal the backend should use for speaker attribution — audio_chunk's
+   * `speaker` field is only a majority-vote fallback and loses sub-chunk
+   * precision.
+   */
+  sendSpeakerEvent({ speaker, timestamp }) {
+    const message = JSON.stringify({
+      type: 'speaker_event',
+      speaker,
+      timestamp_ts: timestamp / 1000, // epoch seconds, same unit as chunk start_ts/end_ts
+    });
+
+    console.log(`[ChunkOutput] Streaming speaker_event "${speaker}" to ${this.clients.size} connected client(s)`);
+    for (const client of this.clients) {
+      try {
+        if (client.readyState === WebSocket.OPEN || client.readyState === 1) {
+          client.send(message);
+        }
+      } catch (err) {
+        console.error('[ChunkOutput] Error sending speaker_event:', err.message);
       }
     }
   }
@@ -118,7 +145,11 @@ export class CallbackOutput {
   }
 
   send(chunk) {
-    this.callback(chunk);
+    this.callback({ type: 'audio_chunk', ...chunk });
+  }
+
+  sendSpeakerEvent(event) {
+    this.callback({ type: 'speaker_event', ...event });
   }
 
   async stop() {}
