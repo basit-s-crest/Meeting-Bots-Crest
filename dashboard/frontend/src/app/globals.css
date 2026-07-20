@@ -54,18 +54,87 @@
   --font-display: var(--font-outfit);
 }
 
+/* Hallmark · macrostructure: Marquee Hero · genre: modern-minimal · theme: Cobalt
+ * anchor hue: cobalt (cool, hue ~255) · tone: modern-minimal · nav: N1b · footer: Ft2
+ * preserve: Inter/Outfit fonts, brand-50…900 tokens, existing radii/shadows
+ */
+
 @layer base {
   :root {
     color-scheme: light;
+
+    /* Hallmark motion + spacing tokens (additive, named) */
+    --space-3xs: 0.125rem;
+    --space-2xs: 0.25rem;
+    --space-xs: 0.5rem;
+    --space-sm: 0.75rem;
+    --space-md: 1rem;
+    --space-lg: 1.5rem;
+    --space-xl: 2.5rem;
+    --space-2xl: 4rem;
+    --space-3xl: 6rem;
+
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+    --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+    --dur-micro: 120ms;
+    --dur-short: 220ms;
+    --dur-long: 420ms;
+
+    --z-base: 1;
+    --z-raised: 10;
+    --z-dropdown: 100;
+    --z-sticky: 200;
+    --z-modal: 400;
+    --z-toast: 500;
+    --z-tooltip: 600;
   }
 
+  html {
+    overflow-x: clip;
+  }
   body {
+    overflow-x: clip;
     background: var(--color-bg);
     color: var(--color-ink);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
+}
+
+/* Hallmark · page-load orchestrated reveal (one sequence, capped ~500ms) */
+@keyframes hall-reveal {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+.hall-reveal {
+  opacity: 0;
+  animation: hall-reveal var(--dur-long) var(--ease-out) forwards;
+  animation-delay: calc(var(--i, 0) * 90ms);
+}
+
+/* Hallmark · logo marquee (pauses on hover/focus) */
+@keyframes hall-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+.hall-marquee {
+  animation: hall-marquee 38s linear infinite;
+}
+@media (hover: hover) and (pointer: fine) {
+  .hall-marquee:hover { animation-play-state: paused; }
+}
+
+/* Hallmark · reduced motion — collapse spatial motion to opacity crossfade */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 150ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 150ms !important;
+  }
+  .hall-reveal { animation: hall-reveal 150ms linear forwards; }
+  .hall-marquee { animation: none; }
 }
 
 /* Card surface (replaces glass-card) */

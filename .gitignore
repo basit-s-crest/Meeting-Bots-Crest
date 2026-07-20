@@ -23,3 +23,8 @@ memory-service/*.egg-info/
 # Backups
 dashboard/frontend_backup/
 
+# Agents and Claude
+.agents/
+.claude/
+.hallmark/
+skills-lock.json

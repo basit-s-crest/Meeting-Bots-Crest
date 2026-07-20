@@ -1,60 +1,30 @@
 import { Logo } from "@/components/ui/Logo";
 import { Container } from "@/components/ui/Container";
 
-const columns = [
-  {
-    title: "Product",
-    links: ["Features", "How it works", "Integrations", "Pricing"],
-  },
-  {
-    title: "Platforms",
-    links: ["Google Meet", "Zoom", "Microsoft Teams", "Webex"],
-  },
-  {
-    title: "Company",
-    links: ["About", "Blog", "Careers", "Contact"],
-  },
-];
+const links = ["Features", "How it works", "Customers", "Privacy", "Terms", "Security"];
 
 export function Footer() {
   return (
     <footer className="border-t border-border bg-surface">
-      <Container className="py-12">
-        <div className="grid grid-cols-2 gap-8 md:grid-cols-4">
-          <div className="col-span-2 md:col-span-1">
+      <Container className="py-8">
+        <div className="flex flex-col items-center justify-between gap-4 sm:flex-row">
+          <div className="flex items-center gap-4">
             <Logo />
-            <p className="mt-4 max-w-xs text-sm text-ink-mute leading-relaxed">
-              Turn every meeting into searchable, actionable knowledge with AI bots that
-              join, transcribe, and summarize.
-            </p>
+            <span className="hidden text-sm text-ink-faint sm:inline">
+              © {new Date().getFullYear()} Crest Meet
+            </span>
           </div>
-          {columns.map((col) => (
-            <div key={col.title}>
-              <h4 className="text-sm font-semibold text-ink">{col.title}</h4>
-              <ul className="mt-3 space-y-2">
-                {col.links.map((link) => (
-                  <li key={link}>
-                    <a
-                      href="#"
-                      className="text-sm text-ink-mute transition-colors hover:text-ink"
-                    >
-                      {link}
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
-        </div>
-        <div className="mt-10 flex flex-col items-center justify-between gap-4 border-t border-border pt-6 sm:flex-row">
-          <p className="text-sm text-ink-faint">
-            © {new Date().getFullYear()} Crest Meet. All rights reserved.
-          </p>
-          <div className="flex items-center gap-6 text-sm text-ink-mute">
-            <a href="#" className="hover:text-ink transition-colors">Privacy</a>
-            <a href="#" className="hover:text-ink transition-colors">Terms</a>
-            <a href="#" className="hover:text-ink transition-colors">Security</a>
-          </div>
+          <nav className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2">
+            {links.map((link) => (
+              <a
+                key={link}
+                href="#"
+                className="whitespace-nowrap text-sm text-ink-mute transition-colors hover:text-ink"
+              >
+                {link}
+              </a>
+            ))}
+          </nav>
         </div>
       </Container>
     </footer>

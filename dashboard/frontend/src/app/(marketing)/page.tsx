@@ -14,18 +14,20 @@ export default function LandingPage() {
       <HowItWorks />
       <SocialProof />
 
-      {/* Final CTA */}
-      <section className="bg-brand-600">
-        <Container className="py-16 text-center">
-          <h2 className="font-display text-3xl font-bold text-white sm:text-4xl">
-            Start capturing every conversation
-          </h2>
-          <p className="mx-auto mt-4 max-w-xl text-brand-100">
-            Open the workspace, create a project, and launch your first meeting bot in under a
-            minute.
-          </p>
-          <div className="mt-8 flex justify-center">
-            <Button href="/projects" size="lg" variant="secondary">
+      {/* Final CTA — single verb, left-biased to cohere with the hero */}
+      <section className="border-t border-border bg-surface">
+        <Container className="py-20">
+          <div className="flex flex-col items-start gap-6 md:flex-row md:items-end md:justify-between">
+            <div className="max-w-xl">
+              <h2 className="font-display text-3xl font-bold tracking-tight text-ink sm:text-4xl">
+                Start capturing every conversation.
+              </h2>
+              <p className="mt-4 text-lg text-ink-mute">
+                Open the workspace, create a project, and launch your first meeting bot in under a
+                minute.
+              </p>
+            </div>
+            <Button href="/projects" size="lg">
               Open the app
               <ArrowRight className="h-4 w-4" />
             </Button>

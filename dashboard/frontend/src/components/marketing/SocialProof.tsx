@@ -8,36 +8,43 @@ const testimonial = {
     "Crest Meet replaced three tools for our revenue team. The cross-meeting chat alone saves me an hour of scrolling through recordings every week.",
   author: "Priya N.",
   role: "Head of Revenue Operations",
+  company: "Northwind",
 };
 
 export function SocialProof() {
   return (
     <Section id="customers">
       <Container>
-        <p className="text-center text-sm font-semibold uppercase tracking-wider text-ink-faint">
+        {/* T2 — logo wall, hairline, monochrome, gentle marquee */}
+        <p className="text-sm font-semibold uppercase tracking-wider text-ink-faint">
           Trusted by modern revenue, product, and research teams
         </p>
-        <div className="mt-8 flex flex-wrap items-center justify-center gap-x-10 gap-y-6 opacity-70">
-          {logos.map((name) => (
-            <span
-              key={name}
-              className="font-display text-xl font-bold text-ink-mute"
-            >
-              {name}
-            </span>
-          ))}
+        <div className="relative mt-8 overflow-hidden [mask-image:linear-gradient(to_right,transparent,black_12%,black_88%,transparent)]">
+          <div className="flex w-max items-center gap-12 hall-marquee">
+            {[...logos, ...logos].map((name, i) => (
+              <span
+                key={i}
+                className="font-display text-xl font-bold text-ink-mute"
+                aria-hidden={i >= logos.length}
+              >
+                {name}
+              </span>
+            ))}
+          </div>
         </div>
 
-        <div className="mx-auto mt-14 max-w-3xl">
-          <figure className="card p-8 text-center">
-            <blockquote className="text-lg font-medium leading-relaxed text-ink sm:text-xl">
+        {/* T1 — pull quote with marginalia */}
+        <div className="mx-auto mt-16 grid max-w-4xl gap-2 md:grid-cols-[1fr_auto] md:gap-10">
+          <figure className="border-l-2 border-brand-600 pl-6">
+            <blockquote className="text-xl font-medium leading-relaxed text-ink sm:text-2xl">
               “{testimonial.quote}”
             </blockquote>
-            <figcaption className="mt-6">
-              <p className="font-semibold text-ink">{testimonial.author}</p>
-              <p className="text-sm text-ink-mute">{testimonial.role}</p>
-            </figcaption>
           </figure>
+          <figcaption className="md:border-l md:border-border md:pl-6 md:text-right">
+            <p className="font-semibold text-ink">{testimonial.author}</p>
+            <p className="text-sm text-ink-mute">{testimonial.role}</p>
+            <p className="text-sm text-ink-faint">{testimonial.company}</p>
+          </figcaption>
         </div>
       </Container>
     </Section>
