@@ -16,6 +16,7 @@ interface TranscriptLine {
   speaker: string;
   text: string;
   timestamp?: string;
+  isFinal?: boolean;
 }
 
 const BACKEND_URL = "http://localhost:3000";
@@ -37,9 +38,12 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const [driveConnecting, setDriveConnecting] = useState(true);
 
   const [liveLines, setLiveLines] = useState<TranscriptLine[]>([]);
+  const [showJumpButton, setShowJumpButton] = useState(false);
 
   const socketRef = useRef<WebSocket | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
+  const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
+  const wasNearBottomRef = useRef(true);
   const visualizerTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
@@ -50,10 +54,39 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   }, []);
 
   useEffect(() => {
+    const container = transcriptContainerRef.current;
+    if (!container) return;
+
+    if (wasNearBottomRef.current) {
+      if (transcriptEndRef.current) {
+        transcriptEndRef.current.scrollIntoView({ behavior: "smooth" });
+      }
+      setShowJumpButton(false);
+    } else {
+      if (liveLines.length > 0) {
+        setShowJumpButton(true);
+      }
+    }
+  }, [liveLines]);
+
+  const handleScroll = () => {
+    const container = transcriptContainerRef.current;
+    if (!container) return;
+    const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
+    if (isNearBottom) {
+      setShowJumpButton(false);
+      wasNearBottomRef.current = true;
+    }
+  };
+
+  const handleJumpToLatest = () => {
     if (transcriptEndRef.current) {
       transcriptEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [liveLines]);
+    setShowJumpButton(false);
+    wasNearBottomRef.current = true;
+  };
+
 
   function checkGoogleDriveStatus() {
     (async () => {
@@ -87,6 +120,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
 
     setBotStatus("starting");
     setLiveLines([]);
+    wasNearBottomRef.current = true;
     setActiveSpeaker("Connecting…");
 
     try {
@@ -133,18 +167,44 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
         if (msg.type === "status") {
           setBotStatus(msg.data.status);
         } else if (msg.type === "transcript") {
+          const container = transcriptContainerRef.current;
+          if (container) {
+            wasNearBottomRef.current = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
+          } else {
+            wasNearBottomRef.current = true;
+          }
+
+          const isFinal = msg.data.isFinal !== false;
           const transLine: TranscriptLine = {
             speaker: msg.data.speaker || "Unknown",
-            text: msg.data.text || ""
+            text: msg.data.text || "",
+            timestamp: msg.data.timestamp,
+            isFinal
           };
           setLiveLines(prev => {
-            if (prev.length > 0 && prev[prev.length - 1].speaker === transLine.speaker) {
-              const updated = [...prev];
-              updated[updated.length - 1] = transLine;
-              return updated;
-            } else {
-              return [...prev, transLine];
+            if (prev.length === 0) {
+              return [transLine];
             }
+            const lastLine = prev[prev.length - 1];
+
+            // If the last message is interim (not finalized)
+            if (!lastLine.isFinal) {
+              if (lastLine.speaker === transLine.speaker) {
+                // Same speaker, update current interim statement
+                const updated = [...prev];
+                updated[updated.length - 1] = transLine;
+                return updated;
+              } else {
+                // Different speaker, finalize previous message and append new one
+                const updated = [...prev];
+                updated[updated.length - 1] = { ...lastLine, isFinal: true };
+                return [...updated, transLine];
+              }
+            }
+
+            // If the last message is already finalized
+            // We append the new message directly as a new block (either interim or final)
+            return [...prev, transLine];
           });
           setActiveSpeaker(transLine.speaker);
         } else if (msg.type === "visualizer") {
@@ -362,13 +422,17 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             </div>
           </Card>
 
-          <Card className="flex h-[52vh] flex-col p-6">
+          <Card className="relative flex h-[52vh] flex-col p-6">
             <h3 className="mb-4 flex items-center gap-2 text-lg font-semibold text-ink">
               <Volume2 className="h-5 w-5 text-brand-600" />
               Live transcript stream
             </h3>
 
-            <div className="mb-4 flex-1 space-y-4 overflow-y-auto pr-1 scroll-smooth">
+            <div
+              ref={transcriptContainerRef}
+              onScroll={handleScroll}
+              className="mb-4 flex-1 space-y-4 overflow-y-auto pr-1 scroll-smooth"
+            >
               {liveLines.length === 0 ? (
                 <div className="flex flex-col items-center justify-center gap-3 py-20 text-center">
                   <Play className="h-10 w-10 animate-pulse text-ink-faint" />
@@ -378,7 +442,12 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
                 </div>
               ) : (
                 liveLines.map((line, idx) => (
-                  <div key={idx} className="border border-border bg-surface-2/50 rounded-xl p-4">
+                  <div
+                    key={idx}
+                    className={`border border-border bg-surface-2/50 rounded-xl p-4 transition-all duration-200 ${
+                      line.isFinal === false ? "opacity-70 italic border-dashed border-brand-300" : ""
+                    }`}
+                  >
                     <span className="mb-1 block text-xs font-bold text-brand-600">{line.speaker}</span>
                     <p className="text-sm leading-relaxed text-ink-soft">{line.text}</p>
                   </div>
@@ -386,6 +455,16 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
               )}
               <div ref={transcriptEndRef} />
             </div>
+
+            {showJumpButton && (
+              <button
+                type="button"
+                onClick={handleJumpToLatest}
+                className="absolute bottom-10 left-1/2 -translate-x-1/2 rounded-full bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 text-xs font-semibold shadow-lg transition-all flex items-center gap-1.5 z-10 animate-bounce"
+              >
+                <span>↓ Jump to latest</span>
+              </button>
+            )}
           </Card>
         </section>
       </div>
