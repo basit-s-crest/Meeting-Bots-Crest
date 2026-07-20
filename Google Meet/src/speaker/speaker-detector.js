@@ -118,18 +118,22 @@ export class SpeakerDetector {
         }
 
         // ── Strategy 1: KUNJSe — primary speaking indicator ──────────────────
-        // Find ALL speaking indicators (could be more than one briefly during transitions)
+        // Collect ALL speaking indicators (multiple participants can be live at
+        // once when mics are left on). The first match is the "primary" speaker;
+        // any ADDITIONAL live speaker is reported so concurrent talkers aren't
+        // silently swallowed into the primary's turn.
         const speakingEls = Array.from(document.querySelectorAll('[jsname="QgSmzd"].KUNJSe'));
+        const speakingNames = [];
         for (const el of speakingEls) {
           const tile = el.closest('[data-participant-id]');
           if (!tile) continue;
-
-          // Skip the bot's own tile
           const tileId = tile.getAttribute('data-participant-id');
           if (excludeId && tileId === excludeId) continue;
-
           const name = getNameFromTile(tile);
-          if (name) return { speaker: name, strategy: 'KUNJSe', participantCount };
+          if (name && !speakingNames.includes(name)) speakingNames.push(name);
+        }
+        if (speakingNames.length > 0) {
+          return { speaker: speakingNames[0], others: speakingNames.slice(1), strategy: 'KUNJSe', participantCount };
         }
 
         // ── Strategy 2: Mic-live fallback ─────────────────────────────────────
@@ -154,6 +158,7 @@ export class SpeakerDetector {
       }, botId);
 
       const foundSpeaker = result ? result.speaker : null;
+      const otherSpeakers = result && result.others ? result.others : [];
       const participantCount = result ? result.participantCount : 0;
       const now = Date.now();
 
@@ -172,6 +177,7 @@ export class SpeakerDetector {
         this.solitudeTicks = 0;
       }
 
+      // Primary speaker changed → emit as before (handles mic-off / clear handoff).
       if (foundSpeaker !== this.currentSpeaker) {
         if (now - this.lastChangeTime > TIMEOUTS.speakerDebounce) {
           console.log(`[SpeakerDetector] "${this.currentSpeaker}" → "${foundSpeaker}" (${result?.strategy ?? 'silence'})`);
@@ -179,6 +185,22 @@ export class SpeakerDetector {
           this.lastChangeTime = now;
           if (this.callback) {
             this.callback({ speaker: foundSpeaker, timestamp: now });
+          }
+        }
+      } else if (otherSpeakers.length > 0 && !otherSpeakers.includes(this.currentSpeaker)) {
+        // Concurrent speaker appeared while the primary is still live (e.g. both
+        // mics on). Emit a change to the newly-appeared speaker so their chunks
+        // aren't swallowed into the primary's turn. The audio is mixed, so the
+        // most-recently-started talker is the most likely current transcription.
+        // Damp flips back within a short window to avoid 150ms thrash.
+        const next = otherSpeakers[0];
+        const CONCURRENT_MIN_GAP_MS = 400;
+        if (now - this.lastChangeTime > CONCURRENT_MIN_GAP_MS) {
+          console.log(`[SpeakerDetector] concurrent "${next}" while primary "${this.currentSpeaker}" live`);
+          this.currentSpeaker = next;
+          this.lastChangeTime = now;
+          if (this.callback) {
+            this.callback({ speaker: next, timestamp: now });
           }
         }
       }

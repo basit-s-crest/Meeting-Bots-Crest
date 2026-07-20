@@ -787,12 +787,14 @@ function connectToBotAudioStream(sessionId, wsPort) {
         // majority-voted fallback now — logSpeakerBoundary is authoritative.
         const chunk = msg;
 
-        // Log chunk metadata in the proxy (timings and speakers) — fallback only
-        deepgramProxy.logChunkMetadata(sessionId, {
-          start_ts: chunk.start_ts,
-          end_ts: chunk.end_ts,
-          speaker: chunk.speaker
-        });
+        // Anchor the binder's timeline to the FIRST audio chunk's start_ts, which is
+        // bot epoch seconds at stream start — the same base as Deepgram's response.start
+        // (seconds from stream start) and as speaker_event.timestamp_ts. Anchoring here
+        // (not on the first speaker_event, which can arrive many seconds in) is what
+        // makes hint turns and transcript windows actually overlap.
+        if (typeof chunk.start_ts === 'number') {
+          deepgramProxy.logStreamStart(sessionId, chunk.start_ts);
+        }
 
         // Extract raw audio data
         const audioBuffer = Buffer.from(chunk.audio_base64, 'base64');

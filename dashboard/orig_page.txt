@@ -13,7 +13,6 @@ import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/Input";
 
 interface TranscriptLine {
-  segmentId?: number;
   speaker: string;
   text: string;
   timestamp?: string;
@@ -22,8 +21,6 @@ interface TranscriptLine {
   /** The current interim (non-final) text being streamed */
   interimText: string;
   isFinal?: boolean;
-  /** True until a confident speaker name resolves for this segment */
-  provisional?: boolean;
 }
 
 const BACKEND_URL = "http://localhost:3000";
@@ -174,11 +171,9 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
         if (msg.type === "status") {
           setBotStatus(msg.data.status);
         } else if (msg.type === "transcript") {
-          const segmentId = msg.data.segmentId;
           const speaker = msg.data.speaker || "Unknown";
           const text = msg.data.text || "";
           const isFinal = msg.data.isFinal !== false;
-          const provisional = msg.data.provisional === true;
 
           // Before updating lines, set wasNearBottomRef based on container scroll state
           const container = transcriptContainerRef.current;
@@ -189,53 +184,44 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
           }
 
           setLiveLines(prev => {
-            const lastIdx = prev.length - 1;
-            const lastBlock = lastIdx >= 0 ? prev[lastIdx] : null;
+            const lastLine = prev.length > 0 ? prev[prev.length - 1] : null;
 
-            // Group by speaker turn: if the incoming chunk belongs to the SAME
-            // speaker as the current (last) box, append to that one box instead
-            // of spawning a new one. Only start a new box when the speaker
-            // changes. Provisional "speaker_N" ids differ per segment, so they
-            // stay separate until a real name resolves — then same-name chunks
-            // merge into the one box (repaint by segmentId still applies).
-            const sameSpeaker = lastBlock && lastBlock.speaker === speaker;
-
-            if (sameSpeaker) {
+            if (lastLine && lastLine.speaker === speaker) {
+              // Same speaker — update the current block
               const updated = [...prev];
-              const currentBlock = { ...updated[lastIdx] };
-              currentBlock.speaker = speaker;
-              currentBlock.provisional = provisional;
-              currentBlock.isFinal = isFinal;
+              const currentBlock = { ...updated[updated.length - 1] };
+
               if (isFinal) {
+                // Commit this text permanently and clear interim
                 currentBlock.committedText = currentBlock.committedText
                   ? currentBlock.committedText + " " + text
                   : text;
                 currentBlock.interimText = "";
+                currentBlock.isFinal = true;
               } else {
-                currentBlock.committedText = currentBlock.committedText || "";
+                // Update only the interim (in-progress) portion
                 currentBlock.interimText = text;
+                currentBlock.isFinal = false;
               }
+
               currentBlock.text = currentBlock.interimText
                 ? currentBlock.committedText + " " + currentBlock.interimText
                 : currentBlock.committedText;
-              // Keep the resolved segmentId so later repaints land on this box.
-              if (segmentId != null) currentBlock.segmentId = segmentId;
-              updated[lastIdx] = currentBlock;
-              return updated;
-            }
 
-            // Different speaker (or first block) — start a new box.
-            const newBlock: TranscriptLine = {
-              segmentId: segmentId ?? prev.length,
-              speaker,
-              committedText: isFinal ? text : "",
-              interimText: isFinal ? "" : text,
-              text,
-              isFinal,
-              provisional,
-              timestamp: new Date().toISOString()
-            };
-            return [...prev, newBlock];
+              updated[updated.length - 1] = currentBlock;
+              return updated;
+            } else {
+              // New speaker — start a new block
+              const newBlock: TranscriptLine = {
+                speaker,
+                committedText: isFinal ? text : "",
+                interimText: isFinal ? "" : text,
+                text,
+                isFinal,
+                timestamp: new Date().toISOString()
+              };
+              return [...prev, newBlock];
+            }
           });
 
           setActiveSpeaker(speaker);
@@ -480,14 +466,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
                       line.isFinal === false ? "opacity-70 italic border-dashed border-brand-300" : ""
                     }`}
                   >
-                    <span className="mb-1 block text-xs font-bold text-brand-600">
-                      {line.speaker}
-                      {line.provisional && (
-                        <span className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-700">
-                          identifying…
-                        </span>
-                      )}
-                    </span>
+                    <span className="mb-1 block text-xs font-bold text-brand-600">{line.speaker}</span>
                     <p className="text-sm leading-relaxed text-ink-soft">
                       {line.committedText}
                       {line.interimText && (

@@ -363,6 +363,11 @@ export class MeetBot {
       const combinedSelector = inCallSelectors.join(', ');
       await this.page.waitForSelector(combinedSelector, { state: 'visible', timeout: 30000 });
       console.log('Found in-call indicator');
+      // Hide Meet's native active-speaker "rotating green ring" indicator — it's
+      // purely cosmetic and distracting when watching the bot's window. This only
+      // removes the visual ring; KUNJSe-based speaker detection still works because
+      // it reads the DOM class, not the rendered animation.
+      await this.hideSpeakingIndicator();
       return;
     } catch (e) {
       console.log('Timeout waiting for in-call indicators');
@@ -383,6 +388,43 @@ export class MeetBot {
 
     console.log('Could not confirm in-call state, proceeding anyway...');
     await this.page.waitForTimeout(3000);
+  }
+
+  /**
+   * Inject CSS to hide Google Meet's native active-speaker indicator (the green
+   * pulsing/rotating ring around the speaking participant's tile). Only removes
+   * the visual ring — speaker detection via the KUNJSe DOM class is unaffected.
+   */
+  async hideSpeakingIndicator() {
+    try {
+      await this.page.addStyleTag({
+        content: `
+          /* Disable the rotating/pulsing green speaking ring animation */
+          [data-speaking="true"],
+          [data-is-speaking="true"],
+          .a4cOSc,
+          .KUNJSe {
+            animation: none !important;
+          }
+          /* Hide the green ring element Meet draws around speaking tiles */
+          div[role="listitem"] [data-speaking="true"]::after,
+          [jsname="QgSmzd"].KUNJSe {
+            animation: none !important;
+            box-shadow: none !important;
+            outline: none !important;
+          }
+          /* Broad fallback: kill any infinite animation inside the call surface */
+          [data-participant-id] *,
+          [role="listitem"] * {
+            animation-iteration-count: 1 !important;
+            animation-duration: 0.001s !important;
+          }
+        `
+      });
+      console.log('[MeetBot] Hid Meet active-speaker indicator ring');
+    } catch (err) {
+      console.warn('[MeetBot] Could not inject speaking-indicator CSS:', err.message);
+    }
   }
 
   async saveSession() {
