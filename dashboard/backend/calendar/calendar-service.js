@@ -31,48 +31,46 @@ export function getDefaultDurationMinutes() {
   return DEFAULT_DURATION;
 }
 
+const CALENDAR_TOKEN_PATH = path.join(process.cwd(), 'google_calendar_refresh_token.json');
+
 /**
- * Saves refresh token to .env and immediately updates process.env in memory.
+ * Saves refresh token to dedicated JSON file and updates process.env in memory.
  */
 export function saveRefreshToken(token) {
   try {
-    let envContent = '';
-    if (fs.existsSync(envPath)) {
-      envContent = fs.readFileSync(envPath, 'utf8');
-    }
-    const lines = envContent.split(/\r?\n/);
-    let found = false;
-    const updatedLines = lines.map(line => {
-      if (line.trim().startsWith('GOOGLE_CALENDAR_REFRESH_TOKEN=')) {
-        found = true;
-        return `GOOGLE_CALENDAR_REFRESH_TOKEN="${token}"`;
-      }
-      return line;
-    });
-    if (!found) {
-      if (envContent && !envContent.endsWith('\n') && !envContent.endsWith('\r')) {
-        updatedLines.push('');
-      }
-      updatedLines.push(`GOOGLE_CALENDAR_REFRESH_TOKEN="${token}"`);
-    }
-    fs.writeFileSync(envPath, updatedLines.join('\n'), 'utf8');
-    
-    // Update process.env in-memory immediately!
+    fs.writeFileSync(CALENDAR_TOKEN_PATH, JSON.stringify({ refresh_token: token }), 'utf8');
     process.env.GOOGLE_CALENDAR_REFRESH_TOKEN = token;
-    console.log('[Calendar Service] Refresh token saved to .env and updated in-memory.');
+    console.log('[Calendar Service] Refresh token saved successfully to google_calendar_refresh_token.json.');
   } catch (err) {
-    console.error('[Calendar Service] Failed to save refresh token to .env:', err.message);
+    console.error('[Calendar Service] Failed to save refresh token:', err.message);
     throw err;
   }
+}
+
+/**
+ * Loads refresh token from dedicated JSON file, falling back to process.env.
+ */
+export function loadRefreshToken() {
+  if (fs.existsSync(CALENDAR_TOKEN_PATH)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(CALENDAR_TOKEN_PATH, 'utf8'));
+      if (data.refresh_token) {
+        return data.refresh_token;
+      }
+    } catch (e) {
+      console.error('[Calendar Service] Error reading refresh token file:', e.message);
+    }
+  }
+  return process.env.GOOGLE_CALENDAR_REFRESH_TOKEN || null;
 }
 
 /**
  * Creates and returns the Google OAuth2 client.
  */
 export function getOAuth2Client() {
-  const clientID = process.env.GOOGLE_CALENDAR_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CALENDAR_CLIENT_SECRET;
-  const redirectUri = process.env.GOOGLE_CALENDAR_REDIRECT_URI;
+  const clientID = process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CALENDAR_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
+  const redirectUri = process.env.GOOGLE_CALENDAR_REDIRECT_URI || process.env.GOOGLE_REDIRECT_URI;
   
   if (!clientID || !clientSecret || !redirectUri) {
     throw new Error('Google Calendar client credentials (ID, Secret, Redirect URI) are not configured in the .env file.');
@@ -85,12 +83,17 @@ export function getOAuth2Client() {
  * Returns an authenticated Google Calendar client.
  */
 export async function getCalendarClient() {
-  const refreshToken = process.env.GOOGLE_CALENDAR_REFRESH_TOKEN;
+  const refreshToken = loadRefreshToken();
   if (!refreshToken) {
     throw new Error('No refresh token found. Please authenticate via /api/calendar/auth first.');
   }
   const oauth2Client = getOAuth2Client();
   oauth2Client.setCredentials({ refresh_token: refreshToken });
+  try {
+    await oauth2Client.getAccessToken();
+  } catch (err) {
+    throw new Error(`Failed to refresh Google Calendar access token: ${err.message}`);
+  }
   return google.calendar({ version: 'v3', auth: oauth2Client });
 }
 
