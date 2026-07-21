@@ -69,8 +69,9 @@ class DeepgramProxyZoom {
 
         if (transcript && transcript.trim().length > 0) {
           const isFinal = response.is_final || response.speech_final;
-          const relativeStart = response.start;
+          const relativeStart = response.start; // Offset in seconds from start of stream
 
+          // Map relative time to speaker name using our chunk history
           const speaker = this.mapTimeToSpeaker(sessionId, relativeStart);
 
           onTranscript({
@@ -98,38 +99,11 @@ class DeepgramProxyZoom {
   }
 
   /**
-   * Log a precise speaker-turn boundary (from the bot's speaker_event message).
-   * This is the preferred, ground-truth path — it closes off the previous
-   * speaker's interval at the exact moment the new speaker was detected,
-   * instead of relying on 500ms audio-chunk majority voting.
-   */
-  logSpeakerBoundary(sessionId, { timestamp, speaker }) {
-    const proxy = this.activeProxies.get(sessionId);
-    if (!proxy) return;
-
-    if (proxy.firstChunkTs === null) {
-      proxy.firstChunkTs = timestamp;
-      console.log(`[DeepgramProxyZoom][${sessionId}] Recorded first chunk starting epoch (from speaker_event): ${timestamp}`);
-    }
-
-    const history = proxy.chunkHistory;
-    if (history.length > 0 && history[history.length - 1].end_ts === Infinity) {
-      history[history.length - 1].end_ts = timestamp;
-    }
-
-    if (speaker) {
-      history.push({ start_ts: timestamp, end_ts: Infinity, speaker });
-    }
-
-    if (history.length > 7200) {
-      history.shift();
-    }
-  }
-
-  /**
    * Log bot chunk metadata (timestamps and speaker identity) to match against transcriptions later.
    * This is the primary path for Zoom — each audio chunk carries embedded speaker info
    * which we store for timestamp-based matching in mapTimeToSpeaker.
+   * Only stores the chunk if it carries a non-null speaker name (skips audio-diarization
+   * fallback entries that have generic "Speaker N" names from the bot side).
    */
   logChunkMetadata(sessionId, { start_ts, end_ts, speaker }) {
     const proxy = this.activeProxies.get(sessionId);
@@ -140,9 +114,11 @@ class DeepgramProxyZoom {
       console.log(`[DeepgramProxyZoom][${sessionId}] Recorded first chunk starting epoch: ${start_ts}`);
     }
 
-    proxy.chunkHistory.push({ start_ts, end_ts, speaker });
+    // Always push the chunk so timestamps are tracked for mapTimeToSpeaker even when speaker
+    // is null (silence or not-yet-detected). The lookup will skip null-speaker entries.
+    proxy.chunkHistory.push({ start_ts, end_ts, speaker: speaker || null });
 
-    // Keep history size limited to last 60 minutes (approx 7200 chunks at 500ms intervals) to avoid memory growth
+    // Keep history size limited to last 60 minutes (approx 7200 chunks at 500ms intervals)
     if (proxy.chunkHistory.length > 7200) {
       proxy.chunkHistory.shift();
     }
@@ -167,6 +143,10 @@ class DeepgramProxyZoom {
    * Deepgram's `start` offset is seconds from the beginning of the audio stream.
    * We convert it to absolute epoch seconds using firstChunkTs, then find the
    * chunk whose [start_ts, end_ts] window best covers that moment.
+   *
+   * Only chunks with a real DOM-detected speaker name are considered — chunks
+   * with null speaker (silence / audio-diarization fallback) are skipped, so
+   * generic "Speaker N" IDs are never returned.
    */
   mapTimeToSpeaker(sessionId, relativeTimeSec) {
     const proxy = this.activeProxies.get(sessionId);
@@ -184,51 +164,17 @@ class DeepgramProxyZoom {
       }
     }
 
-    // 2. Gap fallback — timestamp falls between speaker intervals (transition window).
-    //    At speaker transitions, Deepgram may return a transcript whose `start` time
-    //    lands slightly before the new speaker's first chunk (processing latency).
-    //    Strategy: prefer the UPCOMING speaker (chunk whose start_ts is just ahead of
-    //    or equal to the transcript time) over the PREVIOUS speaker, within tolerance.
-    //    This prevents User B's first 1-2 chunks being attributed to User A.
-
-    const TRANSITION_TOLERANCE_SEC = 1.5;
-
-    // 2a. Look for a chunk that starts soon AFTER the transcript time (upcoming speaker).
-    //     This handles the case where Deepgram returns a result just before the new
-    //     speaker's chunk is registered.
-    let upcomingChunk = null;
-    let upcomingDist = Infinity;
-    for (let i = 0; i < history.length; i++) {
-      const c = history[i];
-      if (!c.speaker) continue;
-      // Chunk starts after or at the transcript time
-      if (c.start_ts >= absoluteTimeSec) {
-        const dist = c.start_ts - absoluteTimeSec;
-        if (dist < upcomingDist && dist <= TRANSITION_TOLERANCE_SEC) {
-          upcomingDist = dist;
-          upcomingChunk = c;
+    // 2. Fallback: if the transcript time is past the end of all known chunks
+    //    (Deepgram has a processing delay), return the most recent named speaker.
+    if (history.length > 0) {
+      const newest = history[history.length - 1];
+      if (absoluteTimeSec > newest.end_ts) {
+        // Walk backwards to find the most recent chunk that has a real speaker name
+        for (let i = history.length - 1; i >= 0; i--) {
+          if (history[i].speaker) {
+            return history[i].speaker;
+          }
         }
-      }
-    }
-    if (upcomingChunk) return upcomingChunk.speaker;
-
-    // 2b. Look for the most recent chunk that ended just before the transcript time.
-    //     Capped to TRANSITION_TOLERANCE_SEC to avoid stale attribution.
-    for (let i = history.length - 1; i >= 0; i--) {
-      const c = history[i];
-      if (!c.speaker) continue;
-      const gap = absoluteTimeSec - c.end_ts;
-      if (gap >= 0 && gap <= TRANSITION_TOLERANCE_SEC) {
-        return c.speaker;
-      }
-    }
-
-    // 3. Last resort — most recent non-null speaker (capped at 2s ago to avoid
-    //    stale attribution after a long silence).
-    for (let i = history.length - 1; i >= 0; i--) {
-      const c = history[i];
-      if (c.speaker && (absoluteTimeSec - c.end_ts) <= 2.0) {
-        return c.speaker;
       }
     }
 
