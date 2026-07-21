@@ -5,7 +5,10 @@ for routing. Only the final answer synthesis uses Groq.
 """
 
 import json
+import os
 from datetime import datetime
+
+print(f"QUERY_ROUTER LOADED - v2 - {os.path.getmtime(__file__)}")
 
 import redis.asyncio as redis
 from fastapi import APIRouter
@@ -153,55 +156,120 @@ async def _query_structured(project_id: str, intent: str) -> dict:
     )
 
 
+def cosine_similarity(v1: list[float] | None, v2: list[float] | str | None) -> float:
+    """Compute cosine similarity between two vector embeddings."""
+    if isinstance(v2, str):
+        try:
+            v2 = json.loads(v2)
+        except Exception:
+            return 0.0
+    if not v1 or not v2 or len(v1) != len(v2):
+        return 0.0
+    dot = sum(a * b for a, b in zip(v1, v2))
+    norm1 = sum(a * a for a in v1) ** 0.5
+    norm2 = sum(b * b for b in v2) ** 0.5
+    return dot / (norm1 * norm2) if (norm1 > 0 and norm2 > 0) else 0.0
+
+
 async def _query_semantic(project_id: str | None, question: str) -> dict:
-    """Strategy B: pgvector semantic search + keyword hybrid."""
-    # bge-small-en-v1.5 expects a query instruction prefix for retrieval.
+    """Strategy B: Pure vector similarity scoring against transcript_segments filtered by project_id."""
     q_embedding = embed(f"Represent this sentence for searching relevant passages: {question}")
-    keyword = _extract_keywords(question)
+    db = get_db()
 
-    try:
-        db = get_db()
-        result = db.rpc(
-            "search_meeting_events",
-            {
-                "p_project_id": project_id,
-                "p_query_embedding": q_embedding,
-                "p_keyword": keyword,
-                "p_match_count": 8,
-            },
-        ).execute()
-    except Exception as e:
+    context_lines = []
+    citations = []
+
+    # 1. Search transcript_segments directly matching project_id OR meeting session_ids
+    if project_id:
+        try:
+            sess_res = db.table("meeting_sessions") \
+                .select("session_id, bot_type, created_at, transcript_file_url") \
+                .eq("project_id", project_id) \
+                .order("created_at", desc=True) \
+                .execute()
+
+            session_map = {s["session_id"]: s for s in (sess_res.data or []) if s.get("session_id")}
+            session_ids = list(session_map.keys())
+
+            seg_res_proj = db.table("transcript_segments") \
+                .select("id, session_id, speaker_label, text, embedding, created_at") \
+                .eq("project_id", project_id) \
+                .order("created_at", desc=True) \
+                .limit(1000) \
+                .execute()
+
+            combined_segments = {s["id"]: s for s in (seg_res_proj.data or [])}
+
+            if session_ids:
+                seg_res_sess = db.table("transcript_segments") \
+                    .select("id, session_id, speaker_label, text, embedding, created_at") \
+                    .in_("session_id", session_ids) \
+                    .order("created_at", desc=True) \
+                    .limit(1000) \
+                    .execute()
+                for s in (seg_res_sess.data or []):
+                    combined_segments[s["id"]] = s
+
+            segments = list(combined_segments.values())
+
+            if segments:
+                # Vector Similarity Scoring (Cosine Distance)
+                scored_segments = []
+                for s in segments:
+                    emb = s.get("embedding")
+                    score = cosine_similarity(q_embedding, emb) if emb else 0.0
+                    if score >= 0.40:
+                        scored_segments.append((score, s))
+
+                # Sort by similarity score descending
+                scored_segments.sort(key=lambda item: item[0], reverse=True)
+
+                # Select top passages (highest vector similarity)
+                top_passages = [item[1] for item in scored_segments[:15]]
+
+                for s in top_passages:
+                    sid = s.get("session_id")
+                    s_info = session_map.get(sid, {})
+                    date_str = s_info.get('created_at') or s.get('created_at') or 'Meeting'
+                    context_lines.append(f"[{date_str} | {s.get('speaker_label', 'Speaker')}]: {s.get('text', '')}")
+
+                # Build citations ONLY from high similarity matches (score >= 0.40)
+                used_sessions = set()
+                for score, s in scored_segments[:10]:
+                    sid = s.get("session_id")
+                    if sid and sid not in used_sessions:
+                        used_sessions.add(sid)
+                        s_info = session_map.get(sid, {})
+                        citations.append({
+                            "sessionId": sid,
+                            "meetingDate": s_info.get("created_at") or s.get("created_at", ""),
+                            "platform": s_info.get("bot_type", "meeting"),
+                            "snippet": s.get("text", "")[:200]
+                        })
+
+            # Include meeting session metadata context for general list/date questions
+            if sess_res.data and not context_lines:
+                session_meta_lines = [
+                    f"Session {s.get('session_id')} ({s.get('bot_type', 'meeting')} platform): held on {s.get('created_at', 'Meeting')}"
+                    for s in sess_res.data[:10]
+                ]
+                context_lines.append("--- Project Recent Meeting Sessions ---\n" + "\n".join(session_meta_lines))
+
+        except Exception as e:
+            print(f"[MemoryService] Semantic query error: {e}")
+
+    if not context_lines:
         return {
-            "answer": f"Search failed: {e}",
+            "answer": "I could not find information about that in past meetings.",
             "citations": [],
+            "answeredVia": "vector_search",
+            "usedFallback": False
         }
-
-    if not result.data:
-        return {
-            "answer": "I could not find that in past meetings.",
-            "citations": [],
-        }
-
-    context_lines = [
-        f"[{r['meeting_date']} | {r['bot_type']}] {r['description']}"
-        for r in result.data
-    ]
-
-    # Build citations from results for the synthesis prompt
-    citations = [
-        {
-            "sessionId": r["session_id"],
-            "meetingDate": r["meeting_date"],
-            "platform": r["bot_type"],
-            "snippet": r["description"][:200],
-        }
-        for r in result.data[:5]
-    ]
 
     answer = await _synthesize(question, context_lines, "past meetings")
-
-    # Inject the real citations
     answer["citations"] = citations
+    answer["answeredVia"] = "vector_search"
+    answer["usedFallback"] = False
     return answer
 
 
@@ -250,6 +318,15 @@ async def query_memory(body: QueryRequest):
     if not question:
         return {"answer": "Please ask a question.", "citations": []}
 
+    _GREETINGS = {"hi", "hello", "hey", "greetings", "good morning", "good afternoon", "good evening", "hi there", "hello there", "who are you", "help"}
+    if question.lower().strip().rstrip('.!?') in _GREETINGS:
+        return {
+            "answer": "Hello! I am your AI Meeting Knowledge Assistant. Ask me anything about your project's meeting transcripts, key decisions, or action items!",
+            "citations": [],
+            "answeredVia": "greeting_handler",
+            "usedFallback": False
+        }
+
     # Step 1: Check for live meeting + current-scope query
     if session_id and _is_current_meeting_query(question):
         return await _query_redis_buffer(session_id, question)
@@ -258,7 +335,9 @@ async def query_memory(body: QueryRequest):
     if project_id:
         intent = _classify_intent(question)
         if intent in ("action_items", "decisions", "risks", "estimates"):
-            return await _query_structured(project_id, intent)
+            res = await _query_structured(project_id, intent)
+            if res.get("citations") or (res.get("answer") and not res.get("answer").startswith("No ")):
+                return res
 
     # Step 3: Default — semantic vector search
     return await _query_semantic(project_id, question)

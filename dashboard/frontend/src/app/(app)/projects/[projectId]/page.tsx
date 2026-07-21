@@ -41,6 +41,7 @@ interface ChatMessage {
     snippet: string;
   }>;
   usedFallback?: boolean;
+  answeredVia?: "vector_search" | "project_transcript_fallback" | string;
 }
 
 interface ProjectListItem {
@@ -148,7 +149,8 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
         sender: "bot",
         text: data.answer || "No response generated.",
         citations: data.citations || [],
-        usedFallback: !!data.usedFallback
+        usedFallback: !!data.usedFallback,
+        answeredVia: data.answeredVia || (data.usedFallback ? "project_transcript_fallback" : "vector_search")
       }]);
     } catch (err) {
       setChatMessages(prev => [...prev, {
@@ -407,9 +409,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
                   >
                     {msg.text}
                   </div>
-                  {msg.usedFallback && (
+                  {msg.answeredVia && (
                     <span className="mt-1 text-[10px] italic text-ink-mute">
-                      answered without project memory
+                      {msg.answeredVia === "vector_search" ? "answered via project vector search" : "answered via project memory fallback"}
                     </span>
                   )}
                   {msg.citations && msg.citations.length > 0 && (

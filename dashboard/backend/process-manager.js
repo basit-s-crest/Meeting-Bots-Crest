@@ -242,12 +242,9 @@ class ProcessManager {
           const reportPath = path.join(TRANSCRIPTS_DIR, reportFilename);
           fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
 
-          // Await uploading report to Supabase Storage
-          console.log(`[ProcessManager] Uploading report to Supabase for session: ${sessionId}`);
-          await uploadReport(sessionId, botType);
-
-          // Save scheduling data companion JSON locally temporarily
-          const schedulingPath = path.join(TRANSCRIPTS_DIR, `${botType}_${sessionId}_scheduling.json`);
+          // Save scheduling data companion JSON locally temporarily BEFORE upload
+          const schedulingFilename = `${botType}_${sessionId}_report_scheduling.json`;
+          const schedulingPath = path.join(TRANSCRIPTS_DIR, schedulingFilename);
           let schedulingData = {
             scheduling_detected: false,
             scheduling: null,
@@ -261,6 +258,10 @@ class ProcessManager {
             };
           }
           fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
+
+          // Await uploading report and companion scheduling JSON to Supabase Storage
+          console.log(`[ProcessManager] Uploading report to Supabase for session: ${sessionId}`);
+          await uploadReport(sessionId, botType);
 
           // Upload to Google Drive if folder ID is configured
           let driveFolderId = sessionInfo.googleDriveFolderId;

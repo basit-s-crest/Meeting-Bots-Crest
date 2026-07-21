@@ -13,7 +13,7 @@ import { deepgramProxyGoogle } from './deepgram-proxy-google.js';
 import { deepgramProxyZoom } from './deepgram-proxy-zoom.js';
 import { generateFirefliesReport, calculateSpeakerStats } from './report-generator.js';
 import { supabase } from './supabase-client.js';
-import { uploadReport } from './supabase-helper.js';
+import { uploadReport, downloadStorageFile } from './supabase-helper.js';
 import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
 import { getOAuth2Client, saveRefreshToken, loadRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { calendarRouter } from './calendar/calendar-router.js';
@@ -385,12 +385,9 @@ app.get('/api/transcripts/:filename', async (req, res) => {
           .single();
         
         if (!error && session && session.transcript_file_url) {
-          const fetchRes = await fetch(session.transcript_file_url);
-          if (fetchRes.ok) {
-            const content = await fetchRes.text();
-            const lines = content.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
-            return res.json({ lines });
-          }
+          const content = await downloadStorageFile(session.transcript_file_url);
+          const lines = content.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
+          return res.json({ lines });
         }
       } catch (dbErr) {
         console.warn(`[Server] Supabase transcript fetch failed for ${filename}, falling back to local files:`, dbErr.message);
@@ -437,59 +434,9 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
     const [_, type, sid] = match;
     botType = type;
     sessionId = sid;
-  // 1. LOCAL REPORT CACHING CHECK:
-  if (fs.existsSync(reportPath)) {
-    console.log(`[Server] Report already exists for ${filename}. Loading cached files.`);
-    try {
-      const { data, error } = await supabase
-        .from('meeting_sessions')
-        .select('report_file_url, transcript_file_url')
-        .eq('session_id', sessionId)
-        .single();
-      if (!error && data) {
-        dbSession = data;
-      }
-    } catch (dbErr) {
-      console.warn(`[Server] Supabase session fetch failed in generate-report for ${filename}:`, dbErr.message);
-    }
   }
-
-  // 1. REPORT CACHING CHECK (Supabase first):
-  if (dbSession && dbSession.report_file_url) {
-    try {
-      console.log(`[Server] Report already exists in Supabase for ${filename}. Fetching...`);
-      const reportRes = await fetch(dbSession.report_file_url);
-      if (reportRes.ok) {
-        const reportMarkdown = await reportRes.text();
-        
-        // Fetch scheduling companion JSON from storage (replace report.md with scheduling.json)
-        let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
-        const schedUrl = dbSession.report_file_url.replace('/report.md', '/scheduling.json');
-        try {
-          const schedRes = await fetch(schedUrl);
-          if (schedRes.ok) {
-            schedulingData = await schedRes.json();
-          }
-        } catch (e) {
-          console.warn(`[Server] Failed to fetch scheduling companion from Supabase:`, e.message);
-        }
-
-        return res.json({
-          success: true,
-          cached: true,
-          report: reportMarkdown,
-          scheduling: schedulingData
-        });
-      }
-    } catch (fetchErr) {
-      console.error(`[Server] Failed to fetch report from Supabase:`, fetchErr.message);
-    }
-  }
-
-  // 2. SUPABASE STORAGE FALLBACK (For sessions recorded on another local/machine):
-  const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+  // 1. SUPABASE CHECK FIRST (Cloud-First):
   if (match) {
-    const [_, botType, sessionId] = match;
     try {
       const { data: session, error: dbErr } = await supabase
         .from('meeting_sessions')
@@ -498,63 +445,76 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
         .single();
 
       if (!dbErr && session) {
+        dbSession = session;
+
         // If report markdown is stored in Supabase Storage, fetch and return it directly
         if (session.report_file_url) {
           console.log(`[Server] Fetching report from Supabase storage for ${sessionId}...`);
-          const reportRes = await fetch(session.report_file_url);
-          if (reportRes.ok) {
-            const reportMarkdown = await reportRes.text();
+          try {
+            const reportMarkdown = await downloadStorageFile(session.report_file_url);
             fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
+
             let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
-            if (fs.existsSync(schedulingPath)) {
-              schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+            const schedUrl = session.report_file_url.replace('/report.md', '/scheduling.json');
+            try {
+              const schedText = await downloadStorageFile(schedUrl);
+              schedulingData = JSON.parse(schedText);
+              fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
+            } catch (e) {
+              if (fs.existsSync(schedulingPath)) {
+                schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+              }
             }
+
             return res.json({
               success: true,
               cached: true,
               report: reportMarkdown,
               scheduling: schedulingData
             });
+          } catch (fetchErr) {
+            console.warn(`[Server] Failed to download report from Supabase storage for ${sessionId}:`, fetchErr.message);
           }
         }
 
         // If report is not in storage, but transcript file is in storage and not on local disk, download transcript
         if (!fs.existsSync(filePath) && session.transcript_file_url) {
-          console.log(`[Server] Fetching transcript from Supabase storage for ${sessionId}...`);
-          const transcriptRes = await fetch(session.transcript_file_url);
-          if (transcriptRes.ok) {
-            const transcriptContent = await transcriptRes.text();
+          console.log(`[Server] Local transcript missing, downloading from Supabase storage for ${sessionId}...`);
+          try {
+            const transcriptContent = await downloadStorageFile(session.transcript_file_url);
             fs.writeFileSync(filePath, transcriptContent, 'utf8');
             console.log(`[Server] Successfully downloaded transcript to ${filePath}`);
+          } catch (tErr) {
+            console.warn(`[Server] Failed to download transcript from Supabase storage:`, tErr.message);
           }
         }
       }
     } catch (supaErr) {
-      console.warn(`[Server] Supabase storage fallback check failed for ${filename}:`, supaErr.message);
+      console.warn(`[Server] Supabase storage check failed for ${filename}:`, supaErr.message);
     }
   }
 
-  // 2. TRANSCRIPT CHECK (Local check with Supabase download fallback):
-  let isTranscriptTemp = false;
-  if (!fs.existsSync(filePath)) {
-    if (dbSession && dbSession.transcript_file_url) {
+  // 2. LOCAL REPORT CACHING CHECK (Fallback if not found in Supabase):
+  if (fs.existsSync(reportPath)) {
+    console.log(`[Server] Report already exists locally for ${filename}. Loading cached files.`);
+    const reportMarkdown = fs.readFileSync(reportPath, 'utf8');
+    let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
+    if (fs.existsSync(schedulingPath)) {
       try {
-        console.log(`[Server] Local transcript missing, fetching from Supabase for ${filename}...`);
-        const transRes = await fetch(dbSession.transcript_file_url);
-        if (transRes.ok) {
-          const transContent = await transRes.text();
-          fs.writeFileSync(filePath, transContent, 'utf8');
-          isTranscriptTemp = true;
-          console.log(`[Server] Saved fetched transcript locally to: ${filePath}`);
-        } else {
-          return res.status(404).json({ error: `Transcript file not found locally or on Supabase (Status: ${transRes.status})` });
-        }
-      } catch (fetchErr) {
-        return res.status(500).json({ error: `Failed to fetch transcript from Supabase: ${fetchErr.message}` });
-      }
-    } else {
-      return res.status(404).json({ error: 'Transcript file not found' });
+        schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+      } catch (e) {}
     }
+    return res.json({
+      success: true,
+      cached: true,
+      report: reportMarkdown,
+      scheduling: schedulingData
+    });
+  }
+
+  // 3. TRANSCRIPT CHECK:
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Transcript file not found locally or on Supabase' });
   }
 
   try {
@@ -579,8 +539,6 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
     }
     fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
 
-    // Update Supabase row and upload report
-    if (sessionId) {
     // Parse filename to update Supabase row and upload report
     const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
     if (match) {
@@ -685,17 +643,14 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
           .single();
         
         if (!error && session && session.report_file_url) {
-          const reportRes = await fetch(session.report_file_url);
-          if (reportRes.ok) {
-            const reportMarkdown = await reportRes.text();
+          try {
+            const reportMarkdown = await downloadStorageFile(session.report_file_url);
             
             // Fetch scheduling companion from Supabase Storage (replace report.md with scheduling.json)
             const schedUrl = session.report_file_url.replace('/report.md', '/scheduling.json');
             try {
-              const schedRes = await fetch(schedUrl);
-              if (schedRes.ok) {
-                schedulingData = await schedRes.json();
-              }
+              const schedText = await downloadStorageFile(schedUrl);
+              schedulingData = JSON.parse(schedText);
             } catch (schedErr) {
               console.warn(`[Server] Failed to fetch scheduling companion from Supabase:`, schedErr.message);
             }
@@ -703,11 +658,10 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
             // Get transcript contents to calculate statistics
             let lines = [];
             if (session.transcript_file_url) {
-              const transRes = await fetch(session.transcript_file_url);
-              if (transRes.ok) {
-                const transText = await transRes.text();
+              try {
+                const transText = await downloadStorageFile(session.transcript_file_url);
                 lines = transText.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
-              }
+              } catch (tErr) {}
             }
             
             // Local fallback for transcript calculations if storage fails
@@ -722,6 +676,8 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
               analytics: stats.analytics,
               scheduling: schedulingData
             });
+          } catch (fetchErr) {
+            console.warn(`[Server] Supabase report download failed for ${filename}:`, fetchErr.message);
           }
         }
       } catch (dbErr) {
