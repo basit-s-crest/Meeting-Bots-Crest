@@ -12,6 +12,7 @@ import json
 from datetime import date
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 from app.database import get_db
 from app.embeddings import embed
@@ -22,6 +23,11 @@ from app.models.events import insert_event
 from app.models.projects import get_project_memory, upsert_project_memory
 
 router = APIRouter()
+
+
+class ProcessMeetingRequest(BaseModel):
+    session_id: str
+
 
 _EXTRACTION_MODEL = "llama-3.3-70b-versatile"
 _SIGNIFICANCE_THRESHOLD = 0.6
@@ -54,8 +60,9 @@ Return ONLY the JSON object, no other text."""
 
 
 @router.post("/process-meeting")
-async def process_meeting(session_id: str):
+async def process_meeting(req: ProcessMeetingRequest):
     """Called when a meeting ends. Extract events, update project memory."""
+    session_id = req.session_id
     print(f"[PostMeeting] Processing session {session_id}")
 
     # 1. Fetch meeting metadata

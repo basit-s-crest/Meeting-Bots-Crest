@@ -88,11 +88,6 @@ window.teamsCaptionScraper = {
     const now = Date.now();
 
     for (const block of blocks) {
-      // Skip already finalized blocks
-      if (block._captionFinalized) {
-        continue;
-      }
-
       // Find speaker element using distinct child selectors
       const speakerEl = block.querySelector('.fui-ChatMessageCompact__author, [data-tid="author"], [data-tid="closed-caption-v2-author"], .caption-speaker, .___1hdoxqz, span[class*="speaker" i], div[class*="speaker" i], span[class*="author" i], div[class*="author" i], strong');
       // Find text element using distinct child selectors
@@ -119,6 +114,11 @@ window.teamsCaptionScraper = {
         }
 
         if (!text) continue;
+
+        // Skip if this text matches what was already emitted for this block
+        if (block._lastEmittedText && text === block._lastEmittedText) {
+          continue;
+        }
 
         if (!this.activeBlocks.has(block)) {
           // New block detected
@@ -158,12 +158,21 @@ window.teamsCaptionScraper = {
 
   finalizeBlock(block, value) {
     this.activeBlocks.delete(block);
-    block._captionFinalized = true;
 
-    if (value.text && value.text.trim().length > 0) {
+    const fullText = (value.text || '').trim();
+    if (!fullText) return;
+
+    let textToEmit = fullText;
+    if (block._lastEmittedText && fullText.startsWith(block._lastEmittedText)) {
+      textToEmit = fullText.slice(block._lastEmittedText.length).trim();
+    }
+
+    block._lastEmittedText = fullText;
+
+    if (textToEmit && textToEmit.length > 0) {
       this.onCaptionCallback?.({
         speaker: value.speaker,
-        text: value.text.trim(),
+        text: textToEmit,
         timestamp: new Date().toISOString()
       });
     }

@@ -149,11 +149,102 @@ export class TeamsBot {
   }
 
   /**
-   * Generously waits for the pre-join screen to finish loading from the spinner page
+   * Network monitoring setup to capture failed/slow CDN requests
+   */
+  setupNetworkMonitoring() {
+    if (this._networkMonitoringSetup) return;
+    this._networkMonitoringSetup = true;
+
+    this.failedCdnRequests = [];
+
+    this.page.on('requestfailed', req => {
+      const url = req.url();
+      const failure = req.failure();
+      if (url.includes('cdn') || url.includes('static') || url.includes('teams') || url.includes('office')) {
+        const errorText = failure ? failure.errorText : 'failed';
+        console.warn(`[TeamsBot] [CDN FAILURE] Request failed: ${url} (Error: ${errorText})`);
+        this.failedCdnRequests.push({ url, error: errorText, timestamp: Date.now() });
+      }
+    });
+
+    this.page.on('response', resp => {
+      const url = resp.url();
+      const status = resp.status();
+      if (status >= 400 && (url.includes('cdn') || url.includes('static') || url.includes('teams') || url.includes('office'))) {
+        console.warn(`[TeamsBot] [CDN HTTP ERROR] Request returned status ${status}: ${url}`);
+        this.failedCdnRequests.push({ url, status, timestamp: Date.now() });
+      }
+    });
+  }
+
+  /**
+   * Helper to inspect and log slow CDN assets and DOM elements loading status
+   */
+  async logSlowAssetsAndDomState() {
+    try {
+      const pageInfo = await this.page.evaluate(() => {
+        const resources = performance.getEntriesByType('resource') || [];
+        const slowResources = resources
+          .filter(r => r.duration > 1500 || r.name.includes('cdn') || r.name.includes('static') || r.name.includes('teams'))
+          .map(r => ({
+            url: r.name,
+            durationMs: Math.round(r.duration),
+            initiatorType: r.initiatorType
+          }))
+          .sort((a, b) => b.durationMs - a.durationMs)
+          .slice(0, 10);
+
+        const readyState = document.readyState;
+        const title = document.title;
+        const joinBtn = document.querySelector('button[data-tid="prejoin-join-button"]');
+        const nameInput = document.querySelector('input[data-tid="name-input"]');
+        const joinWebBtn = document.querySelector('button[data-tid="joinOnWeb"]');
+        const loadingSpinners = Array.from(document.querySelectorAll('[class*="spinner"], [class*="loader"], [data-testid*="loader"]'))
+          .map(el => el.outerHTML.slice(0, 100));
+
+        return {
+          readyState,
+          title,
+          joinBtnPresent: !!joinBtn,
+          joinBtnVisible: !!(joinBtn && (joinBtn.offsetWidth > 0 || joinBtn.offsetHeight > 0)),
+          nameInputPresent: !!nameInput,
+          nameInputVisible: !!(nameInput && (nameInput.offsetWidth > 0 || nameInput.offsetHeight > 0)),
+          joinWebBtnPresent: !!joinWebBtn,
+          slowResources,
+          activeSpinnersCount: loadingSpinners.length
+        };
+      }).catch(() => null);
+
+      if (pageInfo) {
+        console.log(`[TeamsBot] [DOM DIAGNOSTICS] document.readyState: "${pageInfo.readyState}" | Title: "${pageInfo.title}" | JoinBtn Visible: ${pageInfo.joinBtnVisible} | NameInput Visible: ${pageInfo.nameInputVisible} | Active Spinners: ${pageInfo.activeSpinnersCount}`);
+        
+        if (pageInfo.slowResources && pageInfo.slowResources.length > 0) {
+          console.log('[TeamsBot] [CDN DIAGNOSTICS] Slow CDN assets captured during pre-join:');
+          for (const res of pageInfo.slowResources) {
+            console.log(`  - ${res.url} (${res.durationMs}ms, type: ${res.initiatorType})`);
+          }
+        }
+      }
+
+      if (this.failedCdnRequests && this.failedCdnRequests.length > 0) {
+        console.log('[TeamsBot] [CDN DIAGNOSTICS] Failed CDN request log:');
+        for (const req of this.failedCdnRequests) {
+          console.log(`  - ${req.url} (${req.error || 'Status ' + req.status})`);
+        }
+      }
+    } catch (err) {
+      console.warn('[TeamsBot] Failed to collect asset/DOM diagnostics:', err.message);
+    }
+  }
+
+  /**
+   * Generously waits for the pre-join screen to finish loading with retries and backoff.
+   * Max 2 retries (3 total attempts) capped by a 90s final fallback ceiling.
    */
   async waitForPreJoinPageToLoad() {
     console.log('[TeamsBot] Waiting for pre-join lobby page elements to load...');
-    
+    this.setupNetworkMonitoring();
+
     // Log resolved URL and page title
     const resolvedUrl = this.page.url();
     const pageTitle = await this.page.title().catch(() => 'unknown');
@@ -161,27 +252,64 @@ export class TeamsBot {
 
     // If guest, wait for name input to load; otherwise wait for join now button
     const selector = this.isGuest ? SELECTORS.join.nameInput : SELECTORS.join.joinNowBtn;
-    
-    try {
-      await this.page.waitForSelector(selector, { state: 'visible', timeout: 45000 });
-      console.log('[TeamsBot] Pre-join lobby page loaded successfully.');
-    } catch (err) {
-      console.error('[TeamsBot] Fatal: pre-join page failed to load within 45s.', err.message);
-      try {
-        const screenshotPath = path.resolve(path.dirname(this.authPath), 'error_screenshot.png');
-        await this.page.screenshot({ path: screenshotPath });
-        console.log(`[TeamsBot] Saved loading failure screenshot to: ${screenshotPath}`);
-        
-        // Dump HTML page content on failure
-        const htmlPath = path.resolve(path.dirname(this.authPath), 'error_dom_dump.html');
-        const content = await this.page.content().catch(() => '');
-        fs.writeFileSync(htmlPath, content, 'utf8');
-        console.log(`[TeamsBot] Saved failure DOM HTML dump to: ${htmlPath}`);
-      } catch (sErr) {
-        console.error('[TeamsBot] Failed to save diagnostics:', sErr.message);
+
+    const TOTAL_TIMEOUT_CEILING = 90000; // 90s final fallback ceiling
+    const MAX_RETRIES = 2; // max 2 retries (3 total attempts)
+    const startTime = Date.now();
+
+    // Per-attempt timeout strategy (attempt 1: 25s, attempt 2: 30s, attempt 3: remaining up to ceiling)
+    const attemptTimeouts = [25000, 30000];
+
+    for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+      const elapsed = Date.now() - startTime;
+      const remainingTotal = TOTAL_TIMEOUT_CEILING - elapsed;
+
+      if (remainingTotal <= 0) {
+        break;
       }
-      throw new Error(`Teams pre-join page failed to load: ${err.message}`);
+
+      const defaultAttemptTimeout = attemptTimeouts[attempt - 1] || 30000;
+      const currentTimeout = Math.min(defaultAttemptTimeout, remainingTotal);
+
+      console.log(`[TeamsBot] Pre-join load check (Attempt ${attempt}/${MAX_RETRIES + 1}, timeout: ${currentTimeout}ms, remaining ceiling: ${remainingTotal}ms)...`);
+
+      try {
+        await this.page.waitForSelector(selector, { state: 'visible', timeout: currentTimeout });
+        console.log(`[TeamsBot] Pre-join lobby page loaded successfully on attempt ${attempt}.`);
+        await this.logSlowAssetsAndDomState();
+        return;
+      } catch (err) {
+        console.warn(`[TeamsBot] Pre-join load attempt ${attempt}/${MAX_RETRIES + 1} timed out or failed:`, err.message);
+        await this.logSlowAssetsAndDomState();
+
+        const timeSpent = Date.now() - startTime;
+        if (attempt <= MAX_RETRIES && timeSpent < TOTAL_TIMEOUT_CEILING) {
+          const backoffMs = attempt * 2000; // Exponential/linear backoff: 2s for retry 1, 4s for retry 2
+          console.log(`[TeamsBot] Retrying pre-join load in ${backoffMs}ms (Retry ${attempt}/${MAX_RETRIES})...`);
+          await this.page.waitForTimeout(backoffMs);
+        }
+      }
     }
+
+    // If all attempts failed or 90s ceiling reached
+    const totalElapsed = Date.now() - startTime;
+    console.error(`[TeamsBot] Fatal: pre-join page failed to load after ${MAX_RETRIES} retries (${Math.round(totalElapsed / 1000)}s elapsed, 90s ceiling reached).`);
+
+    try {
+      const screenshotPath = path.resolve(path.dirname(this.authPath), 'error_screenshot.png');
+      await this.page.screenshot({ path: screenshotPath });
+      console.log(`[TeamsBot] Saved loading failure screenshot to: ${screenshotPath}`);
+      
+      // Dump HTML page content on failure
+      const htmlPath = path.resolve(path.dirname(this.authPath), 'error_dom_dump.html');
+      const content = await this.page.content().catch(() => '');
+      fs.writeFileSync(htmlPath, content, 'utf8');
+      console.log(`[TeamsBot] Saved failure DOM HTML dump to: ${htmlPath}`);
+    } catch (sErr) {
+      console.error('[TeamsBot] Failed to save diagnostics:', sErr.message);
+    }
+
+    throw new Error(`Teams pre-join page failed to load within ${Math.round(totalElapsed / 1000)}s (${MAX_RETRIES} retries attempted).`);
   }
 
   /**
