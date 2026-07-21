@@ -437,6 +437,7 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
     const [_, type, sid] = match;
     botType = type;
     sessionId = sid;
+  }
   // 1. LOCAL REPORT CACHING CHECK:
   if (fs.existsSync(reportPath)) {
     console.log(`[Server] Report already exists for ${filename}. Loading cached files.`);
@@ -487,9 +488,9 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
   }
 
   // 2. SUPABASE STORAGE FALLBACK (For sessions recorded on another local/machine):
-  const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
-  if (match) {
-    const [_, botType, sessionId] = match;
+  const reportMatch = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+  if (reportMatch) {
+    const [_, botType, sessionId] = reportMatch;
     try {
       const { data: session, error: dbErr } = await supabase
         .from('meeting_sessions')
@@ -581,37 +582,38 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
 
     // Update Supabase row and upload report
     if (sessionId) {
-    // Parse filename to update Supabase row and upload report
-    const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
-    if (match) {
-      const [_, botType, sessionId] = match;
-      console.log(`[Server] Uploading report to Supabase for session: ${sessionId}`);
-      await uploadReport(sessionId, botType);
-    }
+      // Parse filename to update Supabase row and upload report
+      const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+      if (match) {
+        const [_, botType, sessionId] = match;
+        console.log(`[Server] Uploading report to Supabase for session: ${sessionId}`);
+        await uploadReport(sessionId, botType);
+      }
 
-    // Upload reports to Google Drive if metadata exists with folder ID
-    const metadataPath = path.join(transcriptsDir, filename.replace('.jsonl', '_metadata.json'));
-    if (fs.existsSync(metadataPath)) {
-      try {
-        const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
-        if (metadata.googleDriveFolderId) {
-          // Generate temporary DOCX for Drive upload fallback if needed
-          const docxFilename = filename.replace('.jsonl', '_report.docx');
-          const docxPath = path.join(transcriptsDir, docxFilename);
-          try {
-            await saveMarkdownAsDocx(markdown, docxPath);
-          } catch (docxErr) {
-            console.error(`[Server] Failed to generate temp DOCX for Drive upload:`, docxErr.message);
+      // Upload reports to Google Drive if metadata exists with folder ID
+      const metadataPath = path.join(transcriptsDir, filename.replace('.jsonl', '_metadata.json'));
+      if (fs.existsSync(metadataPath)) {
+        try {
+          const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+          if (metadata.googleDriveFolderId) {
+            // Generate temporary DOCX for Drive upload fallback if needed
+            const docxFilename = filename.replace('.jsonl', '_report.docx');
+            const docxPath = path.join(transcriptsDir, docxFilename);
+            try {
+              await saveMarkdownAsDocx(markdown, docxPath);
+            } catch (docxErr) {
+              console.error(`[Server] Failed to generate temp DOCX for Drive upload:`, docxErr.message);
+            }
+
+            // Await Drive upload
+            await uploadReportToGoogleDrive(filename, metadata.googleDriveFolderId);
+
+            // Clean up temp docx
+            if (fs.existsSync(docxPath)) fs.unlinkSync(docxPath);
           }
-
-          // Await Drive upload
-          await uploadReportToGoogleDrive(filename, metadata.googleDriveFolderId);
-
-          // Clean up temp docx
-          if (fs.existsSync(docxPath)) fs.unlinkSync(docxPath);
+        } catch (err) {
+          console.error(`[Server] Failed to process Google Drive report upload:`, err.message);
         }
-      } catch (err) {
-        console.error(`[Server] Failed to process Google Drive report upload:`, err.message);
       }
     }
 
