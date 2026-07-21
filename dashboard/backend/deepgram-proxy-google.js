@@ -332,4 +332,4 @@ class DeepgramProxy {
   }
 }
 
-export const deepgramProxy = new DeepgramProxy();
+export const deepgramProxyGoogle = new DeepgramProxy();

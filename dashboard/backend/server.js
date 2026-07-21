@@ -9,7 +9,8 @@ import dotenv from 'dotenv';
 import cors from 'cors';
 
 import { processManager } from './process-manager.js';
-import { deepgramProxy } from './deepgram-proxy.js';
+import { deepgramProxyGoogle } from './deepgram-proxy-google.js';
+import { deepgramProxyZoom } from './deepgram-proxy-zoom.js';
 import { generateFirefliesReport, calculateSpeakerStats } from './report-generator.js';
 import { supabase } from './supabase-client.js';
 import { uploadReport } from './supabase-helper.js';
@@ -227,7 +228,7 @@ app.post('/api/sessions/start', async (req, res) => {
 
     // If Google Meet or Zoom, we connect to their WebSocket stream to extract audio and push to Deepgram
     if (botType === 'google-meet' || botType === 'zoom') {
-      connectToBotAudioStream(sessionId, wsPort);
+      connectToBotAudioStream(sessionId, wsPort, botType);
     }
 
     res.json({
@@ -254,7 +255,8 @@ app.post('/api/sessions/stop', async (req, res) => {
   }
 
   try {
-    deepgramProxy.closeSession(sessionId);
+    deepgramProxyGoogle.closeSession(sessionId);
+    deepgramProxyZoom.closeSession(sessionId);
     await processManager.killBot(sessionId);
     res.json({ success: true, sessionId });
   } catch (err) {
@@ -813,11 +815,16 @@ app.get('/api/transcripts/:filename/docx', async (req, res) => {
 /**
  * Backend WebSocket logic: connect to Google Meet/Zoom's output port
  */
-function connectToBotAudioStream(sessionId, wsPort) {
+function connectToBotAudioStream(sessionId, wsPort, botType) {
   const url = `ws://localhost:${wsPort}`;
   let botSocket = null;
   let attempts = 0;
   const maxAttempts = 120; // 60 seconds total wait
+
+  // Select the right Deepgram proxy based on bot type.
+  // Google Meet uses the new SpeakerBinder (speaker_event messages as ground truth).
+  // Zoom uses the old chunk-history + mapTimeToSpeaker (speaker embedded in chunks).
+  const dgProxy = botType === 'zoom' ? deepgramProxyZoom : deepgramProxyGoogle;
 
   const tryConnect = () => {
     attempts++;
@@ -835,7 +842,7 @@ function connectToBotAudioStream(sessionId, wsPort) {
       const logStream = fs.createWriteStream(logPath, { flags: 'a' });
 
       // Initialize Deepgram Proxy connection
-      deepgramProxy.initializeSession(sessionId, {
+      dgProxy.initializeSession(sessionId, {
         apiKey: DEEPGRAM_API_KEY,
         onTranscript: (event) => {
           // Send to UI clients
@@ -863,52 +870,56 @@ function connectToBotAudioStream(sessionId, wsPort) {
       try {
         const msg = JSON.parse(data.toString());
 
-        // NEW: precise, unquantized speaker-turn boundary — this is now the
-        // ground-truth signal for speaker attribution. It arrives as its own
-        // message, independent of the 500ms audio chunk grid, so a speaker
-        // change is captured at the exact moment it was detected instead of
-        // being rounded to whichever chunk it happened to fall in.
-        if (msg.type === 'speaker_event') {
-          deepgramProxy.logSpeakerBoundary(sessionId, {
-            timestamp: msg.timestamp_ts,
+        if (botType === 'zoom') {
+          // ── Zoom path: speaker info is embedded in each audio chunk ──
+          // Store chunk metadata (timestamps + speaker) for mapTimeToSpeaker matching.
+          dgProxy.logChunkMetadata(sessionId, {
+            start_ts: msg.start_ts,
+            end_ts: msg.end_ts,
             speaker: msg.speaker
           });
-          return;
+
+          const audioBuffer = Buffer.from(msg.audio_base64, 'base64');
+          dgProxy.sendAudio(sessionId, audioBuffer);
+
+          // Bubble up raw audio energy levels for frontend visualization
+          const pcmSamples = new Int16Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.byteLength / 2);
+          let sum = 0;
+          for (let i = 0; i < pcmSamples.length; i++) {
+            sum += pcmSamples[i] * pcmSamples[i];
+          }
+          const rms = Math.sqrt(sum / pcmSamples.length);
+          broadcastToClients(sessionId, 'visualizer', { rms, speaker: msg.speaker });
+
+        } else {
+          // ── Google Meet path: speaker_event messages are ground truth ──
+          if (msg.type === 'speaker_event') {
+            dgProxy.logSpeakerBoundary(sessionId, {
+              timestamp: msg.timestamp_ts,
+              speaker: msg.speaker
+            });
+            return;
+          }
+
+          const chunk = msg;
+
+          // Anchor the binder's timeline to the FIRST audio chunk's start_ts
+          if (typeof chunk.start_ts === 'number') {
+            dgProxy.logStreamStart(sessionId, chunk.start_ts);
+          }
+
+          const audioBuffer = Buffer.from(chunk.audio_base64, 'base64');
+          dgProxy.sendAudio(sessionId, audioBuffer);
+
+          // Bubble up raw audio energy levels for frontend visualization
+          const pcmSamples = new Int16Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.byteLength / 2);
+          let sum = 0;
+          for (let i = 0; i < pcmSamples.length; i++) {
+            sum += pcmSamples[i] * pcmSamples[i];
+          }
+          const rms = Math.sqrt(sum / pcmSamples.length);
+          broadcastToClients(sessionId, 'visualizer', { rms, speaker: chunk.speaker });
         }
-
-        // Everything else is an audio_chunk (existing path, unchanged except
-        // the type check above). chunk.speaker here is only a rough,
-        // majority-voted fallback now — logSpeakerBoundary is authoritative.
-        const chunk = msg;
-
-        // Anchor the binder's timeline to the FIRST audio chunk's start_ts, which is
-        // bot epoch seconds at stream start — the same base as Deepgram's response.start
-        // (seconds from stream start) and as speaker_event.timestamp_ts. Anchoring here
-        // (not on the first speaker_event, which can arrive many seconds in) is what
-        // makes hint turns and transcript windows actually overlap.
-        if (typeof chunk.start_ts === 'number') {
-          deepgramProxy.logStreamStart(sessionId, chunk.start_ts);
-        }
-
-        // Extract raw audio data
-        const audioBuffer = Buffer.from(chunk.audio_base64, 'base64');
-        
-        // Push raw binary stream to Deepgram
-        deepgramProxy.sendAudio(sessionId, audioBuffer);
-
-        // Bubble up raw audio energy levels for frontend visualization
-        // Compute simple RMS of PCM chunk
-        const pcmSamples = new Int16Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.byteLength / 2);
-        let sum = 0;
-        for (let i = 0; i < pcmSamples.length; i++) {
-          sum += pcmSamples[i] * pcmSamples[i];
-        }
-        const rms = Math.sqrt(sum / pcmSamples.length);
-        
-        broadcastToClients(sessionId, 'visualizer', { 
-          rms, 
-          speaker: chunk.speaker 
-        });
 
       } catch (err) {
         console.error(`[Server] Error parsing bot chunk for ${sessionId}:`, err.message);
@@ -917,7 +928,7 @@ function connectToBotAudioStream(sessionId, wsPort) {
 
     botSocket.on('close', () => {
       console.log(`[Server] Bot audio stream closed for session ${sessionId}`);
-      deepgramProxy.closeSession(sessionId);
+      dgProxy.closeSession(sessionId);
     });
 
     botSocket.on('error', (err) => {
