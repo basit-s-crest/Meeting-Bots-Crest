@@ -289,8 +289,20 @@ app.get('/api/transcripts', async (req, res) => {
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (req.query.projectId) {
-      dbQuery = dbQuery.eq('project_id', req.query.projectId);
+    // Parse and sanitize projectId filter(s) to handle edge cases ("", whitespace, array of projectIds)
+    let projectIds = [];
+    if (req.query.projectId !== undefined && req.query.projectId !== null) {
+      const rawList = Array.isArray(req.query.projectId) ? req.query.projectId : [req.query.projectId];
+      projectIds = rawList
+        .filter(p => typeof p === 'string')
+        .map(p => p.trim())
+        .filter(p => p.length > 0);
+    }
+
+    if (projectIds.length === 1) {
+      dbQuery = dbQuery.eq('project_id', projectIds[0]);
+    } else if (projectIds.length > 1) {
+      dbQuery = dbQuery.in('project_id', projectIds);
     }
 
     const { data: dbSessions, error } = await dbQuery;
@@ -308,6 +320,35 @@ app.get('/api/transcripts', async (req, res) => {
       transcriptFileUrl: s.transcript_file_url,
       reportFileUrl: s.report_file_url
     }));
+
+    // 2. Add local files that are not in the database (only when no specific projectId filter is requested)
+    if (projectIds.length === 0) {
+      for (const f of localFiles) {
+        const match = f.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
+        if (match) {
+          const [_, type, sessionId] = match;
+          if (!dbSessionIds.has(sessionId)) {
+            try {
+              const stats = fs.statSync(path.join(transcriptsDir, f));
+              list.push({
+                fileName: f,
+                sessionId: sessionId,
+                created: stats.birthtime,
+                size: stats.size,
+                isDbBacked: false,
+                botType: type,
+                status: 'completed'
+              });
+            } catch (e) {
+              // Ignore missing file stats
+            }
+          }
+        }
+      }
+    }
+
+    // Sort final combined list by created date descending
+    list.sort((a, b) => new Date(b.created) - new Date(a.created));
 
     res.json({ transcripts: list });
   } catch (err) {
@@ -394,6 +435,9 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
     const [_, type, sid] = match;
     botType = type;
     sessionId = sid;
+  // 1. LOCAL REPORT CACHING CHECK:
+  if (fs.existsSync(reportPath)) {
+    console.log(`[Server] Report already exists for ${filename}. Loading cached files.`);
     try {
       const { data, error } = await supabase
         .from('meeting_sessions')
@@ -440,7 +484,53 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
     }
   }
 
-  // TODO: Add a future explicit endpoint like POST /api/transcripts/:filename/regenerate-report to force regeneration
+  // 2. SUPABASE STORAGE FALLBACK (For sessions recorded on another local/machine):
+  const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+  if (match) {
+    const [_, botType, sessionId] = match;
+    try {
+      const { data: session, error: dbErr } = await supabase
+        .from('meeting_sessions')
+        .select('report_file_url, transcript_file_url')
+        .eq('session_id', sessionId)
+        .single();
+
+      if (!dbErr && session) {
+        // If report markdown is stored in Supabase Storage, fetch and return it directly
+        if (session.report_file_url) {
+          console.log(`[Server] Fetching report from Supabase storage for ${sessionId}...`);
+          const reportRes = await fetch(session.report_file_url);
+          if (reportRes.ok) {
+            const reportMarkdown = await reportRes.text();
+            fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
+            let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
+            if (fs.existsSync(schedulingPath)) {
+              schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+            }
+            return res.json({
+              success: true,
+              cached: true,
+              report: reportMarkdown,
+              scheduling: schedulingData
+            });
+          }
+        }
+
+        // If report is not in storage, but transcript file is in storage and not on local disk, download transcript
+        if (!fs.existsSync(filePath) && session.transcript_file_url) {
+          console.log(`[Server] Fetching transcript from Supabase storage for ${sessionId}...`);
+          const transcriptRes = await fetch(session.transcript_file_url);
+          if (transcriptRes.ok) {
+            const transcriptContent = await transcriptRes.text();
+            fs.writeFileSync(filePath, transcriptContent, 'utf8');
+            console.log(`[Server] Successfully downloaded transcript to ${filePath}`);
+          }
+        }
+      }
+    } catch (supaErr) {
+      console.warn(`[Server] Supabase storage fallback check failed for ${filename}:`, supaErr.message);
+    }
+  }
 
   // 2. TRANSCRIPT CHECK (Local check with Supabase download fallback):
   let isTranscriptTemp = false;
@@ -489,6 +579,10 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
 
     // Update Supabase row and upload report
     if (sessionId) {
+    // Parse filename to update Supabase row and upload report
+    const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+    if (match) {
+      const [_, botType, sessionId] = match;
       console.log(`[Server] Uploading report to Supabase for session: ${sessionId}`);
       await uploadReport(sessionId, botType);
     }
@@ -890,9 +984,13 @@ wss.on('connection', (ws, request) => {
 });
 
 // Port configuration
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`\n==================================================================`);
-  console.log(`Central Meeting Bot Dashboard is running at: http://localhost:${PORT}`);
-  console.log(`==================================================================\n`);
-});
+if (process.env.NODE_ENV !== 'test') {
+  const PORT = process.env.PORT || 3000;
+  server.listen(PORT, () => {
+    console.log(`\n==================================================================`);
+    console.log(`Central Meeting Bot Dashboard is running at: http://localhost:${PORT}`);
+    console.log(`==================================================================\n`);
+  });
+}
+
+export { app, server };

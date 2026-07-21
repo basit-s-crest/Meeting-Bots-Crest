@@ -50,6 +50,11 @@ export async function getDriveClient() {
   }
   const oauth2Client = getOAuth2Client();
   oauth2Client.setCredentials({ refresh_token: refreshToken });
+  try {
+    await oauth2Client.getAccessToken();
+  } catch (err) {
+    throw new Error(`Failed to refresh Google Drive access token: ${err.message}`);
+  }
   return google.drive({ version: 'v3', auth: oauth2Client });
 }
 
@@ -179,6 +184,11 @@ export async function getDocsClient() {
   }
   const oauth2Client = getOAuth2Client();
   oauth2Client.setCredentials({ refresh_token: refreshToken });
+  try {
+    await oauth2Client.getAccessToken();
+  } catch (err) {
+    throw new Error(`Failed to refresh Google Docs access token: ${err.message}`);
+  }
   return google.docs({ version: 'v1', auth: oauth2Client });
 }
 

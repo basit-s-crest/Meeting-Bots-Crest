@@ -40,6 +40,7 @@ interface ChatMessage {
     platform: string;
     snippet: string;
   }>;
+  usedFallback?: boolean;
 }
 
 interface ProjectListItem {
@@ -146,7 +147,8 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
       setChatMessages(prev => [...prev, {
         sender: "bot",
         text: data.answer || "No response generated.",
-        citations: data.citations || []
+        citations: data.citations || [],
+        usedFallback: !!data.usedFallback
       }]);
     } catch (err) {
       setChatMessages(prev => [...prev, {
@@ -405,6 +407,11 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
                   >
                     {msg.text}
                   </div>
+                  {msg.usedFallback && (
+                    <span className="mt-1 text-[10px] italic text-ink-mute">
+                      answered without project memory
+                    </span>
+                  )}
                   {msg.citations && msg.citations.length > 0 && (
                     <div className="mt-1 flex flex-wrap items-center gap-1">
                       <span className="mr-1 self-center text-[10px] font-semibold text-ink-faint">

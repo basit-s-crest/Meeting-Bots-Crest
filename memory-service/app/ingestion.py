@@ -2,6 +2,8 @@ import json
 
 import redis.asyncio as redis
 from fastapi import APIRouter, BackgroundTasks, Body
+from fastapi import APIRouter, BackgroundTasks
+from pydantic import BaseModel, Field
 
 from app.config import REDIS_URL
 from app.database import get_db
@@ -20,6 +22,15 @@ def get_redis() -> redis.Redis:
     return _redis_client
 
 
+class IngestRequest(BaseModel):
+    session_id: str
+    speaker: str = "Unknown"
+    text: str = ""
+    start_ts: float = 0.0
+    end_ts: float = 0.0
+    is_final: bool = True
+
+
 @router.post("/ingest")
 async def ingest_segment(
     session_id: str = Body(...),
@@ -28,24 +39,25 @@ async def ingest_segment(
     start_ts: float = Body(0.0),
     end_ts: float = Body(0.0),
     is_final: bool = Body(True),
+    req: IngestRequest,
     background_tasks: BackgroundTasks = None,
 ):
     """Receive a transcript segment. Push to Redis, then async insert to Postgres."""
 
     segment = {
-        "session_id": session_id,
-        "speaker_label": speaker,
-        "text": text,
-        "start_ts": start_ts,
-        "end_ts": end_ts,
-        "is_final": is_final,
+        "session_id": req.session_id,
+        "speaker_label": req.speaker,
+        "text": req.text,
+        "start_ts": req.start_ts,
+        "end_ts": req.end_ts,
+        "is_final": req.is_final,
     }
 
     # Hot path: push to Redis immediately (sub-second retrieval for live queries)
     try:
         r = get_redis()
-        await r.rpush(f"session:{session_id}:segments", json.dumps(segment))
-        await r.expire(f"session:{session_id}:segments", 21600)  # 6h TTL
+        await r.rpush(f"session:{req.session_id}:segments", json.dumps(segment))
+        await r.expire(f"session:{req.session_id}:segments", 21600)  # 6h TTL
     except Exception as e:
         print(f"[Ingestion] Redis unavailable (non-fatal): {e}")
 

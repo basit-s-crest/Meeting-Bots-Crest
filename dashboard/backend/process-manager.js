@@ -263,7 +263,17 @@ class ProcessManager {
           fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
 
           // Upload to Google Drive if folder ID is configured
-          const driveFolderId = sessionInfo.googleDriveFolderId;
+          let driveFolderId = sessionInfo.googleDriveFolderId;
+          if (!driveFolderId) {
+            const metadataPath = path.join(TRANSCRIPTS_DIR, `${botType}_${sessionId}_metadata.json`);
+            if (fs.existsSync(metadataPath)) {
+              try {
+                const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+                driveFolderId = metadata.googleDriveFolderId;
+              } catch (e) {}
+            }
+          }
+
           if (driveFolderId) {
             // Generate temporary DOCX for Google Drive upload fallback if needed
             const docxFilename = `${botType}_${sessionId}_report.docx`;

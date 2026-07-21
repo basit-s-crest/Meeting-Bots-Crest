@@ -4,6 +4,7 @@ import path from 'path';
 import {
   getOAuth2Client,
   saveRefreshToken,
+  loadRefreshToken,
   parseInstruction,
   createCalendarEvent,
   handleGoogleApiError,
@@ -17,7 +18,11 @@ export const calendarRouter = express.Router();
  * Redirects the user to the Google OAuth consent screen.
  */
 calendarRouter.get('/auth', (req, res) => {
-  if (!process.env.GOOGLE_CALENDAR_CLIENT_ID || !process.env.GOOGLE_CALENDAR_CLIENT_SECRET || !process.env.GOOGLE_CALENDAR_REDIRECT_URI) {
+  const clientId = process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CALENDAR_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
+  const redirectUri = process.env.GOOGLE_CALENDAR_REDIRECT_URI || process.env.GOOGLE_REDIRECT_URI;
+
+  if (!clientId || !clientSecret || !redirectUri) {
     return res.status(500).send('Google Calendar API credentials are not configured in the .env file.');
   }
   
@@ -37,7 +42,7 @@ calendarRouter.get('/auth', (req, res) => {
 
 /**
  * Route: Google Calendar OAuth callback handler.
- * Exchanges the code for tokens, writes refresh token to .env, and updates process.env.
+ * Exchanges the code for tokens, writes refresh token to google_calendar_refresh_token.json, and updates process.env.
  */
 calendarRouter.get('/auth/callback', async (req, res) => {
   const { code } = req.query;
@@ -51,7 +56,7 @@ calendarRouter.get('/auth/callback', async (req, res) => {
     
     if (tokens.refresh_token) {
       saveRefreshToken(tokens.refresh_token);
-      res.send('Successfully authenticated! The refresh token has been saved to your .env file and loaded in memory. You can close this window now.');
+      res.send('Successfully authenticated! The refresh token has been saved to google_calendar_refresh_token.json and loaded in memory. You can close this window now.');
     } else {
       console.warn('[Calendar Router Auth] Warning: No refresh token returned in callback.');
       res.send('Authentication completed, but no refresh token was returned. If this is a re-authentication, you must revoke the app permission in your Google account settings first to force a new refresh token.');
@@ -66,11 +71,11 @@ calendarRouter.get('/auth/callback', async (req, res) => {
  * Route: Checks OAuth config and connection status.
  */
 calendarRouter.get('/auth/status', (req, res) => {
-  const hasToken = !!process.env.GOOGLE_CALENDAR_REFRESH_TOKEN;
+  const hasToken = !!loadRefreshToken();
   const isConfigured = !!(
-    process.env.GOOGLE_CALENDAR_CLIENT_ID &&
-    process.env.GOOGLE_CALENDAR_CLIENT_SECRET &&
-    process.env.GOOGLE_CALENDAR_REDIRECT_URI
+    (process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CLIENT_ID) &&
+    (process.env.GOOGLE_CALENDAR_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET) &&
+    (process.env.GOOGLE_CALENDAR_REDIRECT_URI || process.env.GOOGLE_REDIRECT_URI)
   );
   res.json({
     connected: hasToken && isConfigured,
