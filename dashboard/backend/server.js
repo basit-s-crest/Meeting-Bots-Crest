@@ -441,6 +441,7 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
     botType = type;
     sessionId = sid;
   }
+
   // 1. LOCAL REPORT CACHING CHECK:
   if (fs.existsSync(reportPath)) {
     console.log(`[Server] Report already exists for ${filename}. Loading cached files.`);
@@ -491,8 +492,9 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
   }
 
   // 2. SUPABASE STORAGE FALLBACK (For sessions recorded on another local/machine):
-  if (match) {
-    const [_, supaBotType, supaSessionId] = match;
+  const fallbackMatch = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+  if (fallbackMatch) {
+    const [_, supaBotType, supaSessionId] = fallbackMatch;
     try {
       const { data: session, error: dbErr } = await supabase
         .from('meeting_sessions')
