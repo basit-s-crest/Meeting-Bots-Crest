@@ -222,13 +222,14 @@ app.post('/api/sessions/start', async (req, res) => {
           startTs: 0,
           endTs: 0,
           isFinal: true,
+          projectId,
         });
       }
     };
 
     // If Google Meet or Zoom, we connect to their WebSocket stream to extract audio and push to Deepgram
     if (botType === 'google-meet' || botType === 'zoom') {
-      connectToBotAudioStream(sessionId, wsPort, botType);
+      connectToBotAudioStream(sessionId, wsPort, botType, projectId);
     }
 
     res.json({
@@ -258,6 +259,8 @@ app.post('/api/sessions/stop', async (req, res) => {
     deepgramProxyGoogle.closeSession(sessionId);
     deepgramProxyZoom.closeSession(sessionId);
     await processManager.killBot(sessionId);
+    // Trigger post-meeting extraction (fire-and-forget)
+    processMeeting(sessionId);
     res.json({ success: true, sessionId });
   } catch (err) {
     res.status(500).json({ error: `Failed to stop bot session: ${err.message}` });
@@ -437,6 +440,7 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
     const [_, type, sid] = match;
     botType = type;
     sessionId = sid;
+  }
   // 1. LOCAL REPORT CACHING CHECK:
   if (fs.existsSync(reportPath)) {
     console.log(`[Server] Report already exists for ${filename}. Loading cached files.`);
@@ -487,20 +491,19 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
   }
 
   // 2. SUPABASE STORAGE FALLBACK (For sessions recorded on another local/machine):
-  const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
   if (match) {
-    const [_, botType, sessionId] = match;
+    const [_, supaBotType, supaSessionId] = match;
     try {
       const { data: session, error: dbErr } = await supabase
         .from('meeting_sessions')
         .select('report_file_url, transcript_file_url')
-        .eq('session_id', sessionId)
+        .eq('session_id', supaSessionId)
         .single();
 
       if (!dbErr && session) {
         // If report markdown is stored in Supabase Storage, fetch and return it directly
         if (session.report_file_url) {
-          console.log(`[Server] Fetching report from Supabase storage for ${sessionId}...`);
+          console.log(`[Server] Fetching report from Supabase storage for ${supaSessionId}...`);
           const reportRes = await fetch(session.report_file_url);
           if (reportRes.ok) {
             const reportMarkdown = await reportRes.text();
@@ -520,7 +523,7 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
 
         // If report is not in storage, but transcript file is in storage and not on local disk, download transcript
         if (!fs.existsSync(filePath) && session.transcript_file_url) {
-          console.log(`[Server] Fetching transcript from Supabase storage for ${sessionId}...`);
+          console.log(`[Server] Fetching transcript from Supabase storage for ${supaSessionId}...`);
           const transcriptRes = await fetch(session.transcript_file_url);
           if (transcriptRes.ok) {
             const transcriptContent = await transcriptRes.text();
@@ -581,37 +584,38 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
 
     // Update Supabase row and upload report
     if (sessionId) {
-    // Parse filename to update Supabase row and upload report
-    const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
-    if (match) {
-      const [_, botType, sessionId] = match;
-      console.log(`[Server] Uploading report to Supabase for session: ${sessionId}`);
-      await uploadReport(sessionId, botType);
-    }
+      // Parse filename to update Supabase row and upload report
+      const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+      if (match) {
+        const [_, botType, sessionId] = match;
+        console.log(`[Server] Uploading report to Supabase for session: ${sessionId}`);
+        await uploadReport(sessionId, botType);
+      }
 
-    // Upload reports to Google Drive if metadata exists with folder ID
-    const metadataPath = path.join(transcriptsDir, filename.replace('.jsonl', '_metadata.json'));
-    if (fs.existsSync(metadataPath)) {
-      try {
-        const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
-        if (metadata.googleDriveFolderId) {
-          // Generate temporary DOCX for Drive upload fallback if needed
-          const docxFilename = filename.replace('.jsonl', '_report.docx');
-          const docxPath = path.join(transcriptsDir, docxFilename);
-          try {
-            await saveMarkdownAsDocx(markdown, docxPath);
-          } catch (docxErr) {
-            console.error(`[Server] Failed to generate temp DOCX for Drive upload:`, docxErr.message);
+      // Upload reports to Google Drive if metadata exists with folder ID
+      const metadataPath = path.join(transcriptsDir, filename.replace('.jsonl', '_metadata.json'));
+      if (fs.existsSync(metadataPath)) {
+        try {
+          const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+          if (metadata.googleDriveFolderId) {
+            // Generate temporary DOCX for Drive upload fallback if needed
+            const docxFilename = filename.replace('.jsonl', '_report.docx');
+            const docxPath = path.join(transcriptsDir, docxFilename);
+            try {
+              await saveMarkdownAsDocx(markdown, docxPath);
+            } catch (docxErr) {
+              console.error(`[Server] Failed to generate temp DOCX for Drive upload:`, docxErr.message);
+            }
+
+            // Await Drive upload
+            await uploadReportToGoogleDrive(filename, metadata.googleDriveFolderId);
+
+            // Clean up temp docx
+            if (fs.existsSync(docxPath)) fs.unlinkSync(docxPath);
           }
-
-          // Await Drive upload
-          await uploadReportToGoogleDrive(filename, metadata.googleDriveFolderId);
-
-          // Clean up temp docx
-          if (fs.existsSync(docxPath)) fs.unlinkSync(docxPath);
+        } catch (err) {
+          console.error(`[Server] Failed to process Google Drive report upload:`, err.message);
         }
-      } catch (err) {
-        console.error(`[Server] Failed to process Google Drive report upload:`, err.message);
       }
     }
 
@@ -815,7 +819,7 @@ app.get('/api/transcripts/:filename/docx', async (req, res) => {
 /**
  * Backend WebSocket logic: connect to Google Meet/Zoom's output port
  */
-function connectToBotAudioStream(sessionId, wsPort, botType) {
+function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
   const url = `ws://localhost:${wsPort}`;
   let botSocket = null;
   let attempts = 0;
@@ -857,6 +861,7 @@ function connectToBotAudioStream(sessionId, wsPort, botType) {
               startTs: 0,
               endTs: 0,
               isFinal: true,
+              projectId,
             });
           }
         },

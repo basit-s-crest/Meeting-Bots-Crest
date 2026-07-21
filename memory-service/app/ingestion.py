@@ -1,9 +1,8 @@
 import json
 
 import redis.asyncio as redis
-from fastapi import APIRouter, BackgroundTasks, Body
 from fastapi import APIRouter, BackgroundTasks
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.config import REDIS_URL
 from app.database import get_db
@@ -24,6 +23,7 @@ def get_redis() -> redis.Redis:
 
 class IngestRequest(BaseModel):
     session_id: str
+    project_id: str | None = None
     speaker: str = "Unknown"
     text: str = ""
     start_ts: float = 0.0
@@ -33,12 +33,6 @@ class IngestRequest(BaseModel):
 
 @router.post("/ingest")
 async def ingest_segment(
-    session_id: str = Body(...),
-    speaker: str = Body(...),
-    text: str = Body(...),
-    start_ts: float = Body(0.0),
-    end_ts: float = Body(0.0),
-    is_final: bool = Body(True),
     req: IngestRequest,
     background_tasks: BackgroundTasks = None,
 ):
@@ -46,6 +40,7 @@ async def ingest_segment(
 
     segment = {
         "session_id": req.session_id,
+        "project_id": req.project_id,
         "speaker_label": req.speaker,
         "text": req.text,
         "start_ts": req.start_ts,
@@ -76,5 +71,8 @@ async def _store_segment(segment: dict):
             embedding = embed(text)
             segment["embedding"] = embedding
         await insert_segment(segment)
+        print(f"[Ingestion] Segment stored: session={segment.get('session_id')} speaker={segment.get('speaker_label')}")
     except Exception as e:
-        print(f"[Ingestion] Background store failed: {e}")
+        print(f"[Ingestion] Background store FAILED: {e}")
+        import traceback
+        traceback.print_exc()

@@ -74,7 +74,7 @@ User Question: ${question}`;
  * Fire-and-forget: push a transcript segment to the memory service.
  * Called on every Deepgram final chunk during a live meeting.
  */
-function ingestSegment(sessionId, { speaker, text, startTs, endTs, isFinal }) {
+function ingestSegment(sessionId, { speaker, text, startTs, endTs, isFinal, projectId }) {
   const urls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8000'];
   for (const url of urls) {
     fetch(`${url}/api/memory/ingest`, {
@@ -82,6 +82,7 @@ function ingestSegment(sessionId, { speaker, text, startTs, endTs, isFinal }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         session_id: sessionId,
+        project_id: projectId ?? null,
         speaker,
         text,
         start_ts: startTs ?? 0,
@@ -97,7 +98,8 @@ function ingestSegment(sessionId, { speaker, text, startTs, endTs, isFinal }) {
 /**
  * Ask a natural language question. Returns { answer, citations }.
  */
-async function queryMemory({ question, sessionId, projectId }) {
+async function queryMemory({ question, sessionId, projectId, project_id }) {
+  const pid = projectId || project_id; // accept both camelCase and snake_case
   const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
   const uniqueUrls = [...new Set(serviceUrls.filter(Boolean))];
 
@@ -109,7 +111,7 @@ async function queryMemory({ question, sessionId, projectId }) {
         body: JSON.stringify({
           question,
           session_id: sessionId,
-          project_id: projectId,
+          project_id: pid,
         }),
       });
       if (res.ok) {
@@ -122,7 +124,7 @@ async function queryMemory({ question, sessionId, projectId }) {
 
   // Fallback to direct Groq query if Python memory service is offline
   console.log('[MemoryClient] Python memory service unreachable, using direct Groq LLM fallback...');
-  const fallbackResult = await fallbackGroqQuery({ question, projectId });
+  const fallbackResult = await fallbackGroqQuery({ question, projectId: pid });
   return { ...fallbackResult, usedFallback: true };
 }
 
@@ -132,14 +134,18 @@ async function queryMemory({ question, sessionId, projectId }) {
  */
 function processMeeting(sessionId) {
   const urls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8000'];
+  console.log(`[MemoryClient] Triggering processMeeting for session ${sessionId}...`);
   for (const url of urls) {
     fetch(`${url}/api/memory/process-meeting`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sessionId }),
     })
-    .then(() => {})
-    .catch(() => {});
+    .then(res => {
+      if (res.ok) console.log(`[MemoryClient] processMeeting sent to ${url} — ${res.status}`);
+      else console.warn(`[MemoryClient] processMeeting failed at ${url} — ${res.status}`);
+    })
+    .catch(err => console.warn(`[MemoryClient] processMeeting error at ${url}: ${err.message}`));
   }
 }
 

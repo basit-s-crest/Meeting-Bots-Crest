@@ -185,16 +185,36 @@ async def _extract_events(transcript_text: str) -> list[dict]:
         return []
 
 
+_SUMMARY_PROMPT = """You are updating a project's meeting memory rollup.
+
+EXISTING SUMMARY:
+{existing_summary}
+
+NEW EVENTS FROM TODAY'S MEETING ({meeting_date}):
+{new_events_text}
+
+Given the existing summary and today's new events, produce a JSON object with:
+- "summary_snapshot": 2-4 sentence overview of the project's current state, key decisions made, and outstanding items. Merge existing context with new events.
+- "risk_flags": array of short strings describing active risks/blockers/concerns (deduplicate with existing).
+- "pending_blockers": array of short strings describing unresolved blockers or dependencies.
+
+Rules:
+- Be concise — this summary is read as a quick "catch me up" for stakeholders.
+- Deduplicate — don't repeat items already in the existing summary unless they're still relevant.
+- If a risk/blocker from the existing summary is resolved by new events, remove it.
+- Return ONLY the JSON object, no other text."""
+
+
 async def _update_project_memory(project_id: str, new_events_count: int, meeting_date: str):
     """Update the project_memory rollup after a meeting is processed."""
     try:
         db = get_db()
 
-        # Count meetings, decisions, and action items via data length
+        # Count meetings, decisions, and action items
         meetings = db.table("meeting_sessions").select("session_id").eq("project_id", project_id).execute()
         decisions = db.table("meeting_events").select("id").eq("project_id", project_id).eq("category", "DECISION").execute()
         action_items = db.table("meeting_events").select("id").eq("project_id", project_id).eq("category", "ACTION_ITEM").execute()
-        recent = db.table("meeting_events").select("description").eq("project_id", project_id).limit(50).execute()
+        recent = db.table("meeting_events").select("description, category, assignee, priority").eq("project_id", project_id).order("meeting_date", desc=True).limit(50).execute()
 
         total_meetings = max(len(meetings.data) if meetings.data else 1, 1)
         total_decisions = len(decisions.data) if decisions.data else 0
@@ -210,6 +230,48 @@ async def _update_project_memory(project_id: str, new_events_count: int, meeting
         ]
         detected_themes = [kw for kw in theme_keywords if kw in all_text]
 
+        # Fetch existing summary for Groq to merge with
+        existing = db.table("project_memory").select("summary_snapshot, risk_flags, pending_blockers").eq("project_id", project_id).execute()
+        existing_summary = ""
+        if existing.data and len(existing.data) > 0:
+            existing_summary = existing.data[0].get("summary_snapshot") or "No existing summary."
+
+        # Format new events for the summary prompt
+        new_events_lines = []
+        for r in (recent.data or [])[:20]:
+            line = f"- [{r.get('category', '?')}] {r.get('description', '')}"
+            if r.get("assignee"):
+                line += f" (Assignee: {r['assignee']})"
+            new_events_lines.append(line)
+        new_events_text = "\n".join(new_events_lines) or "No events."
+
+        # Call Groq to generate summary, risk_flags, pending_blockers
+        summary_snapshot = None
+        risk_flags = []
+        pending_blockers = []
+        try:
+            groq = get_groq()
+            response = groq.chat.completions.create(
+                model=_EXTRACTION_MODEL,
+                messages=[{
+                    "role": "user",
+                    "content": _SUMMARY_PROMPT.format(
+                        existing_summary=existing_summary,
+                        meeting_date=meeting_date,
+                        new_events_text=new_events_text,
+                    ),
+                }],
+                response_format={"type": "json_object"},
+                temperature=0.2,
+                max_tokens=512,
+            )
+            data = json.loads(response.choices[0].message.content)
+            summary_snapshot = data.get("summary_snapshot")
+            risk_flags = data.get("risk_flags", [])
+            pending_blockers = data.get("pending_blockers", [])
+        except Exception as e:
+            print(f"[PostMeeting] Groq summary generation failed (non-fatal): {e}")
+
         record = {
             "project_id": project_id,
             "total_meetings": total_meetings,
@@ -219,6 +281,12 @@ async def _update_project_memory(project_id: str, new_events_count: int, meeting
             "key_themes": detected_themes,
             "last_updated": "now()",
         }
+        if summary_snapshot:
+            record["summary_snapshot"] = summary_snapshot
+        if risk_flags:
+            record["risk_flags"] = risk_flags
+        if pending_blockers:
+            record["pending_blockers"] = pending_blockers
 
         await upsert_project_memory(record)
         print(f"[PostMeeting] Project memory updated for {project_id}")
