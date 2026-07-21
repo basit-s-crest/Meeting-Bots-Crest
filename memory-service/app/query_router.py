@@ -5,6 +5,7 @@ for routing. Only the final answer synthesis uses Groq.
 """
 
 import json
+import asyncio
 from datetime import datetime
 
 import redis.asyncio as redis
@@ -156,53 +157,96 @@ async def _query_structured(project_id: str, intent: str, chat_history: list[dic
 
 
 async def _query_semantic(project_id: str | None, question: str, chat_history: list[dict] | None = None) -> dict:
-    """Strategy B: pgvector semantic search + keyword hybrid."""
-    # bge-small-en-v1.5 expects a query instruction prefix for retrieval.
+    """Strategy B: pgvector semantic search + keyword hybrid.
+
+    Searches BOTH meeting_events (extracted decisions/action items/risks) and
+    transcript_segments (raw conversation) in parallel, then merges results for
+    Groq synthesis. Events give structured "what was decided," segments give
+    supporting raw context and exact wording.
+    """
     q_embedding = embed(f"Represent this sentence for searching relevant passages: {question}")
     keyword = _extract_keywords(question)
 
+    db = get_db()
+
+    # Run both searches in parallel — one embedding, two queries.
     try:
-        db = get_db()
-        result = db.rpc(
-            "search_meeting_events",
-            {
-                "p_project_id": project_id,
-                "p_query_embedding": q_embedding,
-                "p_keyword": keyword,
-                "p_match_count": 8,
-            },
-        ).execute()
+        events_result, segments_result = await asyncio.gather(
+            asyncio.to_thread(
+                lambda: db.rpc(
+                    "search_meeting_events",
+                    {
+                        "p_project_id": project_id,
+                        "p_query_embedding": q_embedding,
+                        "p_keyword": keyword,
+                        "p_match_count": 8,
+                    },
+                ).execute()
+            ),
+            asyncio.to_thread(
+                lambda: db.rpc(
+                    "search_transcript_segments",
+                    {
+                        "p_project_id": project_id,
+                        "p_query_embedding": q_embedding,
+                        "p_keyword": keyword,
+                        "p_match_count": 8,
+                    },
+                ).execute()
+            ),
+        )
     except Exception as e:
         return {
             "answer": f"Search failed: {e}",
             "citations": [],
         }
 
-    if not result.data:
+    events = events_result.data or []
+    segments = segments_result.data or []
+
+    if not events and not segments:
+        # No vector results, but if we have chat history from this session,
+        # the LLM can answer from the previous conversation (e.g. a follow-up
+        # like "what is the deployment date?" right after it was mentioned).
+        if chat_history:
+            answer = await _synthesize(question, [], "past meetings", chat_history)
+            return answer
         return {
             "answer": "I could not find that in past meetings.",
             "citations": [],
         }
 
-    context_lines = [
-        f"[{r['meeting_date']} | {r['bot_type']}] {r['description']}"
-        for r in result.data
-    ]
+    # Build context lines — events first (higher signal), then segments (raw context).
+    context_lines = []
+    for r in events:
+        context_lines.append(
+            f"[EVENT | {r['meeting_date']} | {r['bot_type']}] {r['description']}"
+        )
+    for r in segments:
+        speaker = r.get("resolved_name") or r.get("speaker_label", "Unknown")
+        context_lines.append(
+            f"[SEGMENT | {r['meeting_date']} | {r['bot_type']}] {speaker}: {r['segment_text']}"
+        )
 
-    # Build citations from results for the synthesis prompt
-    citations = [
-        {
+    # Build citations from both sources.
+    citations = []
+    for r in events[:5]:
+        citations.append({
             "sessionId": r["session_id"],
             "meetingDate": r["meeting_date"],
             "platform": r["bot_type"],
             "snippet": r["description"][:200],
-        }
-        for r in result.data[:5]
-    ]
+        })
+    for r in segments[:5]:
+        speaker = r.get("resolved_name") or r.get("speaker_label", "Unknown")
+        citations.append({
+            "sessionId": r["session_id"],
+            "meetingDate": r["meeting_date"],
+            "platform": r["bot_type"],
+            "snippet": f"{speaker}: {r['segment_text']}"[:200],
+        })
 
     answer = await _synthesize(question, context_lines, "past meetings", chat_history)
-
-    # Inject the real citations
     answer["citations"] = citations
     return answer
 
