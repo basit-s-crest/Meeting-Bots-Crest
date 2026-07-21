@@ -140,7 +140,7 @@ User Question: ${question}`;
  * Called on every Deepgram final chunk during a live meeting.
  */
 function ingestSegment(sessionId, { speaker, text, startTs, endTs, isFinal, projectId }) {
-  const urls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8000'];
+  const urls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001'];
   for (const url of urls) {
     fetch(`${url}/api/memory/ingest`, {
       method: 'POST',
@@ -167,7 +167,7 @@ async function queryMemory({ question, sessionId, session_id, projectId, project
   const finalSessionId = sessionId || session_id;
   const finalProjectId = projectId || project_id;
 
-  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8005', 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
+  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
   const uniqueUrls = [...new Set(serviceUrls.filter(Boolean))];
 
   for (const url of uniqueUrls) {
@@ -201,14 +201,18 @@ async function queryMemory({ question, sessionId, session_id, projectId, project
  */
 function processMeeting(sessionId) {
   const urls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8005', 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
+  console.log(`[MemoryClient] Triggering processMeeting for session ${sessionId}...`);
   for (const url of urls) {
     fetch(`${url}/api/memory/process-meeting`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sessionId }),
     })
-    .then(() => {})
-    .catch(() => {});
+    .then(res => {
+      if (res.ok) console.log(`[MemoryClient] processMeeting sent to ${url} — ${res.status}`);
+      else console.warn(`[MemoryClient] processMeeting failed at ${url} — ${res.status}`);
+    })
+    .catch(err => console.warn(`[MemoryClient] processMeeting error at ${url}: ${err.message}`));
   }
 }
 

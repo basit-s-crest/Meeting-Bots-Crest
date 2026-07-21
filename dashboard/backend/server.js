@@ -222,13 +222,14 @@ app.post('/api/sessions/start', async (req, res) => {
           startTs: 0,
           endTs: 0,
           isFinal: true,
+          projectId,
         });
       }
     };
 
     // If Google Meet or Zoom, we connect to their WebSocket stream to extract audio and push to Deepgram
     if (botType === 'google-meet' || botType === 'zoom') {
-      connectToBotAudioStream(sessionId, wsPort, botType);
+      connectToBotAudioStream(sessionId, wsPort, botType, projectId);
     }
 
     res.json({
@@ -258,6 +259,8 @@ app.post('/api/sessions/stop', async (req, res) => {
     deepgramProxyGoogle.closeSession(sessionId);
     deepgramProxyZoom.closeSession(sessionId);
     await processManager.killBot(sessionId);
+    // Trigger post-meeting extraction (fire-and-forget)
+    processMeeting(sessionId);
     res.json({ success: true, sessionId });
   } catch (err) {
     res.status(500).json({ error: `Failed to stop bot session: ${err.message}` });
@@ -435,13 +438,59 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
     botType = type;
     sessionId = sid;
   }
-  // 1. SUPABASE CHECK FIRST (Cloud-First):
-  if (match) {
+  // 1. LOCAL REPORT CACHING CHECK:
+  if (fs.existsSync(reportPath)) {
+    console.log(`[Server] Report already exists for ${filename}. Loading cached files.`);
+    try {
+      const { data, error } = await supabase
+        .from('meeting_sessions')
+        .select('report_file_url, transcript_file_url')
+        .eq('session_id', sessionId)
+        .single();
+      if (!error && data) {
+        dbSession = data;
+      }
+    } catch (dbErr) {
+      console.warn(`[Server] Supabase session fetch failed in generate-report for ${filename}:`, dbErr.message);
+    }
+  }
+
+  // 1. REPORT CACHING CHECK (Supabase first):
+  if (dbSession && dbSession.report_file_url) {
+    try {
+      console.log(`[Server] Report already exists in Supabase for ${filename}. Fetching...`);
+      const reportMarkdown = await downloadStorageFile(dbSession.report_file_url);
+      if (reportMarkdown) {
+        let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
+        const schedUrl = dbSession.report_file_url.replace('/report.md', '/scheduling.json');
+        try {
+          const schedText = await downloadStorageFile(schedUrl);
+          if (schedText) schedulingData = JSON.parse(schedText);
+        } catch (e) {
+          console.warn(`[Server] Failed to fetch scheduling companion from Supabase:`, e.message);
+        }
+
+        return res.json({
+          success: true,
+          cached: true,
+          report: reportMarkdown,
+          scheduling: schedulingData
+        });
+      }
+    } catch (fetchErr) {
+      console.error(`[Server] Failed to fetch report from Supabase:`, fetchErr.message);
+    }
+  }
+
+  // 2. SUPABASE STORAGE FALLBACK (For sessions recorded on another local/machine):
+  const fallbackMatch = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+  if (fallbackMatch) {
+    const [_, supaBotType, supaSessionId] = fallbackMatch;
     try {
       const { data: session, error: dbErr } = await supabase
         .from('meeting_sessions')
         .select('report_file_url, transcript_file_url')
-        .eq('session_id', sessionId)
+        .eq('session_id', supaSessionId)
         .single();
 
       if (!dbErr && session) {
@@ -449,41 +498,45 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
 
         // If report markdown is stored in Supabase Storage, fetch and return it directly
         if (session.report_file_url) {
-          console.log(`[Server] Fetching report from Supabase storage for ${sessionId}...`);
+          console.log(`[Server] Fetching report from Supabase storage for ${supaSessionId}...`);
           try {
             const reportMarkdown = await downloadStorageFile(session.report_file_url);
-            fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
+            if (reportMarkdown) {
+              fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
 
-            let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
-            const schedUrl = session.report_file_url.replace('/report.md', '/scheduling.json');
-            try {
-              const schedText = await downloadStorageFile(schedUrl);
-              schedulingData = JSON.parse(schedText);
-              fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
-            } catch (e) {
-              if (fs.existsSync(schedulingPath)) {
-                schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+              let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
+              const schedUrl = session.report_file_url.replace('/report.md', '/scheduling.json');
+              try {
+                const schedText = await downloadStorageFile(schedUrl);
+                schedulingData = JSON.parse(schedText);
+                fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
+              } catch (e) {
+                if (fs.existsSync(schedulingPath)) {
+                  schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+                }
               }
-            }
 
-            return res.json({
-              success: true,
-              cached: true,
-              report: reportMarkdown,
-              scheduling: schedulingData
-            });
+              return res.json({
+                success: true,
+                cached: true,
+                report: reportMarkdown,
+                scheduling: schedulingData
+              });
+            }
           } catch (fetchErr) {
-            console.warn(`[Server] Failed to download report from Supabase storage for ${sessionId}:`, fetchErr.message);
+            console.warn(`[Server] Failed to download report from Supabase storage for ${supaSessionId}:`, fetchErr.message);
           }
         }
 
         // If report is not in storage, but transcript file is in storage and not on local disk, download transcript
         if (!fs.existsSync(filePath) && session.transcript_file_url) {
-          console.log(`[Server] Local transcript missing, downloading from Supabase storage for ${sessionId}...`);
+          console.log(`[Server] Local transcript missing, downloading from Supabase storage for ${supaSessionId}...`);
           try {
             const transcriptContent = await downloadStorageFile(session.transcript_file_url);
-            fs.writeFileSync(filePath, transcriptContent, 'utf8');
-            console.log(`[Server] Successfully downloaded transcript to ${filePath}`);
+            if (transcriptContent) {
+              fs.writeFileSync(filePath, transcriptContent, 'utf8');
+              console.log(`[Server] Successfully downloaded transcript to ${filePath}`);
+            }
           } catch (tErr) {
             console.warn(`[Server] Failed to download transcript from Supabase storage:`, tErr.message);
           }
@@ -492,6 +545,7 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
     } catch (supaErr) {
       console.warn(`[Server] Supabase storage check failed for ${filename}:`, supaErr.message);
     }
+  }
   }
 
   // 2. LOCAL REPORT CACHING CHECK (Fallback if not found in Supabase):
@@ -546,30 +600,40 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
       console.log(`[Server] Uploading report to Supabase for session: ${sessionId}`);
       await uploadReport(sessionId, botType);
     }
+    // Update Supabase row and upload report
+    if (sessionId) {
+      // Parse filename to update Supabase row and upload report
+      const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+      if (match) {
+        const [_, botType, sessionId] = match;
+        console.log(`[Server] Uploading report to Supabase for session: ${sessionId}`);
+        await uploadReport(sessionId, botType);
+      }
 
-    // Upload reports to Google Drive if metadata exists with folder ID
-    const metadataPath = path.join(transcriptsDir, filename.replace('.jsonl', '_metadata.json'));
-    if (fs.existsSync(metadataPath)) {
-      try {
-        const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
-        if (metadata.googleDriveFolderId) {
-          // Generate temporary DOCX for Drive upload fallback if needed
-          const docxFilename = filename.replace('.jsonl', '_report.docx');
-          const docxPath = path.join(transcriptsDir, docxFilename);
-          try {
-            await saveMarkdownAsDocx(markdown, docxPath);
-          } catch (docxErr) {
-            console.error(`[Server] Failed to generate temp DOCX for Drive upload:`, docxErr.message);
+      // Upload reports to Google Drive if metadata exists with folder ID
+      const metadataPath = path.join(transcriptsDir, filename.replace('.jsonl', '_metadata.json'));
+      if (fs.existsSync(metadataPath)) {
+        try {
+          const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+          if (metadata.googleDriveFolderId) {
+            // Generate temporary DOCX for Drive upload fallback if needed
+            const docxFilename = filename.replace('.jsonl', '_report.docx');
+            const docxPath = path.join(transcriptsDir, docxFilename);
+            try {
+              await saveMarkdownAsDocx(markdown, docxPath);
+            } catch (docxErr) {
+              console.error(`[Server] Failed to generate temp DOCX for Drive upload:`, docxErr.message);
+            }
+
+            // Await Drive upload
+            await uploadReportToGoogleDrive(filename, metadata.googleDriveFolderId);
+
+            // Clean up temp docx
+            if (fs.existsSync(docxPath)) fs.unlinkSync(docxPath);
           }
-
-          // Await Drive upload
-          await uploadReportToGoogleDrive(filename, metadata.googleDriveFolderId);
-
-          // Clean up temp docx
-          if (fs.existsSync(docxPath)) fs.unlinkSync(docxPath);
+        } catch (err) {
+          console.error(`[Server] Failed to process Google Drive report upload:`, err.message);
         }
-      } catch (err) {
-        console.error(`[Server] Failed to process Google Drive report upload:`, err.message);
       }
     }
 
@@ -771,7 +835,7 @@ app.get('/api/transcripts/:filename/docx', async (req, res) => {
 /**
  * Backend WebSocket logic: connect to Google Meet/Zoom's output port
  */
-function connectToBotAudioStream(sessionId, wsPort, botType) {
+function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
   const url = `ws://localhost:${wsPort}`;
   let botSocket = null;
   let attempts = 0;
@@ -813,6 +877,7 @@ function connectToBotAudioStream(sessionId, wsPort, botType) {
               startTs: 0,
               endTs: 0,
               isFinal: true,
+              projectId,
             });
           }
         },

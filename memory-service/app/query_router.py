@@ -18,6 +18,7 @@ from app.config import REDIS_URL
 from app.database import get_db
 from app.embeddings import embed
 from app.groq_client import get_groq, build_synthesis_prompt
+from app.models.chat_messages import get_recent_messages, save_message
 
 router = APIRouter()
 _redis_client: redis.Redis | None = None
@@ -34,6 +35,7 @@ class QueryRequest(BaseModel):
     question: str
     session_id: str | None = None
     project_id: str | None = None
+    chat_session_id: str | None = None
 
 
 # ── Intent classification (rule-based, zero LLM cost) ──────────────
@@ -89,7 +91,7 @@ def _extract_keywords(question: str) -> str:
 # ── Retrieval strategies ──────────────────────────────────────────
 
 
-async def _query_redis_buffer(session_id: str, question: str) -> dict:
+async def _query_redis_buffer(session_id: str, question: str, chat_history: list[dict] | None = None) -> dict:
     """Strategy A: Read current meeting's segments from Redis + LLM synthesis."""
     try:
         r = get_redis()
@@ -113,10 +115,10 @@ async def _query_redis_buffer(session_id: str, question: str) -> dict:
         f"[{s['speaker_label']}]: {s['text']}" for s in recent
     ]
 
-    return await _synthesize(question, context_lines, "current meeting")
+    return await _synthesize(question, context_lines, "current meeting", chat_history)
 
 
-async def _query_structured(project_id: str, intent: str) -> dict:
+async def _query_structured(project_id: str, intent: str, chat_history: list[dict] | None = None) -> dict:
     """Strategy C: Direct SQL filter by category."""
     category_map = {
         "action_items": "ACTION_ITEM",
@@ -152,7 +154,7 @@ async def _query_structured(project_id: str, intent: str) -> dict:
     ]
 
     return await _synthesize(
-        f"List all {intent} for this project", context_lines, "past meetings"
+        f"List all {intent} for this project", context_lines, "past meetings", chat_history
     )
 
 
@@ -171,7 +173,7 @@ def cosine_similarity(v1: list[float] | None, v2: list[float] | str | None) -> f
     return dot / (norm1 * norm2) if (norm1 > 0 and norm2 > 0) else 0.0
 
 
-async def _query_semantic(project_id: str | None, question: str) -> dict:
+async def _query_semantic(project_id: str | None, question: str, chat_history: list[dict] | None = None) -> dict:
     """Strategy B: Pure vector similarity scoring against transcript_segments filtered by project_id."""
     q_embedding = embed(f"Represent this sentence for searching relevant passages: {question}")
     db = get_db()
@@ -266,22 +268,31 @@ async def _query_semantic(project_id: str | None, question: str) -> dict:
             "usedFallback": False
         }
 
-    answer = await _synthesize(question, context_lines, "past meetings")
+    answer = await _synthesize(question, context_lines, "past meetings", chat_history)
     answer["citations"] = citations
     answer["answeredVia"] = "vector_search"
     answer["usedFallback"] = False
     return answer
 
 
-async def _synthesize(question: str, context: list[str], source_label: str) -> dict:
+async def _synthesize(question: str, context: list[str], source_label: str, chat_history: list[dict] | None = None) -> dict:
     """Unified answer synthesis via Groq."""
     try:
         groq = get_groq()
         prompt = build_synthesis_prompt(question, context)
 
+        messages = []
+        if chat_history:
+            history_text = "\n".join(f"{m['role']}: {m['content']}" for m in chat_history)
+            messages.append({
+                "role": "system",
+                "content": f"Previous conversation in this session:\n{history_text}\n\nUse this to resolve follow-up references like 'him', 'that', 'the deadline', etc.",
+            })
+        messages.append({"role": "user", "content": prompt})
+
         response = groq.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             response_format={"type": "json_object"},
             temperature=0.2,
             max_tokens=1024,
@@ -314,6 +325,7 @@ async def query_memory(body: QueryRequest):
     question = body.question.strip()
     session_id = body.session_id
     project_id = body.project_id
+    chat_session_id = body.chat_session_id
 
     if not question:
         return {"answer": "Please ask a question.", "citations": []}
@@ -328,16 +340,38 @@ async def query_memory(body: QueryRequest):
         }
 
     # Step 1: Check for live meeting + current-scope query
+    # Load recent chat history for follow-up resolution
+    chat_history = None
+    if chat_session_id and project_id:
+        chat_history = await get_recent_messages(project_id, chat_session_id)
+        # Save the user's question immediately
+        await save_message(project_id, chat_session_id, "user", question)
+
+    # Step 1: Check for live meeting + current-scope query (uses Redis, no project_id needed)
     if session_id and _is_current_meeting_query(question):
-        return await _query_redis_buffer(session_id, question)
+        result = await _query_redis_buffer(session_id, question, chat_history)
+        if chat_session_id and project_id:
+            await save_message(project_id, chat_session_id, "assistant", result.get("answer", ""))
+        return result
+
+    # All other strategies require project_id for data isolation
+    if not project_id:
+        return {
+            "answer": "Please provide a project context to search across meetings.",
+            "citations": [],
+        }
 
     # Step 2: Check for structured intent (action items, decisions, risks)
-    if project_id:
-        intent = _classify_intent(question)
-        if intent in ("action_items", "decisions", "risks", "estimates"):
-            res = await _query_structured(project_id, intent)
-            if res.get("citations") or (res.get("answer") and not res.get("answer").startswith("No ")):
-                return res
+    intent = _classify_intent(question)
+    if intent in ("action_items", "decisions", "risks", "estimates"):
+        result = await _query_structured(project_id, intent, chat_history)
+        if result.get("citations") or (result.get("answer") and not result.get("answer").startswith("No ")):
+            if chat_session_id:
+                await save_message(project_id, chat_session_id, "assistant", result.get("answer", ""))
+            return result
 
     # Step 3: Default — semantic vector search
-    return await _query_semantic(project_id, question)
+    result = await _query_semantic(project_id, question, chat_history)
+    if chat_session_id:
+        await save_message(project_id, chat_session_id, "assistant", result.get("answer", ""))
+    return result
