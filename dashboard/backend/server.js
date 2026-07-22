@@ -862,10 +862,10 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
       console.log(`[Server] Connected to bot audio stream for session ${sessionId}`);
       broadcastToClients(sessionId, 'status', { status: 'capturing' });
 
-      // Create transcript log file for Meet/Zoom
-      const transcriptsDir = path.join(__dirname, 'transcripts');
-      const logPath = path.join(transcriptsDir, `${processManager.getSession(sessionId)?.type || 'session'}_${sessionId}.jsonl`);
-      const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+      // Create transcript log file for Meet/Zoom (disabled — using Supabase only)
+      // const transcriptsDir = path.join(__dirname, 'transcripts');
+      // const logPath = path.join(transcriptsDir, `${processManager.getSession(sessionId)?.type || 'session'}_${sessionId}.jsonl`);
+      // const logStream = fs.createWriteStream(logPath, { flags: 'a' });
 
       // Initialize Deepgram Proxy connection
       dgProxy.initializeSession(sessionId, {
@@ -873,10 +873,12 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
         onTranscript: (event) => {
           // Send to UI clients
           broadcastToClients(sessionId, 'transcript', event);
-          // Write to local jsonl file if final
+          // Write to local jsonl file if final (disabled — using Supabase only)
+          // if (event.isFinal) {
+          //   logStream.write(JSON.stringify(event) + '\n');
+          // }
+          // Push to memory service for cross-meeting search (Supabase)
           if (event.isFinal) {
-            logStream.write(JSON.stringify(event) + '\n');
-            // Push to memory service for cross-meeting search
             ingestSegment(sessionId, {
               speaker: event.speaker,
               text: event.text,

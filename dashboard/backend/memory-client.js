@@ -1,10 +1,4 @@
 import { Groq } from 'groq-sdk';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const PYTHON_SERVICE_URL = process.env.MEMORY_SERVICE_URL || 'http://127.0.0.1:8001';
 
@@ -24,28 +18,26 @@ async function fallbackGroqQuery({ question, projectId }) {
   try {
     const groq = new Groq({ apiKey });
 
-    // Read recent transcripts for context
-    const transcriptsDir = path.join(__dirname, 'transcripts');
+    // Query Supabase for recent segments as fallback context instead of local files
     let contextText = '';
-    if (fs.existsSync(transcriptsDir)) {
-      const files = fs.readdirSync(transcriptsDir).filter(f => f.endsWith('.jsonl'));
-      for (const f of files.slice(-5)) {
-        try {
-          const content = fs.readFileSync(path.join(transcriptsDir, f), 'utf8');
-          const lines = content.split('\n').filter(Boolean).slice(-60).map(l => {
-            try {
-              const obj = JSON.parse(l);
-              return `${obj.speaker || 'Speaker'}: ${obj.text}`;
-            } catch {
-              return '';
-            }
-          }).filter(Boolean).join('\n');
-          if (lines) {
-            contextText += `\n--- Meeting Transcript (${f}) ---\n${lines}\n`;
+    try {
+      const { default: fetch } = await import('node-fetch');
+      const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+      const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+      if (supabaseUrl && supabaseKey) {
+        const res = await fetch(`${supabaseUrl}/rest/v1/transcript_segments?select=speaker_label,text,created_at&order=created_at.desc&limit=50`, {
+          headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
+        });
+        if (res.ok) {
+          const rows = await res.json();
+          if (rows && rows.length > 0) {
+            contextText = rows.map(r =>
+              `[${r.created_at?.slice(0, 10) || ''}] ${r.speaker_label || 'Speaker'}: ${r.text}`
+            ).join('\n');
           }
-        } catch {}
+        }
       }
-    }
+    } catch {} // Silent — Supabase fallback is best-effort
 
     const prompt = `You are a helpful AI Meeting Knowledge Assistant for workspace/project "${projectId || 'General'}".
 Answer the user's question naturally and accurately based on the project meeting transcripts provided below. If context is empty or missing details, answer politely and offer guidance.
