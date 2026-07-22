@@ -6,6 +6,7 @@ for routing. Only the final answer synthesis uses Groq.
 
 import json
 import os
+import asyncio
 from datetime import datetime
 
 print(f"QUERY_ROUTER LOADED - v2 - {os.path.getmtime(__file__)}")
@@ -71,21 +72,25 @@ def _is_current_meeting_query(question: str) -> bool:
 
 
 def _extract_keywords(question: str) -> str:
-    """Extract meaningful keywords from the question for hybrid search.
-    Strips common stop words and returns the longest meaningful fragment."""
+    """Extract keywords with meeting-domain awareness."""
+    # Generic stop words — but NOT meeting-specific terms
     stop_words = {
-        "what", "when", "where", "who", "how", "is", "was", "are", "were",
-        "did", "do", "does", "has", "have", "had", "the", "a", "an", "in",
-        "on", "at", "to", "for", "of", "with", "about", "tell", "show",
-        "give", "find", "list", "get", "me", "we", "they", "it", "you",
-        "that", "this", "these", "those", "can", "could", "would", "will",
-        "please", "from", "all", "any", "some", "also", "just", "not",
-        "discuss", "discussed", "discussing", "mention", "mentioned",
-        "talk", "talked", "talking", "say", "said", "saying",
+        "the", "a", "an", "in", "on", "at", "to", "for", "of", "with",
+        "is", "was", "are", "were", "be", "been", "being",
+        "it", "this", "that", "these", "those",
+        "can", "could", "would", "will", "should",
+        "please", "just", "also", "very", "really",
     }
+    # KEEP: "what", "when", "where", "who", "how", "did", "do", "does",
+    #        "has", "have", "had", "tell", "show", "give", "find", "list",
+    #        "get", "me", "we", "they", "you", "from", "all", "any", "some",
+    #        "about", "discuss", "discussed", "mention", "talk", "talked",
+    #        "said", "saying"
+    # These carry meaning in meeting queries: "who said X", "what was discussed"
+
     words = question.lower().split()
-    keywords = [w for w in words if w not in stop_words and len(w) > 2]
-    return " ".join(keywords[:5]) if keywords else ""
+    keywords = [w.strip("?.!,;:") for w in words if w.lower() not in stop_words and len(w) > 2]
+    return " ".join(keywords[:8]) if keywords else ""
 
 
 # ── Retrieval strategies ──────────────────────────────────────────
@@ -158,115 +163,124 @@ async def _query_structured(project_id: str, intent: str, chat_history: list[dic
     )
 
 
-def cosine_similarity(v1: list[float] | None, v2: list[float] | str | None) -> float:
-    """Compute cosine similarity between two vector embeddings."""
-    if isinstance(v2, str):
-        try:
-            v2 = json.loads(v2)
-        except Exception:
-            return 0.0
-    if not v1 or not v2 or len(v1) != len(v2):
-        return 0.0
-    dot = sum(a * b for a, b in zip(v1, v2))
-    norm1 = sum(a * a for a in v1) ** 0.5
-    norm2 = sum(b * b for b in v2) ** 0.5
-    return dot / (norm1 * norm2) if (norm1 > 0 and norm2 > 0) else 0.0
-
-
 async def _query_semantic(project_id: str | None, question: str, chat_history: list[dict] | None = None) -> dict:
-    """Strategy B: Pure vector similarity scoring against transcript_segments filtered by project_id."""
+    """Strategy B: pgvector semantic search + keyword hybrid.
+
+    Searches BOTH meeting_events (extracted decisions/action items/risks) and
+    transcript_segments (raw conversation) in parallel, then merges results for
+    Groq synthesis. Events give structured "what was decided," segments give
+    supporting raw context and exact wording.
+    """
     q_embedding = embed(f"Represent this sentence for searching relevant passages: {question}")
+    keyword = _extract_keywords(question)
     db = get_db()
 
-    context_lines = []
-    citations = []
+    events = []
+    segments = []
 
-    # 1. Search transcript_segments directly matching project_id OR meeting session_ids
+    # Run both searches in parallel — one embedding, two queries.
     if project_id:
         try:
-            sess_res = db.table("meeting_sessions") \
-                .select("session_id, bot_type, created_at, transcript_file_url") \
-                .eq("project_id", project_id) \
-                .order("created_at", desc=True) \
-                .execute()
-
-            session_map = {s["session_id"]: s for s in (sess_res.data or []) if s.get("session_id")}
-            session_ids = list(session_map.keys())
-
-            seg_res_proj = db.table("transcript_segments") \
-                .select("id, session_id, speaker_label, text, embedding, created_at") \
-                .eq("project_id", project_id) \
-                .order("created_at", desc=True) \
-                .limit(1000) \
-                .execute()
-
-            combined_segments = {s["id"]: s for s in (seg_res_proj.data or [])}
-
-            if session_ids:
-                seg_res_sess = db.table("transcript_segments") \
-                    .select("id, session_id, speaker_label, text, embedding, created_at") \
-                    .in_("session_id", session_ids) \
-                    .order("created_at", desc=True) \
-                    .limit(1000) \
-                    .execute()
-                for s in (seg_res_sess.data or []):
-                    combined_segments[s["id"]] = s
-
-            segments = list(combined_segments.values())
-
-            if segments:
-                # Vector Similarity Scoring (Cosine Distance)
-                scored_segments = []
-                for s in segments:
-                    emb = s.get("embedding")
-                    score = cosine_similarity(q_embedding, emb) if emb else 0.0
-                    if score >= 0.40:
-                        scored_segments.append((score, s))
-
-                # Sort by similarity score descending
-                scored_segments.sort(key=lambda item: item[0], reverse=True)
-
-                # Select top passages (highest vector similarity)
-                top_passages = [item[1] for item in scored_segments[:15]]
-
-                for s in top_passages:
-                    sid = s.get("session_id")
-                    s_info = session_map.get(sid, {})
-                    date_str = s_info.get('created_at') or s.get('created_at') or 'Meeting'
-                    context_lines.append(f"[{date_str} | {s.get('speaker_label', 'Speaker')}]: {s.get('text', '')}")
-
-                # Build citations ONLY from high similarity matches (score >= 0.40)
-                used_sessions = set()
-                for score, s in scored_segments[:10]:
-                    sid = s.get("session_id")
-                    if sid and sid not in used_sessions:
-                        used_sessions.add(sid)
-                        s_info = session_map.get(sid, {})
-                        citations.append({
-                            "sessionId": sid,
-                            "meetingDate": s_info.get("created_at") or s.get("created_at", ""),
-                            "platform": s_info.get("bot_type", "meeting"),
-                            "snippet": s.get("text", "")[:200]
-                        })
-
-            # Include meeting session metadata context for general list/date questions
-            if sess_res.data and not context_lines:
-                session_meta_lines = [
-                    f"Session {s.get('session_id')} ({s.get('bot_type', 'meeting')} platform): held on {s.get('created_at', 'Meeting')}"
-                    for s in sess_res.data[:10]
-                ]
-                context_lines.append("--- Project Recent Meeting Sessions ---\n" + "\n".join(session_meta_lines))
-
+            events_result, segments_result = await asyncio.gather(
+                asyncio.to_thread(
+                    lambda: db.rpc(
+                        "search_meeting_events",
+                        {
+                            "p_project_id": project_id,
+                            "p_query_embedding": q_embedding,
+                            "p_keyword": keyword,
+                            "p_match_count": 12,
+                        },
+                    ).execute()
+                ),
+                asyncio.to_thread(
+                    lambda: db.rpc(
+                        "search_transcript_segments",
+                        {
+                            "p_project_id": project_id,
+                            "p_query_embedding": q_embedding,
+                            "p_keyword": keyword,
+                            "p_match_count": 12,
+                        },
+                    ).execute()
+                ),
+            )
+            events = events_result.data or []
+            segments = segments_result.data or []
         except Exception as e:
-            print(f"[MemoryService] Semantic query error: {e}")
+            print(f"[MemoryService] Semantic query database error: {e}")
 
-    if not context_lines:
+    if not events and not segments:
+        # Solution D: Session Metadata Fallback
+        # If we have session metadata, list them so the user knows what meetings exist.
+        if project_id:
+            try:
+                sess_res = db.table("meeting_sessions") \
+                    .select("session_id, bot_type, created_at") \
+                    .eq("project_id", project_id) \
+                    .order("created_at", desc=True) \
+                    .limit(10) \
+                    .execute()
+                if sess_res.data:
+                    session_meta_lines = [
+                        f"Session {s.get('session_id')} ({s.get('bot_type', 'meeting')} platform): held on {s.get('created_at', 'Meeting')}"
+                        for s in sess_res.data
+                    ]
+                    fallback_context = ["--- Project Recent Meeting Sessions ---\n" + "\n".join(session_meta_lines)]
+                    answer = await _synthesize(question, fallback_context, "past meetings", chat_history)
+                    answer["citations"] = []
+                    answer["answeredVia"] = "session_metadata_fallback"
+                    answer["usedFallback"] = True
+                    return answer
+            except Exception as e:
+                print(f"[MemoryService] Session metadata fallback error: {e}")
+
+        # No vector results and no sessions, but if we have chat history from this session,
+        # the LLM can answer from the previous conversation (e.g. a follow-up
+        # like "what is the deployment date?" right after it was mentioned).
+        if chat_history:
+            answer = await _synthesize(question, [], "past meetings", chat_history)
+            answer["citations"] = []
+            answer["answeredVia"] = "chat_history"
+            answer["usedFallback"] = True
+            return answer
+
         return {
             "answer": "I could not find information about that in past meetings.",
             "citations": [],
             "answeredVia": "vector_search",
             "usedFallback": False
         }
+
+    # Build context lines — events first (higher signal), then segments (raw context).
+    context_lines = []
+    for r in events:
+        context_lines.append(
+            f"[EVENT | {r.get('meeting_date') or 'Meeting'} | {r.get('bot_type', 'meeting')}] {r.get('description', '')}"
+        )
+    for r in segments:
+        speaker = r.get("resolved_name") or r.get("speaker_label", "Unknown")
+        context_lines.append(
+            f"[SEGMENT | {r.get('meeting_date') or 'Meeting'} | {r.get('bot_type', 'meeting')}] {speaker}: {r.get('segment_text', r.get('text', ''))}"
+        )
+
+    # Build citations from both sources.
+    citations = []
+    for r in events[:5]:
+        citations.append({
+            "sessionId": r.get("session_id"),
+            "meetingDate": r.get("meeting_date"),
+            "platform": r.get("bot_type", "meeting"),
+            "snippet": r.get("description", "")[:200],
+        })
+    for r in segments[:5]:
+        speaker = r.get("resolved_name") or r.get("speaker_label", "Unknown")
+        citations.append({
+            "sessionId": r.get("session_id"),
+            "meetingDate": r.get("meeting_date"),
+            "platform": r.get("bot_type", "meeting"),
+            "snippet": f"{speaker}: {r.get('segment_text', r.get('text', ''))}"[:200],
+        })
 
     answer = await _synthesize(question, context_lines, "past meetings", chat_history)
     answer["citations"] = citations

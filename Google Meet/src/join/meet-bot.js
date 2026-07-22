@@ -62,6 +62,7 @@ export class MeetBot {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       permissions: ['microphone', 'camera'],
       viewport: { width: 1280, height: 720 },
+      locale: 'en-US',
     };
 
     if (loadSession) {
@@ -195,6 +196,8 @@ export class MeetBot {
       
       // Fallback: press keyboard shortcut Ctrl+E
       console.log('Camera toggle button not found, pressing Ctrl+E as fallback');
+      await this.page.bringToFront().catch(() => {});
+      await this.page.focus('body').catch(() => {});
       await this.page.keyboard.press('Control+e');
       await this.page.waitForTimeout(500);
     } catch (e) {
@@ -231,6 +234,8 @@ export class MeetBot {
       
       // Fallback: press keyboard shortcut Ctrl+D
       console.log('Microphone toggle button not found, pressing Ctrl+D as fallback');
+      await this.page.bringToFront().catch(() => {});
+      await this.page.focus('body').catch(() => {});
       await this.page.keyboard.press('Control+d');
       await this.page.waitForTimeout(500);
     } catch (e) {
