@@ -207,7 +207,10 @@ CREATE INDEX idx_chat_session ON chat_messages (chat_session_id, created_at);
 
 
 -- Hybrid vector + keyword search on transcript_segments.
--- Filters directly on project_id (no join to meeting_sessions).
+-- Joins with meeting_sessions to return meeting_date and bot_type.
+-- Drop first: return type changed (added meeting_date, bot_type columns)
+DROP FUNCTION IF EXISTS search_transcript_segments(text, vector(384), text, int);
+
 CREATE OR REPLACE FUNCTION search_transcript_segments(
   p_project_id text,
   p_query_embedding vector(384),
@@ -219,6 +222,8 @@ RETURNS TABLE (
   speaker_label text,
   text          text,
   start_ts      double precision,
+  meeting_date  date,
+  bot_type      text,
   similarity    real
 )
 LANGUAGE plpgsql
@@ -230,8 +235,11 @@ BEGIN
     s.speaker_label,
     s.text,
     s.start_ts,
-    1 - (s.embedding <=> p_query_embedding) AS similarity
+    ms.created_at::date AS meeting_date,
+    COALESCE(ms.bot_type, 'meeting') AS bot_type,
+    (1 - (s.embedding <=> p_query_embedding))::real AS similarity
   FROM transcript_segments s
+  LEFT JOIN meeting_sessions ms ON ms.session_id = s.session_id
   WHERE s.project_id = p_project_id
     AND s.embedding IS NOT NULL
     AND (1 - (s.embedding <=> p_query_embedding)) >= 0.2

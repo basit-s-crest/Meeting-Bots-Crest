@@ -291,16 +291,20 @@ async def _query_semantic(project_id: str | None, question: str, chat_history: l
         else:  # segment
             speaker = r.get("speaker_label", "Unknown")
             seg_text = r.get("text") or r.get("segment_text", "")
+            start = r.get("start_ts", "")
+            meeting_date = r.get("meeting_date", "")
+            bot_type = r.get("bot_type", "meeting")
+            ts_str = f"@{start} " if start else ""
             context_lines.append(
-                f"[SEGMENT | {r.get('meeting_date', '')} | {r.get('bot_type', '')}] {speaker}: {seg_text}"
+                f"[SEGMENT | {meeting_date} {ts_str}| {bot_type}] {speaker}: {seg_text}"
             )
             sid = r.get("session_id")
             if sid and sid not in citation_sessions:
                 citation_sessions.add(sid)
                 citations.append({
                     "sessionId": sid,
-                    "meetingDate": r.get("meeting_date", ""),
-                    "platform": r.get("bot_type", "meeting"),
+                    "meetingDate": str(meeting_date),
+                    "platform": bot_type,
                     "snippet": f"{speaker}: {seg_text}"[:200],
                 })
 
