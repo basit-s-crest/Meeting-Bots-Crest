@@ -11,6 +11,65 @@ import {
   getDefaultDurationMinutes
 } from './calendar-service.js';
 
+import { supabase } from '../supabase-client.js';
+
+/**
+ * Downloads the scheduling companion JSON from Supabase Storage to local transcripts folder on demand.
+ */
+async function downloadSchedulingFromSupabase(filename, schedulingPath) {
+  const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+  if (!match) return false;
+  
+  const [_, botType, sessionId] = match;
+  try {
+    const { data: session, error } = await supabase
+      .from('meeting_sessions')
+      .select('report_file_url')
+      .eq('session_id', sessionId)
+      .single();
+    
+    if (error || !session || !session.report_file_url) {
+      return false;
+    }
+    
+    const schedUrl = session.report_file_url.replace('/report.md', '/scheduling.json');
+    const schedRes = await fetch(schedUrl);
+    if (schedRes.ok) {
+      const schedulingData = await schedRes.json();
+      fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
+      console.log(`[Calendar Router] Successfully downloaded scheduling companion from Supabase: ${path.basename(schedulingPath)}`);
+      return true;
+    }
+  } catch (err) {
+    console.warn(`[Calendar Router] Failed to download scheduling companion fallback from Supabase:`, err.message);
+  }
+  return false;
+}
+
+/**
+ * Uploads the updated scheduling companion JSON file to Supabase Storage.
+ */
+async function uploadSchedulingToSupabase(filename, schedulingPath) {
+  const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+  if (!match) return;
+  
+  const [_, botType, sessionId] = match;
+  try {
+    const fileBuffer = fs.readFileSync(schedulingPath);
+    const storagePath = `sessions/${sessionId}/scheduling.json`;
+    const { error } = await supabase.storage
+      .from('transcripts')
+      .upload(storagePath, fileBuffer, {
+        contentType: 'application/json',
+        upsert: true
+      });
+    if (error) throw error;
+    console.log(`[Calendar Router] Successfully uploaded scheduling companion to Supabase Storage: ${storagePath}`);
+  } catch (err) {
+    console.error(`[Calendar Router] Failed to upload scheduling companion to Supabase:`, err.message);
+  }
+}
+
 export const calendarRouter = express.Router();
 
 /**
@@ -157,8 +216,26 @@ calendarRouter.post('/confirm-report-schedule', async (req, res) => {
   const transcriptsDir = path.join(process.cwd(), 'transcripts');
   const schedulingFilename = filename.replace('.jsonl', '_report_scheduling.json');
   const schedulingPath = path.join(transcriptsDir, schedulingFilename);
+  const legacyFilename = filename.replace('.jsonl', '_scheduling.json');
+  const legacySchedulingPath = path.join(transcriptsDir, legacyFilename);
   
-  // Load existing companion file
+  // Load existing companion file (with legacy migration fallback)
+  if (!fs.existsSync(schedulingPath)) {
+    if (fs.existsSync(legacySchedulingPath)) {
+      try {
+        const legacyData = JSON.parse(fs.readFileSync(legacySchedulingPath, 'utf8'));
+        fs.writeFileSync(schedulingPath, JSON.stringify(legacyData, null, 2), 'utf8');
+        fs.unlinkSync(legacySchedulingPath);
+        console.log(`[Calendar Router] Migrated legacy scheduling file on confirm: ${schedulingFilename}`);
+      } catch (err) {
+        console.error('[Calendar Router] Failed to migrate legacy file on confirm:', err.message);
+      }
+    } else {
+      // Try to download from Supabase Storage
+      await downloadSchedulingFromSupabase(filename, schedulingPath);
+    }
+  }
+  
   if (!fs.existsSync(schedulingPath)) {
     return res.status(404).json({ error: 'Scheduling suggestion metadata not found' });
   }
@@ -220,6 +297,14 @@ calendarRouter.post('/confirm-report-schedule', async (req, res) => {
   - Event ID: ${event.id}
   - Raw mention: "${schedulingData.scheduling?.raw_mention || 'none'}"`);
     
+    // Upload updated file to Supabase Storage
+    await uploadSchedulingToSupabase(filename, schedulingPath);
+
+    // Clean up local temp file
+    if (fs.existsSync(schedulingPath)) {
+      fs.unlinkSync(schedulingPath);
+    }
+
     return res.json({
       success: true,
       id: event.id,
@@ -228,6 +313,10 @@ calendarRouter.post('/confirm-report-schedule', async (req, res) => {
   } catch (err) {
     const normErr = handleGoogleApiError(err);
     console.error(`[Calendar Router] Event creation failed for ${filename}: ${normErr.error}`);
+    // Clean up local temp file even if failed
+    if (fs.existsSync(schedulingPath)) {
+      fs.unlinkSync(schedulingPath);
+    }
     // Do NOT write status: "confirmed" on error, so user can retry!
     return res.status(normErr.status).json({ error: normErr.error });
   }
@@ -236,7 +325,7 @@ calendarRouter.post('/confirm-report-schedule', async (req, res) => {
 /**
  * Route: Dismisses a scheduling suggestion.
  */
-calendarRouter.post('/dismiss-report-schedule', (req, res) => {
+calendarRouter.post('/dismiss-report-schedule', async (req, res) => {
   const { filename } = req.body;
   
   if (!filename) {
@@ -251,6 +340,25 @@ calendarRouter.post('/dismiss-report-schedule', (req, res) => {
   const transcriptsDir = path.join(process.cwd(), 'transcripts');
   const schedulingFilename = filename.replace('.jsonl', '_report_scheduling.json');
   const schedulingPath = path.join(transcriptsDir, schedulingFilename);
+  const legacyFilename = filename.replace('.jsonl', '_scheduling.json');
+  const legacySchedulingPath = path.join(transcriptsDir, legacyFilename);
+  
+  // Load existing companion file (with legacy migration fallback)
+  if (!fs.existsSync(schedulingPath)) {
+    if (fs.existsSync(legacySchedulingPath)) {
+      try {
+        const legacyData = JSON.parse(fs.readFileSync(legacySchedulingPath, 'utf8'));
+        fs.writeFileSync(schedulingPath, JSON.stringify(legacyData, null, 2), 'utf8');
+        fs.unlinkSync(legacySchedulingPath);
+        console.log(`[Calendar Router] Migrated legacy scheduling file on dismiss: ${schedulingFilename}`);
+      } catch (err) {
+        console.error('[Calendar Router] Failed to migrate legacy file on dismiss:', err.message);
+      }
+    } else {
+      // Try to download from Supabase Storage
+      await downloadSchedulingFromSupabase(filename, schedulingPath);
+    }
+  }
   
   if (!fs.existsSync(schedulingPath)) {
     return res.status(404).json({ error: 'Scheduling suggestion metadata not found' });
@@ -262,8 +370,21 @@ calendarRouter.post('/dismiss-report-schedule', (req, res) => {
     fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
     
     console.log(`[Calendar Router] Suggestion dismissed for ${filename}`);
+
+    // Upload updated file to Supabase Storage
+    await uploadSchedulingToSupabase(filename, schedulingPath);
+
+    // Clean up local temp file
+    if (fs.existsSync(schedulingPath)) {
+      fs.unlinkSync(schedulingPath);
+    }
+
     return res.json({ success: true });
   } catch (err) {
+    // Clean up local temp file even if failed
+    if (fs.existsSync(schedulingPath)) {
+      fs.unlinkSync(schedulingPath);
+    }
     return res.status(500).json({ error: `Failed to dismiss suggestion: ${err.message}` });
   }
 });
