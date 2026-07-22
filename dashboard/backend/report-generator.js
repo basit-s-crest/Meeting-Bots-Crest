@@ -339,3 +339,43 @@ export async function generateReportWithFallback(transcriptPath) {
     };
   }
 }
+
+/**
+ * Saves scheduling data to a companion JSON file, preserving "confirmed" or "dismissed" status.
+ * 
+ * @param {string} schedulingPath - Absolute path to the scheduling JSON file.
+ * @param {Object} schedulingResult - The extracted scheduling results (with scheduling_detected).
+ * @returns {Promise<Object>} The resolved scheduling data.
+ */
+export async function saveSchedulingData(schedulingPath, schedulingResult) {
+  let existingData = null;
+  try {
+    const content = await fs.readFile(schedulingPath, 'utf8');
+    existingData = JSON.parse(content);
+  } catch (err) {
+    // File doesn't exist or is not valid JSON, proceed
+  }
+
+  if (existingData && (existingData.status === 'confirmed' || existingData.status === 'dismissed')) {
+    console.log(`[ReportGenerator] Existing status "${existingData.status}" detected. Preserving scheduling data for: ${path.basename(schedulingPath)}`);
+    return existingData;
+  }
+
+  let schedulingData = {
+    scheduling_detected: false,
+    scheduling: null,
+    status: 'none'
+  };
+
+  if (schedulingResult && schedulingResult.scheduling_detected) {
+    schedulingData = {
+      scheduling_detected: true,
+      scheduling: schedulingResult.scheduling,
+      status: 'pending'
+    };
+  }
+
+  await fs.writeFile(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
+  return schedulingData;
+}
+

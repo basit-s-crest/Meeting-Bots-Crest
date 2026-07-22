@@ -50,16 +50,18 @@ interface ProjectListItem {
 }
 
 interface SchedulingIntent {
-  scheduling_detected?: boolean;
   title?: string;
   date?: string;
   time?: string;
   zoom_link?: string;
   raw_mention?: string;
+  timezone?: string;
 }
 
 interface SchedulingData {
-  scheduling?: SchedulingIntent;
+  scheduling_detected: boolean;
+  scheduling?: SchedulingIntent | null;
+  status?: string;
 }
 
 const BACKEND_URL = "http://localhost:3000";
@@ -223,7 +225,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleConfirmSchedule = async () => {
     if (!activeReport) return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/calendar/add-event`, {
+      const res = await fetch(`${BACKEND_URL}/api/calendar/confirm-report-schedule`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -236,8 +238,46 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
       });
       if (!res.ok) throw new Error("Failed to add calendar event");
       setSchedSuccess(true);
+
+      setActiveReport(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          scheduling: prev.scheduling ? {
+            ...prev.scheduling,
+            status: "confirmed"
+          } : null
+        };
+      });
     } catch (err) {
       alert(err instanceof Error ? err.message : "Failed to schedule");
+    }
+  };
+
+  const handleDismissSchedule = async () => {
+    if (!activeReport) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/calendar/dismiss-report-schedule`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: activeReport.filename
+        })
+      });
+      if (!res.ok) throw new Error("Failed to dismiss scheduling suggestion");
+
+      setActiveReport(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          scheduling: prev.scheduling ? {
+            ...prev.scheduling,
+            status: "dismissed"
+          } : null
+        };
+      });
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to dismiss");
     }
   };
 
@@ -521,7 +561,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
             </div>
           )}
 
-          {activeReport?.scheduling?.scheduling?.scheduling_detected && (
+          {activeReport?.scheduling?.scheduling_detected && 
+           activeReport.scheduling.status !== "dismissed" && 
+           (activeReport.scheduling.status === "pending" || schedSuccess) && (
             <div className="rounded-xl border border-brand-200 bg-brand-50 p-5">
               {schedSuccess ? (
                 <p className="flex items-center gap-2 font-semibold text-success">
@@ -544,7 +586,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
                     <Input label="Time" type="time" value={schedTime} onChange={(e) => setSchedTime(e.target.value)} />
                   </div>
                   <div className="mt-4 flex justify-end gap-2 border-t border-brand-200/60 pt-3">
-                    <Button variant="ghost" size="sm" onClick={() => setSchedSuccess(true)}>
+                    <Button variant="ghost" size="sm" onClick={handleDismissSchedule}>
                       Dismiss
                     </Button>
                     <Button size="sm" onClick={handleConfirmSchedule}>
