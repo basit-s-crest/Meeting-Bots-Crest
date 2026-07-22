@@ -22,6 +22,8 @@ def build_synthesis_prompt(question: str, context: list[str]) -> str:
     return (
         "Answer the question based on the provided context below.\n"
         "Always cite the source meeting date and platform when context is available.\n"
+        "If the question asks about timing (e.g. 'when did we discuss X', 'what date',\n"
+        "'what time'), include the meeting date and start timestamp in your answer.\n"
         "If chat history is provided and contains the answer (e.g. a previous "
         'response in this session), use it. Otherwise say '
         '"I could not find that in past meetings."\n\n'

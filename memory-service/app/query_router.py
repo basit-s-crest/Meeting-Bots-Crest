@@ -41,6 +41,10 @@ class QueryRequest(BaseModel):
 
 # ── Intent classification (rule-based, zero LLM cost) ──────────────
 
+_GREETINGS = {"hi", "hello", "hey", "greetings", "good morning",
+              "good afternoon", "good evening", "hi there", "hello there",
+              "who are you", "help"}
+
 _CURRENT_MEETING_KEYWORDS = [
     "just now", "just said", "earlier", "a minute ago", "currently",
     "right now", "in this meeting", "in this call", "today's meeting",
@@ -71,26 +75,48 @@ def _is_current_meeting_query(question: str) -> bool:
     return any(kw in q for kw in _CURRENT_MEETING_KEYWORDS)
 
 
-def _extract_keywords(question: str) -> str:
-    """Extract keywords with meeting-domain awareness."""
-    # Generic stop words — but NOT meeting-specific terms
-    stop_words = {
-        "the", "a", "an", "in", "on", "at", "to", "for", "of", "with",
-        "is", "was", "are", "were", "be", "been", "being",
-        "it", "this", "that", "these", "those",
-        "can", "could", "would", "will", "should",
-        "please", "just", "also", "very", "really",
-    }
-    # KEEP: "what", "when", "where", "who", "how", "did", "do", "does",
-    #        "has", "have", "had", "tell", "show", "give", "find", "list",
-    #        "get", "me", "we", "they", "you", "from", "all", "any", "some",
-    #        "about", "discuss", "discussed", "mention", "talk", "talked",
-    #        "said", "saying"
-    # These carry meaning in meeting queries: "who said X", "what was discussed"
+async def _rewrite_query(question: str, chat_history: list[dict] | None = None) -> str:
+    """Rewrite a natural language question into a concise search query.
 
-    words = question.lower().split()
-    keywords = [w.strip("?.!,;:") for w in words if w.lower() not in stop_words and len(w) > 2]
-    return " ".join(keywords[:8]) if keywords else ""
+    Replaces the old _extract_keywords() stop-word approach with an LLM call
+    that preserves names, dates, terms and resolves pronouns from chat history.
+    The result feeds both the embedding (vector search) and ILIKE (keyword search).
+    """
+    try:
+        groq = get_groq()
+        history_block = ""
+        if chat_history:
+            recent = chat_history[-4:]
+            history_block = "\n".join(
+                f"{m['role']}: {m['content']}" for m in recent
+            )
+
+        prompt = (
+            "Rewrite this question as a concise search query for meeting transcripts.\n"
+            "Rules:\n"
+            "- Keep person names, company names, dates, technical terms, numbers\n"
+            "- Remove question words (when, what, who, how) and conversational filler\n"
+            "- Output ONLY the rewritten query — no explanation, no quotes\n"
+            f"{'Chat history:\n' + history_block + '\n\n' if history_block else ''}"
+            f"Question: {question}\n"
+            "Search query:"
+        )
+
+        response = groq.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=100,
+        )
+
+        rewritten = response.choices[0].message.content.strip()
+        # Fallback to original if rewrite is empty or degenerate
+        if not rewritten or len(rewritten) < 3:
+            return question
+        return rewritten
+    except Exception as e:
+        print(f"[QueryRouter] Query rewrite failed, using original: {e}")
+        return question
 
 
 # ── Retrieval strategies ──────────────────────────────────────────
@@ -164,129 +190,168 @@ async def _query_structured(project_id: str, intent: str, chat_history: list[dic
 
 
 async def _query_semantic(project_id: str | None, question: str, chat_history: list[dict] | None = None) -> dict:
-    """Strategy B: pgvector semantic search + keyword hybrid.
+    """Strategy B: pgvector semantic search + keyword hybrid with re-ranking.
 
-    Searches BOTH meeting_events (extracted decisions/action items/risks) and
-    transcript_segments (raw conversation) in parallel, then merges results for
-    Groq synthesis. Events give structured "what was decided," segments give
-    supporting raw context and exact wording.
+    Replaces the old _extract_keywords + hard-threshold approach with:
+      1. LLM query rewrite (preserves names, dates, technical terms)
+      2. Lower vector threshold (0.2) + larger candidate pool (12 per lane)
+      3. Parallel search across BOTH meeting_events and transcript_segments
+      4. Merge + dedup + re-rank by similarity score
+      5. Session metadata fallback when nothing matches
     """
-    q_embedding = embed(f"Represent this sentence for searching relevant passages: {question}")
-    keyword = _extract_keywords(question)
+    # Step 1: Rewrite natural language into search query
+    rewritten = await _rewrite_query(question, chat_history)
+    q_embedding = embed(f"Represent this sentence for searching relevant passages: {rewritten}")
+
+    # Step 2: Build keyword patterns — individual wildcard words separated by | for ILIKE ANY.
+    # "CRM discussion delivery date" → "%CRM%|%discussion%|%delivery%|%date%"
+    # Each word matches independently in the SQL ILIKE ANY clause.
+    words = [w.strip("?.!,;:'\"").lower() for w in rewritten.split() if len(w.strip("?.!,;:'\"")) > 2]
+    keyword = "|".join(f"%{w}%" for w in words[:8]) if words else ""
+
     db = get_db()
 
-    events = []
-    segments = []
+    try:
+        events_result, segments_result = await asyncio.gather(
+            asyncio.to_thread(
+                lambda: db.rpc(
+                    "search_meeting_events",
+                    {
+                        "p_project_id": project_id,
+                        "p_query_embedding": q_embedding,
+                        "p_keyword": keyword,
+                        "p_match_count": 12,
+                    },
+                ).execute()
+            ),
+            asyncio.to_thread(
+                lambda: db.rpc(
+                    "search_transcript_segments",
+                    {
+                        "p_project_id": project_id,
+                        "p_query_embedding": q_embedding,
+                        "p_keyword": keyword,
+                        "p_match_count": 12,
+                    },
+                ).execute()
+            ),
+        )
+    except Exception as e:
+        return {
+            "answer": f"Search failed: {e}",
+            "citations": [],
+            "answeredVia": "vector_search",
+            "usedFallback": False
+        }
 
-    # Run both searches in parallel — one embedding, two queries.
-    if project_id:
-        try:
-            events_result, segments_result = await asyncio.gather(
-                asyncio.to_thread(
-                    lambda: db.rpc(
-                        "search_meeting_events",
-                        {
-                            "p_project_id": project_id,
-                            "p_query_embedding": q_embedding,
-                            "p_keyword": keyword,
-                            "p_match_count": 12,
-                        },
-                    ).execute()
-                ),
-                asyncio.to_thread(
-                    lambda: db.rpc(
-                        "search_transcript_segments",
-                        {
-                            "p_project_id": project_id,
-                            "p_query_embedding": q_embedding,
-                            "p_keyword": keyword,
-                            "p_match_count": 12,
-                        },
-                    ).execute()
-                ),
-            )
-            events = events_result.data or []
-            segments = segments_result.data or []
-        except Exception as e:
-            print(f"[MemoryService] Semantic query database error: {e}")
+    events = events_result.data or []
+    segments = segments_result.data or []
 
-    if not events and not segments:
-        # Solution D: Session Metadata Fallback
-        # If we have session metadata, list them so the user knows what meetings exist.
-        if project_id:
-            try:
-                sess_res = db.table("meeting_sessions") \
-                    .select("session_id, bot_type, created_at") \
-                    .eq("project_id", project_id) \
-                    .order("created_at", desc=True) \
-                    .limit(10) \
-                    .execute()
-                if sess_res.data:
-                    session_meta_lines = [
-                        f"Session {s.get('session_id')} ({s.get('bot_type', 'meeting')} platform): held on {s.get('created_at', 'Meeting')}"
-                        for s in sess_res.data
-                    ]
-                    fallback_context = ["--- Project Recent Meeting Sessions ---\n" + "\n".join(session_meta_lines)]
-                    answer = await _synthesize(question, fallback_context, "past meetings", chat_history)
-                    answer["citations"] = []
-                    answer["answeredVia"] = "session_metadata_fallback"
-                    answer["usedFallback"] = True
-                    return answer
-            except Exception as e:
-                print(f"[MemoryService] Session metadata fallback error: {e}")
+    # Step 3: Merge + dedup + re-rank by similarity score
+    # Events get a small score boost since they're higher-signal
+    merged = []
+    seen_sessions = set()
+    for r in events:
+        score = r.get("similarity", 0) * 1.05  # 5% boost for structured events
+        merged.append((score, "event", r))
+        if r.get("session_id"):
+            seen_sessions.add(r["session_id"])
+    for r in segments:
+        score = r.get("similarity", 0)
+        merged.append((score, "segment", r))
 
-        # No vector results and no sessions, but if we have chat history from this session,
-        # the LLM can answer from the previous conversation (e.g. a follow-up
-        # like "what is the deployment date?" right after it was mentioned).
+    # Sort by score descending
+    merged.sort(key=lambda x: x[0], reverse=True)
+
+    # Take top 10 across both sources
+    top_candidates = merged[:10]
+
+    if not top_candidates:
+        # Step 4a: Try chat history fallback
         if chat_history:
             answer = await _synthesize(question, [], "past meetings", chat_history)
             answer["citations"] = []
             answer["answeredVia"] = "chat_history"
             answer["usedFallback"] = True
             return answer
+        # Step 4b: Session metadata fallback — list recent meetings
+        answer = await _session_fallback(project_id)
+        answer["answeredVia"] = "session_metadata_fallback"
+        answer["usedFallback"] = True
+        return answer
 
-        return {
-            "answer": "I could not find information about that in past meetings.",
-            "citations": [],
-            "answeredVia": "vector_search",
-            "usedFallback": False
-        }
-
-    # Build context lines — events first (higher signal), then segments (raw context).
+    # Step 5: Build context lines and citations
     context_lines = []
-    for r in events:
-        context_lines.append(
-            f"[EVENT | {r.get('meeting_date') or 'Meeting'} | {r.get('bot_type', 'meeting')}] {r.get('description', '')}"
-        )
-    for r in segments:
-        speaker = r.get("resolved_name") or r.get("speaker_label", "Unknown")
-        context_lines.append(
-            f"[SEGMENT | {r.get('meeting_date') or 'Meeting'} | {r.get('bot_type', 'meeting')}] {speaker}: {r.get('segment_text', r.get('text', ''))}"
-        )
-
-    # Build citations from both sources.
     citations = []
-    for r in events[:5]:
-        citations.append({
-            "sessionId": r.get("session_id"),
-            "meetingDate": r.get("meeting_date"),
-            "platform": r.get("bot_type", "meeting"),
-            "snippet": r.get("description", "")[:200],
-        })
-    for r in segments[:5]:
-        speaker = r.get("resolved_name") or r.get("speaker_label", "Unknown")
-        citations.append({
-            "sessionId": r.get("session_id"),
-            "meetingDate": r.get("meeting_date"),
-            "platform": r.get("bot_type", "meeting"),
-            "snippet": f"{speaker}: {r.get('segment_text', r.get('text', ''))}"[:200],
-        })
+    citation_sessions = set()
+
+    for score, source_type, r in top_candidates:
+        if source_type == "event":
+            context_lines.append(
+                f"[EVENT | {r['meeting_date']} | {r['bot_type']}] {r['description']}"
+            )
+            sid = r.get("session_id")
+            if sid and sid not in citation_sessions:
+                citation_sessions.add(sid)
+                citations.append({
+                    "sessionId": sid,
+                    "meetingDate": r["meeting_date"],
+                    "platform": r["bot_type"],
+                    "snippet": r["description"][:200],
+                })
+        else:  # segment
+            speaker = r.get("speaker_label", "Unknown")
+            seg_text = r.get("text") or r.get("segment_text", "")
+            start = r.get("start_ts", "")
+            meeting_date = r.get("meeting_date", "")
+            bot_type = r.get("bot_type", "meeting")
+            ts_str = f"@{start} " if start else ""
+            context_lines.append(
+                f"[SEGMENT | {meeting_date} {ts_str}| {bot_type}] {speaker}: {seg_text}"
+            )
+            sid = r.get("session_id")
+            if sid and sid not in citation_sessions:
+                citation_sessions.add(sid)
+                citations.append({
+                    "sessionId": sid,
+                    "meetingDate": str(meeting_date),
+                    "platform": bot_type,
+                    "snippet": f"{speaker}: {seg_text}"[:200],
+                })
 
     answer = await _synthesize(question, context_lines, "past meetings", chat_history)
     answer["citations"] = citations
     answer["answeredVia"] = "vector_search"
     answer["usedFallback"] = False
     return answer
+
+
+async def _session_fallback(project_id: str | None) -> dict:
+    """When no search results match, list recent sessions so the user knows what exists."""
+    if not project_id:
+        return {"answer": "I could not find that in past meetings.", "citations": []}
+    try:
+        db = get_db()
+        result = (
+            db.table("meeting_sessions")
+            .select("session_id, bot_type, created_at, transcript_file_url")
+            .eq("project_id", project_id)
+            .order("created_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+        if result.data:
+            sessions = "\n".join(
+                f"  - {s['bot_type']} call on {s['created_at'][:10]}" if s.get('created_at') else f"  - {s['bot_type']} call"
+                for s in result.data
+            )
+            return {
+                "answer": f"I could not find that in past meetings. Here are your recent meetings:\n{sessions}\n\nTry asking about specific topics from these sessions.",
+                "citations": [],
+            }
+    except Exception as e:
+        print(f"[MemoryService] Session fallback error: {e}")
+    return {"answer": "I could not find that in past meetings.", "citations": []}
 
 
 async def _synthesize(question: str, context: list[str], source_label: str, chat_history: list[dict] | None = None) -> dict:
@@ -344,7 +409,7 @@ async def query_memory(body: QueryRequest):
     if not question:
         return {"answer": "Please ask a question.", "citations": []}
 
-    _GREETINGS = {"hi", "hello", "hey", "greetings", "good morning", "good afternoon", "good evening", "hi there", "hello there", "who are you", "help"}
+    # Step 0: Greeting handler — trivial, avoid hitting the database
     if question.lower().strip().rstrip('.!?') in _GREETINGS:
         return {
             "answer": "Hello! I am your AI Meeting Knowledge Assistant. Ask me anything about your project's meeting transcripts, key decisions, or action items!",
@@ -352,8 +417,6 @@ async def query_memory(body: QueryRequest):
             "answeredVia": "greeting_handler",
             "usedFallback": False
         }
-
-    # Step 1: Check for live meeting + current-scope query
     # Load recent chat history for follow-up resolution
     chat_history = None
     if chat_session_id and project_id:

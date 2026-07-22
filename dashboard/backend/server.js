@@ -11,7 +11,7 @@ import cors from 'cors';
 import { processManager } from './process-manager.js';
 import { deepgramProxyGoogle } from './deepgram-proxy-google.js';
 import { deepgramProxyZoom } from './deepgram-proxy-zoom.js';
-import { generateFirefliesReport, calculateSpeakerStats } from './report-generator.js';
+import { generateFirefliesReport, calculateSpeakerStats, saveSchedulingData } from './report-generator.js';
 import { supabase } from './supabase-client.js';
 import { uploadReport, downloadStorageFile } from './supabase-helper.js';
 import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
@@ -427,6 +427,8 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
   const reportPath = path.join(transcriptsDir, reportFilename);
   const schedulingFilename = filename.replace('.jsonl', '_report_scheduling.json');
   const schedulingPath = path.join(transcriptsDir, schedulingFilename);
+  const legacyFilename = filename.replace('.jsonl', '_scheduling.json');
+  const legacySchedulingPath = path.join(transcriptsDir, legacyFilename);
 
   // Parse filename to query Supabase if it's DB-backed
   const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
@@ -513,6 +515,15 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
               } catch (e) {
                 if (fs.existsSync(schedulingPath)) {
                   schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+                } else if (fs.existsSync(legacySchedulingPath)) {
+                  try {
+                    schedulingData = JSON.parse(fs.readFileSync(legacySchedulingPath, 'utf8'));
+                    fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
+                    fs.unlinkSync(legacySchedulingPath);
+                    console.log(`[Server] Migrated legacy scheduling file in generate-report fallback: ${schedulingFilename}`);
+                  } catch (migErr) {
+                    console.error('[Server] Failed to migrate legacy scheduling file in fallback check:', migErr.message);
+                  }
                 }
               }
 
@@ -577,21 +588,19 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
     // Save report file locally temporarily
     fs.writeFileSync(reportPath, markdown, 'utf8');
 
-    // Save scheduling data companion JSON locally temporarily with status: "pending"
-    let schedulingData = {
-      scheduling_detected: false,
-      scheduling: null,
-      status: 'none'
-    };
-
-    if (scheduling && scheduling.scheduling_detected) {
-      schedulingData = {
-        scheduling_detected: true,
-        scheduling: scheduling.scheduling,
-        status: 'pending'
-      };
+    // Migrate legacy file if it exists but the new one does not
+    if (!fs.existsSync(schedulingPath) && fs.existsSync(legacySchedulingPath)) {
+      try {
+        const legacyData = JSON.parse(fs.readFileSync(legacySchedulingPath, 'utf8'));
+        fs.writeFileSync(schedulingPath, JSON.stringify(legacyData, null, 2), 'utf8');
+        fs.unlinkSync(legacySchedulingPath);
+        console.log(`[Server] Migrated legacy scheduling file before save: ${schedulingFilename}`);
+      } catch (migErr) {
+        console.error('[Server] Failed to migrate legacy file before save:', migErr.message);
+      }
     }
-    fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
+
+    const schedulingData = await saveSchedulingData(schedulingPath, scheduling);
 
     // Parse filename to update Supabase row and upload report
     const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
@@ -683,14 +692,25 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
   const reportPath = path.join(transcriptsDir, reportFilename);
   const schedulingFilename = filename.replace('.jsonl', '_report_scheduling.json');
   const schedulingPath = path.join(transcriptsDir, schedulingFilename);
+  const legacyFilename = filename.replace('.jsonl', '_scheduling.json');
+  const legacySchedulingPath = path.join(transcriptsDir, legacyFilename);
 
-  // Load scheduling data
+  // Load scheduling data with legacy migration fallback
   let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
   if (fs.existsSync(schedulingPath)) {
     try {
       schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
     } catch (e) {
       console.error('[Server] Failed to parse companion scheduling JSON:', e.message);
+    }
+  } else if (fs.existsSync(legacySchedulingPath)) {
+    try {
+      schedulingData = JSON.parse(fs.readFileSync(legacySchedulingPath, 'utf8'));
+      fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
+      fs.unlinkSync(legacySchedulingPath);
+      console.log(`[Server] Migrated legacy scheduling file on GET: ${schedulingFilename}`);
+    } catch (e) {
+      console.error('[Server] Failed to parse legacy companion scheduling JSON:', e.message);
     }
   }
 
@@ -856,10 +876,10 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
       console.log(`[Server] Connected to bot audio stream for session ${sessionId}`);
       broadcastToClients(sessionId, 'status', { status: 'capturing' });
 
-      // Create transcript log file for Meet/Zoom
-      const transcriptsDir = path.join(__dirname, 'transcripts');
-      const logPath = path.join(transcriptsDir, `${processManager.getSession(sessionId)?.type || 'session'}_${sessionId}.jsonl`);
-      const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+      // Create transcript log file for Meet/Zoom (disabled — using Supabase only)
+      // const transcriptsDir = path.join(__dirname, 'transcripts');
+      // const logPath = path.join(transcriptsDir, `${processManager.getSession(sessionId)?.type || 'session'}_${sessionId}.jsonl`);
+      // const logStream = fs.createWriteStream(logPath, { flags: 'a' });
 
       // Initialize Deepgram Proxy connection
       dgProxy.initializeSession(sessionId, {
@@ -867,10 +887,12 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
         onTranscript: (event) => {
           // Send to UI clients
           broadcastToClients(sessionId, 'transcript', event);
-          // Write to local jsonl file if final
+          // Write to local jsonl file if final (disabled — using Supabase only)
+          // if (event.isFinal) {
+          //   logStream.write(JSON.stringify(event) + '\n');
+          // }
+          // Push to memory service for cross-meeting search (Supabase)
           if (event.isFinal) {
-            logStream.write(JSON.stringify(event) + '\n');
-            // Push to memory service for cross-meeting search
             ingestSegment(sessionId, {
               speaker: event.speaker,
               text: event.text,

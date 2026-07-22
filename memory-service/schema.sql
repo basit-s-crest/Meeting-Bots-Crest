@@ -144,16 +144,34 @@ BEGIN
   FROM meeting_events e
   WHERE e.project_id = p_project_id
     AND e.embedding IS NOT NULL
-    AND (1 - (e.embedding <=> p_query_embedding)) >= 0.3
+    AND (1 - (e.embedding <=> p_query_embedding)) >= 0.2
     AND (
       p_keyword = ''
-      OR e.description ILIKE '%' || p_keyword || '%'
-      OR e.detail ILIKE '%' || p_keyword || '%'
+      OR e.description ILIKE ANY(string_to_array(p_keyword, '|'))
+      OR e.detail ILIKE ANY(string_to_array(p_keyword, '|'))
     )
   ORDER BY e.embedding <=> p_query_embedding
   LIMIT p_match_count;
 END;
 $$;
+
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- Indexes
+-- ──────────────────────────────────────────────────────────────────────────────
+
+-- Project isolation (btree)
+CREATE INDEX idx_events_project ON meeting_events (project_id);
+CREATE INDEX idx_segments_project ON transcript_segments (project_id);
+
+-- Vector similarity (HNSW — works on empty tables, handles incremental inserts)
+CREATE INDEX idx_events_embedding ON meeting_events USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_segments_embedding ON transcript_segments USING hnsw (embedding vector_cosine_ops);
+
+-- Keyword search (trigram — enables ILIKE '%term%' via GIN index)
+CREATE INDEX idx_events_desc_trgm ON meeting_events USING gin (description gin_trgm_ops);
+CREATE INDEX idx_events_detail_trgm ON meeting_events USING gin (detail gin_trgm_ops);
+CREATE INDEX idx_segments_text_trgm ON transcript_segments USING gin (text gin_trgm_ops);
 
 
 -- ──────────────────────────────────────────────────────────────────────────────
@@ -193,7 +211,10 @@ CREATE INDEX idx_chat_session ON chat_messages (chat_session_id, created_at);
 
 
 -- Hybrid vector + keyword search on transcript_segments.
--- Filters directly on project_id (no join to meeting_sessions).
+-- Joins with meeting_sessions to return meeting_date and bot_type.
+-- Drop first: return type changed (added meeting_date, bot_type columns)
+DROP FUNCTION IF EXISTS search_transcript_segments(text, vector(384), text, int);
+
 CREATE OR REPLACE FUNCTION search_transcript_segments(
   p_project_id text,
   p_query_embedding vector(384),
@@ -205,6 +226,8 @@ RETURNS TABLE (
   speaker_label text,
   text          text,
   start_ts      double precision,
+  meeting_date  date,
+  bot_type      text,
   similarity    real
 )
 LANGUAGE plpgsql
@@ -216,14 +239,17 @@ BEGIN
     s.speaker_label,
     s.text,
     s.start_ts,
-    1 - (s.embedding <=> p_query_embedding) AS similarity
+    ms.created_at::date AS meeting_date,
+    COALESCE(ms.bot_type, 'meeting') AS bot_type,
+    (1 - (s.embedding <=> p_query_embedding))::real AS similarity
   FROM transcript_segments s
+  LEFT JOIN meeting_sessions ms ON ms.session_id = s.session_id
   WHERE s.project_id = p_project_id
     AND s.embedding IS NOT NULL
-    AND (1 - (s.embedding <=> p_query_embedding)) >= 0.3
+    AND (1 - (s.embedding <=> p_query_embedding)) >= 0.2
     AND (
       p_keyword = ''
-      OR s.text ILIKE '%' || p_keyword || '%'
+      OR s.text ILIKE ANY(string_to_array(p_keyword, '|'))
     )
   ORDER BY s.embedding <=> p_query_embedding
   LIMIT p_match_count;

@@ -4,7 +4,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { saveSessionStart, saveSessionEnd, uploadReport } from './supabase-helper.js';
 import { uploadTranscriptToGoogleDrive, uploadReportToGoogleDrive } from './google-drive-helper.js';
-import { generateReportWithFallback } from './report-generator.js';
+import { generateReportWithFallback, saveSchedulingData } from './report-generator.js';
 import { saveMarkdownAsDocx } from './docx-generator.js';
 import { processMeeting } from './memory-client.js';
 
@@ -242,24 +242,11 @@ class ProcessManager {
           const reportPath = path.join(TRANSCRIPTS_DIR, reportFilename);
           fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
 
-          // Save scheduling data companion JSON locally temporarily BEFORE upload
-          const schedulingFilename = `${botType}_${sessionId}_report_scheduling.json`;
-          const schedulingPath = path.join(TRANSCRIPTS_DIR, schedulingFilename);
-          let schedulingData = {
-            scheduling_detected: false,
-            scheduling: null,
-            status: 'none'
-          };
-          if (scheduling && scheduling.scheduling_detected) {
-            schedulingData = {
-              scheduling_detected: true,
-              scheduling: scheduling.scheduling,
-              status: 'pending'
-            };
-          }
-          fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
+          // Save scheduling data companion JSON locally temporarily BEFORE uploading report
+          const schedulingPath = path.join(TRANSCRIPTS_DIR, `${botType}_${sessionId}_report_scheduling.json`);
+          await saveSchedulingData(schedulingPath, scheduling);
 
-          // Await uploading report and companion scheduling JSON to Supabase Storage
+          // Await uploading report to Supabase Storage
           console.log(`[ProcessManager] Uploading report to Supabase for session: ${sessionId}`);
           await uploadReport(sessionId, botType);
 
