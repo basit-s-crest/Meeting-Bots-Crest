@@ -43,6 +43,8 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const [activeSpeaker, setActiveSpeaker] = useState("No active speaker");
   const [isDriveConnected, setIsDriveConnected] = useState(false);
   const [driveConnecting, setDriveConnecting] = useState(true);
+  const [isCalendarConnected, setIsCalendarConnected] = useState(false);
+  const [calendarConnecting, setCalendarConnecting] = useState(true);
 
   const [liveLines, setLiveLines] = useState<TranscriptLine[]>([]);
   const [showJumpButton, setShowJumpButton] = useState(false);
@@ -55,6 +57,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
 
   useEffect(() => {
     checkGoogleDriveStatus();
+    checkGoogleCalendarStatus();
     return () => {
       disconnectWebSocket();
     };
@@ -106,6 +109,21 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
       } catch {
       } finally {
         setDriveConnecting(false);
+      }
+    })();
+  }
+
+  function checkGoogleCalendarStatus() {
+    (async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/calendar/auth/status`);
+        if (res.ok) {
+          const data = await res.json();
+          setIsCalendarConnected(data.connected);
+        }
+      } catch {
+      } finally {
+        setCalendarConnecting(false);
       }
     })();
   }
@@ -400,24 +418,43 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             </form>
           </Card>
 
-          <Card className="flex items-center justify-between p-5">
-            <div className="flex items-center gap-3">
-              <span className="text-xl">📁</span>
-              <div>
-                <h4 className="text-sm font-semibold text-ink">Google Drive auth</h4>
-                <p className="text-[10px] text-ink-faint">Auto sync to cloud drives</p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Card className="flex flex-col justify-between p-4">
+              <div className="flex items-center gap-2">
+                <span className="text-base shrink-0">📁</span>
+                <h4 className="text-xs font-semibold text-ink">Google Drive auth</h4>
               </div>
-            </div>
-            {driveConnecting ? (
-              <span className="text-xs text-ink-mute">Checking…</span>
-            ) : isDriveConnected ? (
-              <Badge tone="success">Connected</Badge>
-            ) : (
-              <a href={`${BACKEND_URL}/api/auth/google`} className="text-sm font-semibold text-brand-600 hover:text-brand-700">
-                Connect
-              </a>
-            )}
-          </Card>
+              <div className="mt-3">
+                {driveConnecting ? (
+                  <span className="text-xs text-ink-mute">Checking…</span>
+                ) : isDriveConnected ? (
+                  <Badge tone="success">Connected</Badge>
+                ) : (
+                  <a href={`${BACKEND_URL}/api/auth/google`} className="inline-block text-xs font-semibold text-brand-600 hover:text-brand-700">
+                    Connect
+                  </a>
+                )}
+              </div>
+            </Card>
+
+            <Card className="flex flex-col justify-between p-4">
+              <div className="flex items-center gap-2">
+                <span className="text-base shrink-0">📅</span>
+                <h4 className="text-xs font-semibold text-ink">Google Calendar auth</h4>
+              </div>
+              <div className="mt-3">
+                {calendarConnecting ? (
+                  <span className="text-xs text-ink-mute">Checking…</span>
+                ) : isCalendarConnected ? (
+                  <Badge tone="success">Connected</Badge>
+                ) : (
+                  <a href={`${BACKEND_URL}/api/calendar/auth`} className="inline-block text-xs font-semibold text-brand-600 hover:text-brand-700">
+                    Connect
+                  </a>
+                )}
+              </div>
+            </Card>
+          </div>
         </section>
 
         {/* Monitor */}
