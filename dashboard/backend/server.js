@@ -17,7 +17,7 @@ import { uploadReport } from './supabase-helper.js';
 import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
 import { getOAuth2Client, saveRefreshToken, loadRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { calendarRouter } from './calendar/calendar-router.js';
-import { ingestSegment, queryMemory, processMeeting, getProjectMemory } from './memory-client.js';
+import { ingestSegment, queryMemory, processMeeting, getProjectMemory, createMeeting, listMeetings, getMeeting, updateMeeting, deleteMeeting } from './memory-client.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -53,6 +53,150 @@ app.get('/api/memory/projects/:id', async (req, res) => {
   try {
     const data = await getProjectMemory(req.params.id);
     res.json(data || {});
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Live Meetings CRUD API endpoints
+app.post('/api/meetings', async (req, res) => {
+  try {
+    const meetingData = req.body;
+    if (!meetingData.session_id || !meetingData.bot_type || !meetingData.meeting_url) {
+      return res.status(400).json({ error: 'Missing required parameters: session_id, bot_type, meeting_url' });
+    }
+    const result = await createMeeting(meetingData);
+    if (!result) throw new Error('Failed to create meeting session');
+    res.json(result);
+  } catch (err) {
+    console.error('[Server] POST /api/meetings error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/meetings', async (req, res) => {
+  try {
+    const projectId = req.query.projectId || req.query.project_id;
+    const includeArchived = req.query.includeArchived !== 'false';
+    const result = await listMeetings(projectId, includeArchived);
+    if (result && result.meetings) {
+      return res.json(result);
+    }
+    // Direct Supabase fallback
+    let query = supabase.from('meeting_sessions').select('*').order('created_at', { ascending: false });
+    if (projectId) query = query.eq('project_id', projectId);
+    if (!includeArchived) query = query.neq('status', 'archived');
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json({ meetings: data || [] });
+  } catch (err) {
+    console.error('[Server] GET /api/meetings error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/meetings/:sessionId', async (req, res) => {
+  try {
+    const sessionId = req.params.sessionId;
+    const result = await getMeeting(sessionId);
+    if (result && result.meeting) return res.json(result);
+    const { data, error } = await supabase.from('meeting_sessions').select('*').eq('session_id', sessionId).single();
+    if (error) throw error;
+    res.json({ meeting: data });
+  } catch (err) {
+    console.error('[Server] GET /api/meetings/:sessionId error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/meetings/:sessionId', async (req, res) => {
+  try {
+    const sessionId = req.params.sessionId;
+    const updateData = req.body;
+    const result = await updateMeeting(sessionId, updateData);
+    if (result && result.success) return res.json(result);
+    
+    // Direct Supabase fallback
+    const { data, error } = await supabase
+      .from('meeting_sessions')
+      .update(updateData)
+      .eq('session_id', sessionId)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ success: true, meeting: data });
+  } catch (err) {
+    console.error('[Server] PUT /api/meetings/:sessionId error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/meetings/:sessionId', async (req, res) => {
+  try {
+    const sessionId = req.params.sessionId;
+
+    // 1. Delete via Python memory service if available
+    try {
+      await deleteMeeting(sessionId);
+    } catch (e) {
+      console.warn(`[Server] Python memory service delete for ${sessionId} notice:`, e.message);
+    }
+
+    // 2. Cascading deletion on Supabase
+    try {
+      await supabase.from('transcript_segments').delete().eq('session_id', sessionId);
+      await supabase.from('meeting_events').delete().eq('session_id', sessionId);
+      await supabase.from('meeting_sessions').delete().eq('session_id', sessionId);
+    } catch (dbErr) {
+      console.warn(`[Server] Supabase delete for ${sessionId} notice:`, dbErr.message);
+    }
+
+    // 3. Clean up local transcript/report files matching sessionId
+    try {
+      const transcriptsDir = path.join(__dirname, 'transcripts');
+      if (fs.existsSync(transcriptsDir)) {
+        const files = fs.readdirSync(transcriptsDir);
+        for (const file of files) {
+          if (file.includes(sessionId)) {
+            fs.unlinkSync(path.join(transcriptsDir, file));
+            console.log(`[Server] Deleted local file: ${file}`);
+          }
+        }
+      }
+    } catch (fsErr) {
+      console.warn(`[Server] Local file cleanup for ${sessionId} notice:`, fsErr.message);
+    }
+
+    res.json({ success: true, session_id: sessionId });
+  } catch (err) {
+    console.error('[Server] DELETE /api/meetings/:sessionId error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/transcripts/:filename', async (req, res) => {
+  const filename = req.params.filename;
+  const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+  const sessionId = match ? match[2] : filename.replace('.jsonl', '');
+  
+  try {
+    try { await deleteMeeting(sessionId); } catch (e) {}
+    try {
+      await supabase.from('transcript_segments').delete().eq('session_id', sessionId);
+      await supabase.from('meeting_events').delete().eq('session_id', sessionId);
+      await supabase.from('meeting_sessions').delete().eq('session_id', sessionId);
+    } catch (e) {}
+
+    const transcriptsDir = path.join(__dirname, 'transcripts');
+    if (fs.existsSync(transcriptsDir)) {
+      const files = fs.readdirSync(transcriptsDir);
+      for (const file of files) {
+        if (file.includes(sessionId) || file === filename) {
+          try { fs.unlinkSync(path.join(transcriptsDir, file)); } catch (e) {}
+        }
+      }
+    }
+    res.json({ success: true, filename, sessionId });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -317,6 +461,8 @@ app.get('/api/transcripts', async (req, res) => {
     const list = dbSessions.map(s => ({
       fileName: `${s.bot_type}_${s.session_id}.jsonl`,
       sessionId: s.session_id,
+      title: s.title || s.bot_name || 'Meeting Session',
+      botName: s.bot_name,
       created: s.created_at,
       size: 0, // DB-backed files sizes are fetched from storage metadata if needed
       isDbBacked: true,
@@ -375,12 +521,21 @@ app.get('/api/transcripts/:filename', async (req, res) => {
   const transcriptsDir = path.join(__dirname, 'transcripts');
   const filePath = path.join(transcriptsDir, filename);
 
+  const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+  const sessionId = match ? match[2] : filename.replace('.jsonl', '');
+
+  const normalizeLines = (rawLines) => {
+    return rawLines.map(l => ({
+      speaker: l.speaker || l.speaker_label || l.name || 'Speaker',
+      text: l.text || l.content || l.transcript || '',
+      timestamp: l.timestamp || (l.start_ts !== undefined ? `${l.start_ts}s` : undefined)
+    })).filter(l => l.text.trim().length > 0 || l.speaker !== 'Speaker');
+  };
+
   try {
     // 1. Try to fetch from Supabase storage URL
-    const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
     if (match) {
       try {
-        const [_, botType, sessionId] = match;
         const { data: session, error } = await supabase
           .from('meeting_sessions')
           .select('transcript_file_url')
@@ -391,23 +546,48 @@ app.get('/api/transcripts/:filename', async (req, res) => {
           const fetchRes = await fetch(session.transcript_file_url);
           if (fetchRes.ok) {
             const content = await fetchRes.text();
-            const lines = content.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
-            return res.json({ lines });
+            const raw = content.split('\n').filter(l => l.trim().length > 0).map(l => {
+              try { return JSON.parse(l); } catch { return null; }
+            }).filter(Boolean);
+            return res.json({ lines: normalizeLines(raw) });
           }
         }
       } catch (dbErr) {
-        console.warn(`[Server] Supabase transcript fetch failed for ${filename}, falling back to local files:`, dbErr.message);
+        console.warn(`[Server] Supabase transcript storage fetch failed for ${filename}:`, dbErr.message);
       }
     }
 
-    // 2. Fallback to local filesystem
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'Transcript file not found' });
+    // 2. Fallback to local filesystem if file exists
+    if (fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath, 'utf8');
+      const raw = content.split('\n').filter(l => l.trim().length > 0).map(l => {
+        try { return JSON.parse(l); } catch { return null; }
+      }).filter(Boolean);
+      return res.json({ lines: normalizeLines(raw) });
     }
 
-    const content = fs.readFileSync(filePath, 'utf8');
-    const lines = content.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
-    res.json({ lines });
+    // 3. Fallback to querying transcript_segments table directly from Supabase
+    try {
+      const { data: dbSegments, error: segErr } = await supabase
+        .from('transcript_segments')
+        .select('speaker_label, text, start_ts')
+        .eq('session_id', sessionId)
+        .order('created_at', { ascending: true });
+
+      if (!segErr && dbSegments && dbSegments.length > 0) {
+        const lines = dbSegments.map(s => ({
+          speaker: s.speaker_label || 'Speaker',
+          text: s.text,
+          timestamp: s.start_ts !== undefined ? `${s.start_ts}s` : undefined
+        }));
+        return res.json({ lines });
+      }
+    } catch (segFetchErr) {
+      console.warn(`[Server] DB transcript_segments query failed for ${sessionId}:`, segFetchErr.message);
+    }
+
+    // 4. Return empty lines gracefully if session exists but transcript has no content yet
+    return res.json({ lines: [] });
   } catch (err) {
     res.status(500).json({ error: `Failed to read transcript: ${err.message}` });
   }

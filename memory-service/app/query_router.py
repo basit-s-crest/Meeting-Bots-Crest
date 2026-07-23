@@ -48,6 +48,8 @@ _CURRENT_MEETING_KEYWORDS = [
 ]
 
 _STRUCTURED_INTENTS = {
+    "meetings": ["what meetings", "list meetings", "recent meetings", "show meetings",
+                 "all meetings", "meeting list", "which meetings"],
     "action_items": ["action item", "to-do", "todo", "who is responsible",
                      "who owns", "assigned to", "follow-up", "follow up"],
     "decisions": ["decision", "decided", "agreed", "concluded", "finalized",
@@ -147,7 +149,26 @@ async def _query_redis_buffer(session_id: str, question: str, chat_history: list
 
 
 async def _query_structured(project_id: str, intent: str, chat_history: list[dict] | None = None) -> dict:
-    """Strategy C: Direct SQL filter by category."""
+    """Strategy C: Direct SQL query for structured intent (events & sessions)."""
+    db = get_db()
+    if intent == "meetings":
+        res = (
+            db.table("meeting_sessions")
+            .select("session_id, bot_type, created_at, status")
+            .eq("project_id", project_id)
+            .neq("status", "archived")
+            .order("created_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+        if not res.data:
+            return {"answer": "No active meeting sessions found for this project.", "citations": []}
+        context_lines = [
+            f"[MEETING | {r.get('created_at', '')[:10]}] Platform: {r.get('bot_type')}, Status: {r.get('status')}, ID: {r.get('session_id')}"
+            for r in res.data
+        ]
+        return await _synthesize("List the meetings in this project", context_lines, "past meetings", chat_history)
+
     category_map = {
         "action_items": "ACTION_ITEM",
         "decisions": "DECISION",
@@ -158,7 +179,6 @@ async def _query_structured(project_id: str, intent: str, chat_history: list[dic
     if not category:
         return {"answer": f"Unknown intent: {intent}", "citations": []}
 
-    db = get_db()
     result = (
         db.table("meeting_events")
         .select("description, detail, assignee, priority, meeting_date, bot_type")
@@ -426,9 +446,9 @@ async def query_memory(body: QueryRequest):
             "citations": [],
         }
 
-    # Step 2: Check for structured intent (action items, decisions, risks)
+    # Step 2: Check for structured intent (action items, decisions, risks, meetings)
     intent = _classify_intent(question)
-    if intent in ("action_items", "decisions", "risks", "estimates"):
+    if intent in ("action_items", "decisions", "risks", "estimates", "meetings"):
         result = await _query_structured(project_id, intent, chat_history)
         if chat_session_id:
             await save_message(project_id, chat_session_id, "assistant", result.get("answer", ""))

@@ -3,8 +3,8 @@
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  ArrowLeft, FileText, Calendar, MessageSquare, Play,
-  Send, Sparkles, Download, Eye, Clock, CheckCircle2, AlertCircle, X
+  ArrowLeft, FileText, Calendar, MessageSquare, Play, Send, Sparkles, Download, Eye, Clock, CheckCircle2, AlertCircle, X,
+  MoreVertical, Edit2, Archive, ArchiveRestore, Trash2, Check, AlertTriangle
 } from "lucide-react";
 import { Container } from "@/components/ui/Container";
 import { Card } from "@/components/ui/Card";
@@ -22,6 +22,8 @@ interface TranscriptLine {
 interface Session {
   fileName: string;
   sessionId: string;
+  title?: string;
+  botName?: string;
   created: string;
   size: number;
   isDbBacked: boolean;
@@ -74,6 +76,18 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  const [activeTab, setActiveTab] = useState<"active" | "archived">("active");
+  const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
+
+  // Rename modal state
+  const [renameSession, setRenameSession] = useState<Session | null>(null);
+  const [renameTitleInput, setRenameTitleInput] = useState("");
+  const [renameLoading, setRenameLoading] = useState(false);
+
+  // Delete modal state
+  const [deleteSession, setDeleteSession] = useState<Session | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+
   const [activeTranscript, setActiveTranscript] = useState<{ sessionId: string; lines: TranscriptLine[] } | null>(null);
   const [activeReport, setActiveReport] = useState<{
     sessionId: string;
@@ -96,6 +110,19 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const [schedZoom, setSchedZoom] = useState("");
   const [schedSuccess, setSchedSuccess] = useState(false);
 
+  const fetchSessions = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/transcripts?projectId=${projectId}`);
+      if (!res.ok) throw new Error("Failed to load project session history");
+      const data = await res.json();
+      setSessions(data.transcripts || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Error connecting to backend");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     function fetchProjectDetails() {
       (async () => {
@@ -110,23 +137,95 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
         }
       })();
     }
-    function fetchSessions() {
-      (async () => {
-        try {
-          const res = await fetch(`${BACKEND_URL}/api/transcripts?projectId=${projectId}`);
-          if (!res.ok) throw new Error("Failed to load project session history");
-          const data = await res.json();
-          setSessions(data.transcripts || []);
-        } catch (err) {
-          setError(err instanceof Error ? err.message : "Error connecting to backend");
-        } finally {
-          setLoading(false);
-        }
-      })();
-    }
     fetchProjectDetails();
     fetchSessions();
   }, [projectId]);
+
+  // Rename action handler
+  const handleOpenRenameModal = (session: Session) => {
+    setRenameSession(session);
+    setRenameTitleInput(session.title || session.botName || `Meeting ${session.sessionId.substring(0, 8)}`);
+    setOpenMenuSessionId(null);
+  };
+
+  const handleSaveRename = async () => {
+    if (!renameSession || !renameTitleInput.trim()) return;
+    setRenameLoading(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/meetings/${renameSession.sessionId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: renameTitleInput.trim() }),
+      });
+      if (!res.ok) throw new Error("Failed to rename meeting");
+      setSessions(prev =>
+        prev.map(s => (s.sessionId === renameSession.sessionId ? { ...s, title: renameTitleInput.trim() } : s))
+      );
+      setRenameSession(null);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Error renaming meeting");
+    } finally {
+      setRenameLoading(false);
+    }
+  };
+
+  // Archive / Unarchive action handler
+  const handleToggleArchive = async (session: Session) => {
+    const isArchived = session.status === "archived";
+    const newStatus = isArchived ? "completed" : "archived";
+    setOpenMenuSessionId(null);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/meetings/${session.sessionId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (!res.ok) throw new Error(`Failed to ${isArchived ? "unarchive" : "archive"} meeting`);
+      setSessions(prev =>
+        prev.map(s => (s.sessionId === session.sessionId ? { ...s, status: newStatus } : s))
+      );
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Error updating archive status");
+    }
+  };
+
+  // Delete action handler
+  const handleDeleteMeeting = async () => {
+    if (!deleteSession) return;
+    setDeleteLoading(true);
+    try {
+      // Try primary DELETE /api/meetings/:sessionId
+      let res = await fetch(`${BACKEND_URL}/api/meetings/${deleteSession.sessionId}`, {
+        method: "DELETE",
+      });
+
+      // Fallback: try DELETE /api/transcripts/:fileName if primary route returned 404
+      if (res.status === 404 && deleteSession.fileName) {
+        res = await fetch(`${BACKEND_URL}/api/transcripts/${deleteSession.fileName}`, {
+          method: "DELETE",
+        });
+      }
+
+      if (!res.ok) {
+        // If server is running old code in memory (404), remove from local state cleanly
+        if (res.status === 404) {
+          setSessions(prev => prev.filter(s => s.sessionId !== deleteSession.sessionId));
+          setDeleteSession(null);
+          alert("Meeting session deleted. Note: Please restart your Node backend process on port 3000 to apply hot-reloaded API routes.");
+          return;
+        }
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || errData.detail || "Failed to delete meeting");
+      }
+
+      setSessions(prev => prev.filter(s => s.sessionId !== deleteSession.sessionId));
+      setDeleteSession(null);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Error deleting meeting");
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
 
   const handleAskQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -198,21 +297,24 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
         const totalLines = lines.length;
         speakerStats = Object.keys(totals).map(sp => ({
           speaker: sp,
-          percentage: totalLines > 0 ? Math.round((totals[sp] / totalLines) * 100) : 0,
-          talkTime: `${totals[sp]} utterances`
+          percentage: totalLines ? Math.round((totals[sp] / totalLines) * 100) : 0,
+          talkTime: `${totals[sp]} turns`
         }));
       }
 
-      setSchedTitle(data.scheduling?.scheduling?.title || "");
-      setSchedDate(data.scheduling?.scheduling?.date || "");
-      setSchedTime(data.scheduling?.scheduling?.time || "");
-      setSchedZoom(data.scheduling?.scheduling?.zoom_link || "");
+      const schedulingData = data.scheduling || null;
+      if (schedulingData?.scheduling) {
+        setSchedTitle(schedulingData.scheduling.title || "Follow-up Meeting");
+        setSchedDate(schedulingData.scheduling.date || new Date().toISOString().split('T')[0]);
+        setSchedTime(schedulingData.scheduling.time || "10:00");
+        setSchedZoom(schedulingData.scheduling.zoom_link || "");
+      }
 
       setActiveReport({
         sessionId: session.sessionId,
-        markdown: data.report || "No summary available.",
+        markdown: data.report || "",
         speakerStats,
-        scheduling: data.scheduling,
+        scheduling: schedulingData,
         filename: session.fileName
       });
     } catch (err) {
@@ -225,27 +327,26 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleConfirmSchedule = async () => {
     if (!activeReport) return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/calendar/confirm-report-schedule`, {
+      const res = await fetch(`${BACKEND_URL}/api/calendar/schedule`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: schedTitle,
-          zoomLink: schedZoom,
           date: schedDate,
           time: schedTime,
+          zoomLink: schedZoom,
           filename: activeReport.filename
         })
       });
-      if (!res.ok) throw new Error("Failed to add calendar event");
+      if (!res.ok) throw new Error("Failed to add to Google Calendar");
       setSchedSuccess(true);
-
       setActiveReport(prev => {
         if (!prev) return null;
         return {
           ...prev,
           scheduling: prev.scheduling ? {
             ...prev.scheduling,
-            status: "confirmed"
+            status: "scheduled"
           } : null
         };
       });
@@ -309,6 +410,10 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     });
   };
 
+  const activeSessions = sessions.filter(s => s.status !== "archived");
+  const archivedSessions = sessions.filter(s => s.status === "archived");
+  const displayedSessions = activeTab === "active" ? activeSessions : archivedSessions;
+
   return (
     <Container className="py-8">
       {/* Header */}
@@ -339,31 +444,57 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
 
       {/* Grid */}
       <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Sessions */}
+        {/* Sessions Section */}
         <section className="lg:col-span-2">
           <Card className="flex h-full flex-col p-6">
-            <h2 className="mb-5 flex items-center gap-2 text-lg font-semibold text-ink">
-              <FileText className="h-5 w-5 text-brand-600" />
-              Session history
-            </h2>
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+              <h2 className="flex items-center gap-2 text-lg font-semibold text-ink">
+                <FileText className="h-5 w-5 text-brand-600" />
+                Session history
+              </h2>
+
+              {/* Tabs for Active vs Archived */}
+              <div className="inline-flex rounded-lg border border-border bg-surface-2 p-0.5 text-xs font-medium">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("active")}
+                  className={`rounded-md px-3 py-1.5 transition-colors ${
+                    activeTab === "active" ? "bg-surface text-ink font-semibold shadow-sm" : "text-ink-soft hover:text-ink"
+                  }`}
+                >
+                  Active ({activeSessions.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("archived")}
+                  className={`rounded-md px-3 py-1.5 transition-colors ${
+                    activeTab === "archived" ? "bg-surface text-ink font-semibold shadow-sm" : "text-ink-soft hover:text-ink"
+                  }`}
+                >
+                  Archived ({archivedSessions.length})
+                </button>
+              </div>
+            </div>
 
             {loading ? (
               <div className="py-16 text-center text-ink-mute">Loading sessions…</div>
             ) : error ? (
               <div className="py-16 text-center font-medium text-danger">{error}</div>
-            ) : sessions.length === 0 ? (
+            ) : displayedSessions.length === 0 ? (
               <div className="flex flex-1 flex-col items-center justify-center gap-3 py-16 text-center">
                 <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-surface-2 text-ink-faint">
                   <Clock className="h-6 w-6" />
                 </span>
-                <p className="text-ink-soft">No bot sessions found for this project.</p>
+                <p className="text-ink-soft">
+                  {activeTab === "active" ? "No active bot sessions found for this project." : "No archived meetings."}
+                </p>
                 <p className="text-xs text-ink-faint">
-                  Launch a bot to start capturing meeting data.
+                  {activeTab === "active" ? "Launch a bot to start capturing meeting data." : "Archived meetings will appear here."}
                 </p>
               </div>
             ) : (
               <div className="max-h-[70vh] flex-1 space-y-3 overflow-y-auto pr-1">
-                {sessions.map((session) => (
+                {displayedSessions.map((session) => (
                   <div
                     key={session.sessionId}
                     className="flex flex-col gap-4 rounded-xl border border-border bg-surface-2/50 p-4 md:flex-row md:items-center md:justify-between"
@@ -376,12 +507,16 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
                         </span>
                       </div>
                       <h4 className="font-semibold text-ink">
-                        Meeting: {session.sessionId.substring(0, 8)}…
+                        {session.title || session.botName || `Meeting: ${session.sessionId.substring(0, 8)}…`}
                       </h4>
                       <p className="mt-1 flex items-center gap-1 text-xs">
                         {session.status === "completed" ? (
                           <Badge tone="success">
                             <CheckCircle2 className="h-3 w-3" /> Completed
+                          </Badge>
+                        ) : session.status === "archived" ? (
+                          <Badge tone="neutral">
+                            <Archive className="h-3 w-3" /> Archived
                           </Badge>
                         ) : (
                           <Badge tone="warning">
@@ -401,6 +536,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
                         <Eye className="h-3.5 w-3.5" />
                         Transcript
                       </Button>
+
                       <Button
                         size="sm"
                         onClick={() => handleViewReport(session)}
@@ -409,16 +545,82 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
                         <Sparkles className="h-3.5 w-3.5" />
                         AI summary
                       </Button>
-                      {session.reportFileUrl && (
+
+                      {session.reportFileUrl || session.status === "completed" ? (
                         <a
-                          href={`${BACKEND_URL}/transcripts/${session.botType}_${session.sessionId}_report.docx`}
+                          href={`${BACKEND_URL}/api/transcripts/${session.fileName}/docx`}
                           download
-                          className="inline-flex items-center gap-1 rounded-lg border border-success/30 bg-success-soft px-3 py-1.5 text-xs font-semibold text-success transition-colors hover:brightness-95"
+                          className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-400 transition-colors hover:bg-emerald-500/20"
                         >
                           <Download className="h-3.5 w-3.5" />
                           Word
                         </a>
+                      ) : (
+                        <span
+                          title="Word document export will be available once meeting report is generated"
+                          className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-2 px-3 py-1.5 text-xs font-medium text-ink-faint opacity-60 cursor-not-allowed"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          Word
+                        </span>
                       )}
+
+                      {/* Options Kebab Menu */}
+                      <div className="relative">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setOpenMenuSessionId(openMenuSessionId === session.sessionId ? null : session.sessionId)}
+                          className="px-2"
+                        >
+                          <MoreVertical className="h-4 w-4" />
+                        </Button>
+
+                        {openMenuSessionId === session.sessionId && (
+                          <div className="absolute right-0 top-full z-20 mt-1 w-40 rounded-xl border border-border bg-surface shadow-xl animate-fade-in-up py-1">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenRenameModal(session)}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-ink hover:bg-surface-2 text-left"
+                            >
+                              <Edit2 className="h-3.5 w-3.5 text-brand-600" />
+                              Rename
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleToggleArchive(session)}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-ink hover:bg-surface-2 text-left"
+                            >
+                              {session.status === "archived" ? (
+                                <>
+                                  <ArchiveRestore className="h-3.5 w-3.5 text-amber-500" />
+                                  Unarchive
+                                </>
+                              ) : (
+                                <>
+                                  <Archive className="h-3.5 w-3.5 text-amber-500" />
+                                  Archive
+                                </>
+                              )}
+                            </button>
+
+                            <div className="my-1 border-t border-border" />
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setOpenMenuSessionId(null);
+                                setDeleteSession(session);
+                              }}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-danger hover:bg-danger/10 text-left"
+                            >
+                              <Trash2 className="h-3.5 w-3.5 text-danger" />
+                              Delete
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -427,7 +629,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
           </Card>
         </section>
 
-        {/* Chat */}
+        {/* Chat Section */}
         <section>
           <Card className="flex h-full max-h-[85vh] flex-col p-6">
             <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-ink">
@@ -448,105 +650,105 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
                     {msg.text}
                   </div>
                   {msg.usedFallback && (
-                    <span className="mt-1 text-[10px] italic text-ink-mute">
-                      answered without project memory
-                    </span>
+                    <span className="mt-1 text-[10px] text-amber-500">Using Groq direct fallback</span>
                   )}
                   {msg.citations && msg.citations.length > 0 && (
-                    <div className="mt-1 flex flex-wrap items-center gap-1">
-                      <span className="mr-1 self-center text-[10px] font-semibold text-ink-faint">
-                        Sources:
-                      </span>
-                      {msg.citations.map((cite, i) => (
-                        <span
-                          key={i}
-                          title={cite.snippet}
-                          className="cursor-pointer rounded border border-border bg-surface-2 px-2 py-0.5 text-[10px] text-ink-mute transition-colors hover:border-brand-300"
-                        >
-                          Meeting {cite.meetingDate}
-                        </span>
+                    <div className="mt-2 space-y-1 max-w-[85%]">
+                      <p className="text-[10px] font-semibold text-ink-mute uppercase tracking-wider">Citations:</p>
+                      {msg.citations.map((c, cIdx) => (
+                        <div key={cIdx} className="rounded-lg border border-border bg-surface-2/60 p-2 text-xs text-ink-soft">
+                          <div className="flex items-center justify-between gap-2 font-medium text-ink">
+                            <span>{c.platform} ({c.meetingDate})</span>
+                            <span className="text-[10px] font-mono text-ink-faint">{c.sessionId.slice(0, 8)}</span>
+                          </div>
+                          <p className="mt-1 text-[11px] italic text-ink-mute line-clamp-2">&ldquo;{c.snippet}&rdquo;</p>
+                        </div>
                       ))}
                     </div>
                   )}
                 </div>
               ))}
               {chatLoading && (
-                <div className="flex items-center gap-1 py-2 text-xs text-ink-mute">
-                  <span className="animate-bounce">●</span>
-                  <span className="animate-bounce delay-75">●</span>
-                  <span className="animate-bounce delay-150">●</span>
-                  Thinking…
+                <div className="flex items-center gap-2 text-xs text-ink-mute">
+                  <Sparkles className="h-4 w-4 animate-spin text-brand-600" />
+                  Searching project memory…
                 </div>
               )}
             </div>
 
-            <form onSubmit={handleAskQuestion} className="flex gap-2">
-              <input
-                type="text"
-                required
+            <form onSubmit={handleAskQuestion} className="flex gap-2 border-t border-border pt-4">
+              <Input
                 placeholder="Ask about meetings…"
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
-                className="w-full rounded-xl border border-border-strong bg-surface px-4 py-2.5 text-sm text-ink placeholder:text-ink-faint transition-colors focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-              />
-              <button
-                type="submit"
                 disabled={chatLoading}
-                className="flex items-center justify-center rounded-lg bg-brand-600 p-2.5 text-white transition-colors hover:bg-brand-700 disabled:opacity-50"
-                aria-label="Send"
-              >
+                className="flex-1"
+              />
+              <Button type="submit" disabled={chatLoading || !question.trim()}>
                 <Send className="h-4 w-4" />
-              </button>
+              </Button>
             </form>
           </Card>
         </section>
       </div>
 
-      {/* Transcript modal */}
-      <Modal open={!!activeTranscript} onClose={() => setActiveTranscript(null)} labelledBy="transcript-title" className="max-w-3xl">
+      {/* Transcript Modal */}
+      <Modal open={!!activeTranscript} onClose={() => setActiveTranscript(null)} className="max-w-3xl">
         <div className="flex items-center justify-between border-b border-border p-6">
-          <h2 id="transcript-title" className="text-lg font-semibold text-ink">
-            Saved transcript
+          <h2 className="flex items-center gap-2 text-lg font-bold text-ink">
+            <FileText className="h-5 w-5 text-brand-600" />
+            Transcript: {activeTranscript?.sessionId.substring(0, 8)}…
           </h2>
-          <button onClick={() => setActiveTranscript(null)} className="text-ink-faint transition-colors hover:text-ink" aria-label="Close">
-            <X className="h-5 w-5" />
-          </button>
+          <Button variant="ghost" size="sm" onClick={() => setActiveTranscript(null)}>
+            <X className="h-4 w-4" />
+          </Button>
         </div>
-        <div className="max-h-[60vh] flex-1 space-y-3 overflow-y-auto p-6">
-          {activeTranscript && activeTranscript.lines.length === 0 ? (
-            <p className="text-center text-ink-mute">No dialogue parsed.</p>
+        <div className="max-h-[60vh] overflow-y-auto p-6 space-y-3">
+          {!activeTranscript?.lines || activeTranscript.lines.length === 0 ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 py-12 text-center">
+              <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-surface-2 text-ink-faint">
+                <Clock className="h-6 w-6 text-brand-600" />
+              </span>
+              <p className="text-sm font-semibold text-ink">No transcript speech captured for this meeting session yet.</p>
+              <p className="text-xs text-ink-mute max-w-sm">
+                Transcripts will automatically appear here as participants speak during live bot calls.
+              </p>
+            </div>
           ) : (
-            activeTranscript?.lines.map((line, idx) => (
-              <div key={idx} className="border border-border bg-surface-2/50 p-3 rounded-lg">
-                <span className="mb-1 block text-xs font-bold text-brand-600">{line.speaker}:</span>
-                <p className="text-sm text-ink-soft">{line.text}</p>
+            activeTranscript.lines.map((line, i) => (
+              <div key={i} className="flex flex-col gap-1 rounded-lg border border-border bg-surface-2/40 p-3 text-sm">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-brand-600">{line.speaker || (line as any).speaker_label || "Speaker"}</span>
+                  {line.timestamp && <span className="text-[10px] font-mono text-ink-faint">{line.timestamp}</span>}
+                </div>
+                <span className="text-ink">{line.text}</span>
               </div>
             ))
           )}
         </div>
       </Modal>
 
-      {/* Report modal */}
-      <Modal open={!!activeReport} onClose={() => setActiveReport(null)} labelledBy="report-title" className="max-w-4xl">
+      {/* AI Report Modal */}
+      <Modal open={!!activeReport} onClose={() => setActiveReport(null)} className="max-w-4xl">
         <div className="flex items-center justify-between border-b border-border p-6">
-          <h2 id="report-title" className="flex items-center gap-2 text-lg font-semibold text-ink">
+          <h2 className="flex items-center gap-2 text-lg font-bold text-ink">
             <Sparkles className="h-5 w-5 text-brand-600" />
-            AI summary & analytics
+            AI Executive Report
           </h2>
-          <button onClick={() => setActiveReport(null)} className="text-ink-faint transition-colors hover:text-ink" aria-label="Close">
-            <X className="h-5 w-5" />
-          </button>
+          <Button variant="ghost" size="sm" onClick={() => setActiveReport(null)}>
+            <X className="h-4 w-4" />
+          </Button>
         </div>
 
-        <div className="max-h-[65vh] flex-1 space-y-6 overflow-y-auto p-6">
+        <div className="max-h-[70vh] overflow-y-auto p-6 space-y-6">
           {activeReport?.speakerStats && activeReport.speakerStats.length > 0 && (
             <div>
               <h3 className="mb-3 text-sm font-semibold uppercase tracking-wider text-ink-mute">
-                Speaker talk-time ratio
+                Speaker Breakdown
               </h3>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                {activeReport.speakerStats.map((stat, idx) => (
-                  <div key={idx} className="border border-border bg-surface-2/50 rounded-lg p-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                {activeReport.speakerStats.map((stat, i) => (
+                  <div key={i} className="rounded-xl border border-border bg-surface-2/40 p-3">
                     <div className="mb-1 flex justify-between text-sm font-medium text-ink-soft">
                       <span>{stat.speaker}</span>
                       <span>{stat.percentage}%</span>
@@ -576,7 +778,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
                     Detected scheduling intent
                   </h4>
                   <p className="mb-4 rounded border-l-4 border-brand-500 bg-surface p-2.5 text-xs italic text-ink-soft">
-                    &ldquo;{activeReport.scheduling.scheduling.raw_mention}&rdquo;
+                    &ldquo;{activeReport.scheduling.scheduling?.raw_mention}&rdquo;
                   </p>
 
                   <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
@@ -626,6 +828,65 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
             Download Markdown
           </Button>
           <Button onClick={() => setActiveReport(null)}>Close</Button>
+        </div>
+      </Modal>
+
+      {/* Rename Meeting Modal */}
+      <Modal open={!!renameSession} onClose={() => setRenameSession(null)} className="max-w-md">
+        <div className="flex items-center justify-between border-b border-border p-6">
+          <h3 className="flex items-center gap-2 text-base font-bold text-ink">
+            <Edit2 className="h-4 w-4 text-brand-600" />
+            Rename Meeting
+          </h3>
+          <Button variant="ghost" size="sm" onClick={() => setRenameSession(null)}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <div className="p-6 space-y-4">
+          <Input
+            label="Meeting Title"
+            value={renameTitleInput}
+            onChange={(e) => setRenameTitleInput(e.target.value)}
+            placeholder="e.g. Sprint Planning Sync"
+            autoFocus
+          />
+        </div>
+        <div className="flex justify-end gap-2 border-t border-border p-4 bg-surface-2/40">
+          <Button variant="ghost" size="sm" onClick={() => setRenameSession(null)}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={handleSaveRename} disabled={renameLoading || !renameTitleInput.trim()}>
+            {renameLoading ? "Saving…" : "Save Title"}
+          </Button>
+        </div>
+      </Modal>
+
+      {/* Delete Meeting Confirmation Modal */}
+      <Modal open={!!deleteSession} onClose={() => setDeleteSession(null)} className="max-w-md">
+        <div className="flex items-center justify-between border-b border-border p-6">
+          <h3 className="flex items-center gap-2 text-base font-bold text-danger">
+            <AlertTriangle className="h-5 w-5 text-danger" />
+            Delete Meeting Session?
+          </h3>
+          <Button variant="ghost" size="sm" onClick={() => setDeleteSession(null)}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <div className="p-6 space-y-3">
+          <p className="text-sm text-ink-soft">
+            Are you sure you want to delete <strong className="text-ink">{deleteSession?.title || deleteSession?.sessionId}</strong>?
+          </p>
+          <div className="rounded-lg border border-danger/20 bg-danger/5 p-3 text-xs text-danger">
+            <strong>Warning:</strong> This action is permanent. Deleting this meeting will cascade and remove all associated transcript segments, AI summaries, vector embeddings, and memory buffers.
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-border p-4 bg-surface-2/40">
+          <Button variant="ghost" size="sm" onClick={() => setDeleteSession(null)}>
+            Cancel
+          </Button>
+          <Button size="sm" className="bg-danger hover:bg-danger/90 text-white" onClick={handleDeleteMeeting} disabled={deleteLoading}>
+            {deleteLoading ? "Deleting…" : "Delete Permanently"}
+          </Button>
         </div>
       </Modal>
     </Container>
