@@ -1,70 +1,4 @@
-import { Groq } from 'groq-sdk';
-
 const PYTHON_SERVICE_URL = process.env.MEMORY_SERVICE_URL || 'http://127.0.0.1:8001';
-
-/**
- * Fallback to direct LLM query when Python memory service is offline
- */
-async function fallbackGroqQuery({ question, projectId }) {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) {
-    return {
-      answer: "The AI memory service is offline and GROQ_API_KEY is missing from .env. Please start the memory service or configure GROQ_API_KEY.",
-      citations: [],
-      usedFallback: true
-    };
-  }
-
-  try {
-    const groq = new Groq({ apiKey });
-
-    // Query Supabase for recent segments as fallback context instead of local files
-    let contextText = '';
-    try {
-      const { default: fetch } = await import('node-fetch');
-      const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-      const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.VITE_SUPABASE_ANON_KEY;
-      if (supabaseUrl && supabaseKey) {
-        let filterUrl = `${supabaseUrl}/rest/v1/transcript_segments?select=speaker_label,text,created_at&order=created_at.desc&limit=50`;
-        if (projectId) {
-          filterUrl += `&project_id=eq.${encodeURIComponent(projectId)}`;
-        }
-        const res = await fetch(filterUrl, {
-          headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
-        });
-        if (res.ok) {
-          const rows = await res.json();
-          if (rows && rows.length > 0) {
-            contextText = rows.map(r =>
-              `[${r.created_at?.slice(0, 10) || ''}] ${r.speaker_label || 'Speaker'}: ${r.text}`
-            ).join('\n');
-          }
-        }
-      }
-    } catch {} // Silent — Supabase fallback is best-effort
-
-    const prompt = `You are a helpful AI Meeting Knowledge Assistant for workspace/project "${projectId || 'General'}".
-Answer the user's question naturally and accurately based on the project meeting transcripts provided below. If context is empty or missing details, answer politely and offer guidance.
-
-Meeting Transcripts Context:
-${contextText.slice(0, 4000) || 'No transcripts recorded in workspace yet.'}
-
-User Question: ${question}`;
-
-    const completion = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.5,
-      max_tokens: 1024,
-    });
-
-    const answer = completion.choices[0]?.message?.content || "No response generated.";
-    return { answer, citations: [], usedFallback: true };
-  } catch (err) {
-    console.error('[MemoryClient] Groq fallback query failed:', err.message);
-    return { answer: `Error processing question: ${err.message}`, citations: [], usedFallback: true };
-  }
-}
 
 /**
  * Fire-and-forget: push a transcript segment to the memory service.
@@ -118,10 +52,11 @@ async function queryMemory({ question, sessionId, projectId, project_id }) {
     }
   }
 
-  // Fallback to direct Groq query if Python memory service is offline
-  console.log('[MemoryClient] Python memory service unreachable, using direct Groq LLM fallback...');
-  const fallbackResult = await fallbackGroqQuery({ question, projectId: pid });
-  return { ...fallbackResult, usedFallback: true };
+  console.warn('[MemoryClient] Python memory service unreachable.');
+  return {
+    answer: "The AI Memory Service is currently unavailable. Please ensure the memory service is running.",
+    citations: []
+  };
 }
 
 /**

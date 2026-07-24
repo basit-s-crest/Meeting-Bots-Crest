@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import {
   ArrowLeft, FileText, Calendar, MessageSquare, Play, Send, Sparkles, Download, Eye, Clock, CheckCircle2, AlertCircle, X,
@@ -103,6 +103,11 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   ]);
   const [question, setQuestion] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages, chatLoading]);
 
   const [schedTitle, setSchedTitle] = useState("");
   const [schedDate, setSchedDate] = useState("");
@@ -674,6 +679,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
                   Searching project memory…
                 </div>
               )}
+              <div ref={chatEndRef} />
             </div>
 
             <form onSubmit={handleAskQuestion} className="flex gap-2 border-t border-border pt-4">
