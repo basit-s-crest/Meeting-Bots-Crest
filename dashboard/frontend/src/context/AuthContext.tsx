@@ -63,9 +63,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const isAppRoute = pathname.startsWith("/projects") || pathname.startsWith("/dashboard");
 
     if (!user && isAppRoute) {
-      router.push("/login");
-    } else if (user && (isAuthRoute || pathname === "/")) {
-      router.push("/projects");
+      router.replace("/login");
+    } else if (user && isAuthRoute) {
+      router.replace("/projects");
     }
   }, [user, loading, pathname, router]);
 
@@ -113,7 +113,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.error("[Auth] Logout request failed:", e);
     } finally {
       setUser(null);
-      router.push("/login");
+      router.replace("/");
     }
   };
 

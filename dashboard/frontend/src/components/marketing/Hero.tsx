@@ -1,7 +1,10 @@
+"use client";
+
 import { ArrowRight, Mic, Play, Check } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Container } from "@/components/ui/Container";
 import { Badge } from "@/components/ui/Badge";
+import { useAuth } from "@/context/AuthContext";
 
 const transcript = [
   {
@@ -22,6 +25,8 @@ const transcript = [
 ];
 
 export function Hero() {
+  const { user } = useAuth() || {};
+
   return (
     <div className="relative border-b border-border bg-surface">
       <div className="hero-gradient" aria-hidden />
@@ -56,11 +61,11 @@ export function Hero() {
               className="hall-reveal mt-9 flex flex-col items-start gap-3 sm:flex-row"
               style={{ ["--i" as string]: 3 }}
             >
-              <Button href="/projects" size="lg">
-                Open the app
+              <Button href={user ? "/projects" : "/login"} size="lg">
+                {user ? "Open the app" : "Get started"}
                 <ArrowRight className="h-4 w-4" />
               </Button>
-              <Button href="/projects" variant="secondary" size="lg">
+              <Button href={user ? "/projects" : "/login"} variant="secondary" size="lg">
                 <Play className="h-4 w-4" />
                 Watch demo
               </Button>
