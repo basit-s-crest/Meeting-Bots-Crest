@@ -69,6 +69,15 @@ interface SchedulingData {
 
 const BACKEND_URL = "http://localhost:3000";
 
+const originalFetch = typeof window !== "undefined" ? window.fetch : null;
+const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+  if (!originalFetch) return Promise.reject(new Error("fetch called on server"));
+  return originalFetch(input, {
+    ...init,
+    credentials: "include"
+  });
+};
+
 export default function ProjectWorkspacePage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = use(params);
 

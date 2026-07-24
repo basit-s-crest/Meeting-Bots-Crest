@@ -29,3 +29,8 @@ dashboard/frontend_backup/
 .claude/
 .hallmark/
 skills-lock.json
+
+# Local orchestrator scripts
+run.js
+start.bat
+
