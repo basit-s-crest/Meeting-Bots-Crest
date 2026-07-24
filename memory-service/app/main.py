@@ -9,6 +9,7 @@ from app.embeddings import init_embedder
 from app.ingestion import router as ingestion_router
 from app.query_router import router as query_router
 from app.post_meeting import router as post_meeting_router
+from app.meetings_router import router as meetings_router
 
 
 @asynccontextmanager
@@ -29,6 +30,7 @@ async def health():
 app.include_router(ingestion_router, prefix="/api/memory")
 app.include_router(query_router, prefix="/api/memory")
 app.include_router(post_meeting_router, prefix="/api/memory")
+app.include_router(meetings_router, prefix="/api/memory")
 
 
 def start():

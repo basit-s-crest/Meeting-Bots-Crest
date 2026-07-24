@@ -230,4 +230,85 @@ async function getProjectMemory(projectId) {
   return null;
 }
 
-export { ingestSegment, queryMemory, processMeeting, getProjectMemory };
+/**
+ * Meeting CRUD client helpers targeting Python memory service
+ */
+async function createMeeting(data) {
+  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
+  for (const url of serviceUrls) {
+    try {
+      const res = await fetch(`${url}/api/memory/meetings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+      });
+      if (res.ok) return await res.json();
+    } catch {}
+  }
+  return null;
+}
+
+async function listMeetings(projectId, includeArchived = true) {
+  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
+  for (const url of serviceUrls) {
+    try {
+      const q = new URLSearchParams();
+      if (projectId) q.append('project_id', projectId);
+      q.append('include_archived', includeArchived);
+      const res = await fetch(`${url}/api/memory/meetings?${q.toString()}`);
+      if (res.ok) return await res.json();
+    } catch {}
+  }
+  return null;
+}
+
+async function getMeeting(sessionId) {
+  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
+  for (const url of serviceUrls) {
+    try {
+      const res = await fetch(`${url}/api/memory/meetings/${sessionId}`);
+      if (res.ok) return await res.json();
+    } catch {}
+  }
+  return null;
+}
+
+async function updateMeeting(sessionId, updateData) {
+  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
+  for (const url of serviceUrls) {
+    try {
+      const res = await fetch(`${url}/api/memory/meetings/${sessionId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updateData)
+      });
+      if (res.ok) return await res.json();
+    } catch {}
+  }
+  return null;
+}
+
+async function deleteMeeting(sessionId) {
+  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
+  for (const url of serviceUrls) {
+    try {
+      const res = await fetch(`${url}/api/memory/meetings/${sessionId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) return await res.json();
+    } catch {}
+  }
+  return null;
+}
+
+export {
+  ingestSegment,
+  queryMemory,
+  processMeeting,
+  getProjectMemory,
+  createMeeting,
+  listMeetings,
+  getMeeting,
+  updateMeeting,
+  deleteMeeting
+};
