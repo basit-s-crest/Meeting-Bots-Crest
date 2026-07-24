@@ -11,6 +11,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/Input";
+import { LiveQAOverlay, QAPair } from "@/components/LiveQAOverlay";
 
 interface TranscriptLine {
   segmentId?: number;
@@ -47,6 +48,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const [calendarConnecting, setCalendarConnecting] = useState(true);
 
   const [liveLines, setLiveLines] = useState<TranscriptLine[]>([]);
+  const [qaHistory, setQaHistory] = useState<QAPair[]>([]);
   const [showJumpButton, setShowJumpButton] = useState(false);
 
   const socketRef = useRef<WebSocket | null>(null);
@@ -145,6 +147,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
 
     setBotStatus("starting");
     setLiveLines([]);
+    setQaHistory([]);
     wasNearBottomRef.current = true;
     setActiveSpeaker("Connecting…");
 
@@ -264,6 +267,42 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             const scale = 0.3 + (msg.data.amplitude || 0) * 1.5;
             el.style.transform = `scaleY(${Math.min(scale, 1.8)})`;
           });
+        } else if (msg.type === "qa_answer_chunk") {
+          const { id, chunk } = msg.data;
+          setQaHistory(prev => prev.map(item => {
+            if (item.id === id) {
+              return {
+                ...item,
+                answer: item.answer + chunk,
+                isStreaming: true
+              };
+            }
+            return item;
+          }));
+        } else if (msg.type === "qa_answer_complete") {
+          const { id, fullAnswer } = msg.data;
+          setQaHistory(prev => prev.map(item => {
+            if (item.id === id) {
+              return {
+                ...item,
+                answer: fullAnswer || item.answer,
+                isStreaming: false
+              };
+            }
+            return item;
+          }));
+        } else if (msg.type === "qa_error") {
+          const { id, error } = msg.data;
+          setQaHistory(prev => prev.map(item => {
+            if (item.id === id) {
+              return {
+                ...item,
+                isStreaming: false,
+                error: error || "Failed to generate answer"
+              };
+            }
+            return item;
+          }));
         }
       } catch (err) {
         console.error("[WebSocket] Message parsing error", err);
@@ -547,6 +586,50 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
               </button>
             )}
           </Card>
+
+          <LiveQAOverlay
+            qaHistory={qaHistory}
+            onSendQuestion={(questionText) => {
+              if (!questionText.trim()) return;
+              const id = `qa_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+              const newQA: QAPair = {
+                id,
+                question: questionText.trim(),
+                answer: "",
+                isStreaming: true,
+                timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+              };
+              setQaHistory(prev => [...prev, newQA]);
+
+              if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+                const contextOverride = liveLines
+                  .map(l => `${l.speaker}: ${l.committedText}`)
+                  .filter(t => t.trim().length > 0)
+                  .join("\n");
+
+                socketRef.current.send(JSON.stringify({
+                  type: "qa_question",
+                  data: {
+                    id,
+                    question: questionText.trim(),
+                    contextOverride
+                  }
+                }));
+              } else {
+                setQaHistory(prev => prev.map(item => {
+                  if (item.id === id) {
+                    return {
+                      ...item,
+                      isStreaming: false,
+                      error: "WebSocket is not connected. Please start a bot session."
+                    };
+                  }
+                  return item;
+                }));
+              }
+            }}
+            disabled={botStatus === "idle"}
+          />
         </section>
       </div>
     </Container>

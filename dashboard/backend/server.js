@@ -7,6 +7,7 @@ import net from 'net';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import cors from 'cors';
+import { Groq } from 'groq-sdk';
 
 import { processManager } from './process-manager.js';
 import { deepgramProxyGoogle } from './deepgram-proxy-google.js';
@@ -297,8 +298,23 @@ async function getFreePort(startPort = 8090) {
 // Map of sessionId -> set of connected client WebSocket connections
 const clientSockets = new Map(); // sessionId -> Set(WebSocket)
 
+// Map of sessionId -> Array<{ speaker: string, text: string, timestamp: string }> for live Q&A context
+const sessionTranscripts = new Map();
+
 // Helper to broadcast messages to all UI clients of a session
 function broadcastToClients(sessionId, type, data) {
+  // Accumulate FINAL transcript segments in server-side buffer for live Q&A context
+  if (type === 'transcript' && data && data.isFinal === true && data.text) {
+    if (!sessionTranscripts.has(sessionId)) {
+      sessionTranscripts.set(sessionId, []);
+    }
+    sessionTranscripts.get(sessionId).push({
+      speaker: data.speaker || 'Unknown',
+      text: data.text.trim(),
+      timestamp: data.timestamp || new Date().toISOString()
+    });
+  }
+
   const sockets = clientSockets.get(sessionId);
   if (!sockets) return;
   
@@ -403,6 +419,7 @@ app.post('/api/sessions/stop', async (req, res) => {
     deepgramProxyGoogle.closeSession(sessionId);
     deepgramProxyZoom.closeSession(sessionId);
     await processManager.killBot(sessionId);
+    sessionTranscripts.delete(sessionId);
     // Trigger post-meeting extraction (fire-and-forget)
     processMeeting(sessionId);
     res.json({ success: true, sessionId });
@@ -1191,6 +1208,17 @@ wss.on('connection', (ws, request) => {
     }));
   }
 
+  ws.on('message', async (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === 'qa_question' && msg.data) {
+        await handleLiveQAQuestion(sessionId, ws, msg.data);
+      }
+    } catch (err) {
+      console.error(`[Server][WS] Error handling message for ${sessionId}:`, err.message);
+    }
+  });
+
   ws.on('close', () => {
     console.log(`[Server] UI Client disconnected from session ${sessionId}`);
     const sockets = clientSockets.get(sessionId);
@@ -1198,10 +1226,142 @@ wss.on('connection', (ws, request) => {
       sockets.delete(ws);
       if (sockets.size === 0) {
         clientSockets.delete(sessionId);
+        if (!processManager.activeSessions.has(sessionId)) {
+          sessionTranscripts.delete(sessionId);
+        }
       }
     }
   });
 });
+
+/**
+ * Handle incoming live Q&A questions from UI WebSocket clients.
+ * Streams answers token-by-token using Groq LLM (llama-3.3-70b-versatile).
+ */
+async function handleLiveQAQuestion(sessionId, ws, data) {
+  const questionId = data.id || `qa_${Date.now()}`;
+  const questionText = (data.question || '').trim();
+
+  if (!questionText) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'qa_error',
+        data: { id: questionId, error: 'Question text cannot be empty.' }
+      }));
+    }
+    return;
+  }
+
+  // 1. Context Precedence:
+  // Primary: sessionTranscripts.get(sessionId)
+  // Fallback: data.contextOverride (client-sent liveLines text) only if server buffer is empty/missing
+  let formattedContext = '';
+  const serverBuffer = sessionTranscripts.get(sessionId);
+
+  if (serverBuffer && serverBuffer.length > 0) {
+    formattedContext = serverBuffer
+      .map(item => `${item.speaker}: ${item.text}`)
+      .join('\n');
+  } else if (data.contextOverride && typeof data.contextOverride === 'string') {
+    formattedContext = data.contextOverride.trim();
+  }
+
+  // Graceful response if transcript context is empty
+  if (!formattedContext || !formattedContext.trim()) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'qa_answer_complete',
+        data: {
+          id: questionId,
+          fullAnswer: "That hasn't come up in the meeting yet (no transcript lines recorded so far).",
+          isFinal: true
+        }
+      }));
+    }
+    return;
+  }
+
+  // 2. Truncate context to most recent ~15,000 words if transcript is very long
+  const words = formattedContext.split(/\s+/);
+  if (words.length > 15000) {
+    formattedContext = '...[earlier transcript omitted]\n' + words.slice(-15000).join(' ');
+  }
+
+  // 3. Verify Groq API Key
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    console.error(`[Server][LiveQA] GROQ_API_KEY missing from .env`);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'qa_error',
+        data: { id: questionId, error: 'GROQ_API_KEY is not configured in .env' }
+      }));
+    }
+    return;
+  }
+
+  // 4. Construct System Prompt & Call Groq LLM with streaming
+  const systemPrompt = `You are a helpful AI Meeting Assistant answering questions during a live meeting.
+Answer the user's question accurately and concisely using ONLY the provided meeting transcript context below.
+CRITICAL INSTRUCTIONS:
+- You must answer ONLY based on what is explicitly stated in the transcript.
+- If the question cannot be answered using the transcript context (or the topic has not been discussed), explicitly state: "That hasn't come up in the meeting yet."
+- Do not make up facts, hallucinate, or reason beyond what was actually spoken in the meeting transcript.`;
+
+  const userPrompt = `Live Meeting Transcript Context:\n${formattedContext}\n\nUser Question: ${questionText}`;
+
+  try {
+    const groq = new Groq({ apiKey });
+    const completion = await groq.chat.completions.create({
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.3,
+      max_tokens: 1024,
+      stream: true
+    });
+
+    let fullAnswer = '';
+
+    for await (const chunk of completion) {
+      // Abort stream loop immediately if socket was closed mid-stream
+      if (ws.readyState !== WebSocket.OPEN) {
+        console.log(`[Server][LiveQA] Socket closed mid-stream for session ${sessionId}, aborting LLM stream.`);
+        return;
+      }
+
+      const token = chunk.choices[0]?.delta?.content || '';
+      if (token) {
+        fullAnswer += token;
+        ws.send(JSON.stringify({
+          type: 'qa_answer_chunk',
+          data: { id: questionId, chunk: token, isFinal: false }
+        }));
+      }
+    }
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'qa_answer_complete',
+        data: {
+          id: questionId,
+          fullAnswer: fullAnswer.trim() || "That hasn't come up in the meeting yet.",
+          isFinal: true
+        }
+      }));
+    }
+  } catch (err) {
+    console.error(`[Server][LiveQA] Groq API error for session ${sessionId}:`, err.message);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'qa_error',
+        data: { id: questionId, error: err.message || 'Failed to generate AI answer.' }
+      }));
+    }
+  }
+}
 
 // Port configuration
 if (process.env.NODE_ENV !== 'test') {
