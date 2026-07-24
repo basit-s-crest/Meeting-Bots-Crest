@@ -38,6 +38,16 @@ async def ingest_segment(
 ):
     """Receive a transcript segment. Push to Redis, then async insert to Postgres."""
 
+    # Auto-resolve project_id from meeting_sessions if not explicitly passed
+    if not req.project_id and req.session_id:
+        try:
+            db = get_db()
+            sess = db.table("meeting_sessions").select("project_id").eq("session_id", req.session_id).limit(1).execute()
+            if sess.data and sess.data[0].get("project_id"):
+                req.project_id = sess.data[0]["project_id"]
+        except Exception:
+            pass
+
     segment = {
         "session_id": req.session_id,
         "project_id": req.project_id,

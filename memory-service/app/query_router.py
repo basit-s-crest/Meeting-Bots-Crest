@@ -5,8 +5,11 @@ for routing. Only the final answer synthesis uses Groq.
 """
 
 import json
+import os
 import asyncio
 from datetime import datetime
+
+print(f"QUERY_ROUTER LOADED - v2 - {os.path.getmtime(__file__)}")
 
 import redis.asyncio as redis
 from fastapi import APIRouter
@@ -257,6 +260,8 @@ async def _query_semantic(project_id: str | None, question: str, chat_history: l
         return {
             "answer": f"Search failed: {e}",
             "citations": [],
+            "answeredVia": "vector_search",
+            "usedFallback": False
         }
 
     events = events_result.data or []
@@ -285,9 +290,15 @@ async def _query_semantic(project_id: str | None, question: str, chat_history: l
         # Step 4a: Try chat history fallback
         if chat_history:
             answer = await _synthesize(question, [], "past meetings", chat_history)
+            answer["citations"] = []
+            answer["answeredVia"] = "chat_history"
+            answer["usedFallback"] = True
             return answer
         # Step 4b: Session metadata fallback — list recent meetings
-        return await _session_fallback(project_id)
+        answer = await _session_fallback(project_id)
+        answer["answeredVia"] = "session_metadata_fallback"
+        answer["usedFallback"] = True
+        return answer
 
     # Step 5: Build context lines and citations
     context_lines = []
@@ -330,6 +341,8 @@ async def _query_semantic(project_id: str | None, question: str, chat_history: l
 
     answer = await _synthesize(question, context_lines, "past meetings", chat_history)
     answer["citations"] = citations
+    answer["answeredVia"] = "vector_search"
+    answer["usedFallback"] = False
     return answer
 
 
@@ -419,12 +432,11 @@ async def query_memory(body: QueryRequest):
     # Step 0: Greeting handler — trivial, avoid hitting the database
     if question.lower().strip().rstrip('.!?') in _GREETINGS:
         return {
-            "answer": "Hello! I am your AI Meeting Knowledge Assistant. "
-                      "Ask me anything about your project's meeting transcripts, "
-                      "key decisions, or action items!",
+            "answer": "Hello! I am your AI Meeting Knowledge Assistant. Ask me anything about your project's meeting transcripts, key decisions, or action items!",
             "citations": [],
+            "answeredVia": "greeting_handler",
+            "usedFallback": False
         }
-
     # Load recent chat history for follow-up resolution
     chat_history = None
     if chat_session_id and project_id:
@@ -450,9 +462,10 @@ async def query_memory(body: QueryRequest):
     intent = _classify_intent(question)
     if intent in ("action_items", "decisions", "risks", "estimates", "meetings"):
         result = await _query_structured(project_id, intent, chat_history)
-        if chat_session_id:
-            await save_message(project_id, chat_session_id, "assistant", result.get("answer", ""))
-        return result
+        if result.get("citations") or (result.get("answer") and not result.get("answer").startswith("No ")):
+            if chat_session_id:
+                await save_message(project_id, chat_session_id, "assistant", result.get("answer", ""))
+            return result
 
     # Step 3: Default — semantic vector search
     result = await _query_semantic(project_id, question, chat_history)

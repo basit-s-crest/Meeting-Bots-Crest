@@ -80,6 +80,47 @@ async function uploadToStorage(localPath, storageName) {
 }
 
 /**
+ * Downloads file text content from Supabase Storage safely (works for public and private buckets).
+ * Accepts either a full URL or a relative storage path (e.g. sessions/:id/transcript.jsonl).
+ *
+ * @param {string} urlOrPath 
+ * @returns {Promise<string>} File content text
+ */
+export async function downloadStorageFile(urlOrPath) {
+  if (!urlOrPath) throw new Error('No URL or path provided to downloadStorageFile');
+
+  // Try to parse relative storage path from full Supabase URL if provided
+  let storagePath = urlOrPath;
+  const match = urlOrPath.match(/\/storage\/v1\/object\/(?:public|authenticated)\/transcripts\/(.+)$/);
+  if (match) {
+    storagePath = decodeURIComponent(match[1]);
+  }
+
+  // 1. Try downloading directly via authenticated Supabase Storage SDK (works for private & public buckets)
+  try {
+    const { data, error } = await supabase.storage
+      .from('transcripts')
+      .download(storagePath);
+    if (!error && data) {
+      return await data.text();
+    }
+  } catch (sdkErr) {
+    console.warn(`[Supabase] SDK download failed for ${storagePath}, attempting direct HTTP fetch...`, sdkErr.message);
+  }
+
+  // 2. Fallback to raw HTTP fetch if URL is a valid web link
+  if (urlOrPath.startsWith('http')) {
+    const fetchRes = await fetch(urlOrPath);
+    if (fetchRes.ok) {
+      return await fetchRes.text();
+    }
+    throw new Error(`HTTP fetch failed with status ${fetchRes.status}`);
+  }
+
+  throw new Error(`Could not download storage file: ${urlOrPath}`);
+}
+
+/**
  * Uploads the transcript file and marks the session as completed in database.
  * 
  * @param {string} sessionId 
@@ -100,6 +141,10 @@ export async function saveSessionEnd(sessionId, botType) {
       }
     } catch (e) {
       console.warn(`[Supabase] Local transcript file not found for upload: ${transcriptFilename}`);
+    }
+
+    if (!publicUrl) {
+      console.error(`[Supabase] ERROR: Failed to upload transcript file to cloud for session ${sessionId}. transcript_file_url will be null!`);
     }
 
     const updateData = { status: 'completed' };

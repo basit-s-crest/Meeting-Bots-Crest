@@ -1,6 +1,9 @@
 {
   "name": "meeting-bots-crest-root",
   "private": true,
+  "scripts": {
+    "start": "node run.js"
+  },
   "workspaces": [
     "Google Meet",
     "Microsoft Teams",

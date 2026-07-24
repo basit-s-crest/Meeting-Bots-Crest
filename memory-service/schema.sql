@@ -44,13 +44,13 @@ CREATE TABLE public.meeting_sessions (
 CREATE TABLE public.transcript_segments (
   id text NOT NULL DEFAULT (gen_random_uuid())::text,
   session_id text NOT NULL,
+  project_id text NOT NULL,
   speaker_label text NOT NULL,
   resolved_name text,
   text text NOT NULL,
   start_ts double precision NOT NULL,
   end_ts double precision NOT NULL,
   is_final boolean NOT NULL DEFAULT true,
-  project_id text NOT NULL,
   embedding public.vector(384),
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT transcript_segments_pkey PRIMARY KEY (id),
@@ -105,6 +105,10 @@ CREATE TABLE public.project_clients (
   CONSTRAINT project_clients_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id),
   CONSTRAINT project_clients_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id)
 );
+
+-- 8. Vector Indexes (HNSW)
+CREATE INDEX IF NOT EXISTS idx_transcript_segments_embedding ON public.transcript_segments USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_meeting_events_embedding ON public.meeting_events USING hnsw (embedding vector_cosine_ops);
 
 
 -- ──────────────────────────────────────────────────────────────────────────────

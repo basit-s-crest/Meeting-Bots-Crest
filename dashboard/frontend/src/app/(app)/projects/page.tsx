@@ -33,7 +33,9 @@ export default function ProjectsPage() {
   function fetchProjects() {
     (async () => {
       try {
-        const res = await fetch(`${BACKEND_URL}/api/projects`);
+        const res = await fetch(`${BACKEND_URL}/api/projects`, {
+          credentials: "include"
+        });
         if (!res.ok) throw new Error("Failed to load projects");
         const data = await res.json();
         setProjects(data);
@@ -54,6 +56,7 @@ export default function ProjectsPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, description }),
+        credentials: "include"
       });
       if (!res.ok) throw new Error("Failed to create project");
 
