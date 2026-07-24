@@ -344,7 +344,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const isCapturing = botStatus === "capturing";
 
   return (
-    <Container className="py-8">
+    <Container className="py-6 max-w-none px-4 sm:px-6 lg:px-8">
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <Link
@@ -357,9 +357,6 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             <h1 className="font-display text-2xl font-bold tracking-tight text-ink">
               Bot orchestrator
             </h1>
-            <p className="text-sm text-ink-mute">
-              Configure platform joins and monitor live speech streams
-            </p>
           </div>
         </div>
         {botStatus !== "idle" ? (
@@ -373,9 +370,9 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
         )}
       </div>
 
-      <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
+      <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Config */}
-        <section className="space-y-6">
+        <section className="space-y-6 lg:col-span-3">
           <Card className="p-6">
             <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-ink">
               <Layers className="h-5 w-5 text-brand-600" />
@@ -497,7 +494,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
         </section>
 
         {/* Monitor */}
-        <section className="space-y-6 lg:col-span-2">
+        <section className="space-y-6 lg:col-span-9">
           <Card className="flex flex-col items-center justify-between gap-6 p-6 sm:flex-row">
             <div className="flex items-center gap-4">
               <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-brand-50 font-display text-2xl font-bold text-brand-600">
@@ -530,106 +527,112 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             </div>
           </Card>
 
-          <Card className="relative flex h-[52vh] flex-col p-6">
-            <h3 className="mb-4 flex items-center gap-2 text-lg font-semibold text-ink">
-              <Volume2 className="h-5 w-5 text-brand-600" />
-              Live transcript stream
-            </h3>
+          {/* Sub-grid for Live Transcript (Column A) and Live Q&A (Column B) */}
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+            {/* Column A: Live Transcript Stream Card */}
+            <Card className="relative flex flex-col p-6 min-h-[440px] max-h-[calc(100vh-280px)] lg:col-span-7">
+              <h3 className="mb-4 flex items-center gap-2 text-lg font-semibold text-ink">
+                <Volume2 className="h-5 w-5 text-brand-600" />
+                Live transcript stream
+              </h3>
 
-            <div
-              ref={transcriptContainerRef}
-              onScroll={handleScroll}
-              className="mb-4 flex-1 space-y-4 overflow-y-auto pr-1 scroll-smooth"
-            >
-              {liveLines.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-3 py-20 text-center">
-                  <Play className="h-10 w-10 animate-pulse text-ink-faint" />
-                  <p className="text-sm text-ink-mute">
-                    Speech will stream here once the bot joins the meeting.
-                  </p>
-                </div>
-              ) : (
-                liveLines.map((line, idx) => (
-                  <div
-                    key={idx}
-                    className={`border border-border bg-surface-2/50 rounded-xl p-4 transition-all duration-200 ${
-                      line.isFinal === false ? "opacity-70 italic border-dashed border-brand-300" : ""
-                    }`}
-                  >
-                    <span className="mb-1 block text-xs font-bold text-brand-600">
-                      {line.speaker}
-                      {line.provisional && (
-                        <span className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-700">
-                          identifying…
-                        </span>
-                      )}
-                    </span>
-                    <p className="text-sm leading-relaxed text-ink-soft">
-                      {line.committedText}
-                      {line.interimText && (
-                        <span className="text-ink-faint italic">{line.committedText ? " " : ""}{line.interimText}</span>
-                      )}
+              <div
+                ref={transcriptContainerRef}
+                onScroll={handleScroll}
+                className="mb-4 flex-1 space-y-4 overflow-y-auto pr-1 scroll-smooth"
+              >
+                {liveLines.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center gap-3 py-20 text-center">
+                    <Play className="h-10 w-10 animate-pulse text-ink-faint" />
+                    <p className="text-sm text-ink-mute">
+                      Speech will stream here once the bot joins the meeting.
                     </p>
                   </div>
-                ))
+                ) : (
+                  liveLines.map((line, idx) => (
+                    <div
+                      key={idx}
+                      className={`border border-border bg-surface-2/50 rounded-xl p-4 transition-all duration-200 ${
+                        line.isFinal === false ? "opacity-70 italic border-dashed border-brand-300" : ""
+                      }`}
+                    >
+                      <span className="mb-1 block text-xs font-bold text-brand-600">
+                        {line.speaker}
+                        {line.provisional && (
+                          <span className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-700">
+                            identifying…
+                          </span>
+                        )}
+                      </span>
+                      <p className="text-sm leading-relaxed text-ink-soft">
+                        {line.committedText}
+                        {line.interimText && (
+                          <span className="text-ink-faint italic">{line.committedText ? " " : ""}{line.interimText}</span>
+                        )}
+                      </p>
+                    </div>
+                  ))
+                )}
+                <div ref={transcriptEndRef} />
+              </div>
+
+              {showJumpButton && (
+                <button
+                  type="button"
+                  onClick={handleJumpToLatest}
+                  className="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-full bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 text-xs font-semibold shadow-lg transition-all flex items-center gap-1.5 z-10 animate-bounce"
+                >
+                  <span>↓ Jump to latest</span>
+                </button>
               )}
-              <div ref={transcriptEndRef} />
-            </div>
+            </Card>
 
-            {showJumpButton && (
-              <button
-                type="button"
-                onClick={handleJumpToLatest}
-                className="absolute bottom-10 left-1/2 -translate-x-1/2 rounded-full bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 text-xs font-semibold shadow-lg transition-all flex items-center gap-1.5 z-10 animate-bounce"
-              >
-                <span>↓ Jump to latest</span>
-              </button>
-            )}
-          </Card>
+            {/* Column B: Live Q&A Overlay Card */}
+            <LiveQAOverlay
+              qaHistory={qaHistory}
+              className="min-h-[440px] max-h-[calc(100vh-280px)] lg:col-span-5"
+              onSendQuestion={(questionText) => {
+                if (!questionText.trim()) return;
+                const id = `qa_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+                const newQA: QAPair = {
+                  id,
+                  question: questionText.trim(),
+                  answer: "",
+                  isStreaming: true,
+                  timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                };
+                setQaHistory(prev => [...prev, newQA]);
 
-          <LiveQAOverlay
-            qaHistory={qaHistory}
-            onSendQuestion={(questionText) => {
-              if (!questionText.trim()) return;
-              const id = `qa_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-              const newQA: QAPair = {
-                id,
-                question: questionText.trim(),
-                answer: "",
-                isStreaming: true,
-                timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-              };
-              setQaHistory(prev => [...prev, newQA]);
+                if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+                  const contextOverride = liveLines
+                    .map(l => `${l.speaker}: ${l.committedText}`)
+                    .filter(t => t.trim().length > 0)
+                    .join("\n");
 
-              if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-                const contextOverride = liveLines
-                  .map(l => `${l.speaker}: ${l.committedText}`)
-                  .filter(t => t.trim().length > 0)
-                  .join("\n");
-
-                socketRef.current.send(JSON.stringify({
-                  type: "qa_question",
-                  data: {
-                    id,
-                    question: questionText.trim(),
-                    contextOverride
-                  }
-                }));
-              } else {
-                setQaHistory(prev => prev.map(item => {
-                  if (item.id === id) {
-                    return {
-                      ...item,
-                      isStreaming: false,
-                      error: "WebSocket is not connected. Please start a bot session."
-                    };
-                  }
-                  return item;
-                }));
-              }
-            }}
-            disabled={botStatus === "idle"}
-          />
+                  socketRef.current.send(JSON.stringify({
+                    type: "qa_question",
+                    data: {
+                      id,
+                      question: questionText.trim(),
+                      contextOverride
+                    }
+                  }));
+                } else {
+                  setQaHistory(prev => prev.map(item => {
+                    if (item.id === id) {
+                      return {
+                        ...item,
+                        isStreaming: false,
+                        error: "WebSocket is not connected. Please start a bot session."
+                      };
+                    }
+                    return item;
+                  }));
+                }
+              }}
+              disabled={botStatus === "idle"}
+            />
+          </div>
         </section>
       </div>
     </Container>

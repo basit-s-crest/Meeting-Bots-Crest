@@ -10,7 +10,7 @@ export default function AppLayout({
   return (
     <div className="flex min-h-full flex-col bg-bg">
       <header className="sticky top-0 z-40 border-b border-border bg-surface/80 backdrop-blur-md">
-        <Container className="flex h-16 items-center justify-between">
+        <Container className="flex h-16 items-center justify-between max-w-none px-4 sm:px-6 lg:px-8">
           <Logo />
           <Link
             href="/"

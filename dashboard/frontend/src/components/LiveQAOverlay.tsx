@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
+import { cn } from "@/lib/cn";
 import { Sparkles, Send, MessageSquare, Loader2, AlertCircle } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -18,12 +19,14 @@ interface LiveQAOverlayProps {
   qaHistory: QAPair[];
   onSendQuestion: (question: string) => void;
   disabled?: boolean;
+  className?: string;
 }
 
 export function LiveQAOverlay({
   qaHistory,
   onSendQuestion,
   disabled = false,
+  className,
 }: LiveQAOverlayProps) {
   const [questionInput, setQuestionInput] = useState("");
   const qaEndRef = useRef<HTMLDivElement | null>(null);
@@ -47,7 +50,7 @@ export function LiveQAOverlay({
   };
 
   return (
-    <Card className="flex flex-col p-6 shadow-sm border border-border bg-surface">
+    <Card className={cn("flex flex-col p-6 shadow-sm border border-border bg-surface", className)}>
       <div className="mb-4 flex items-center justify-between">
         <h3 className="flex items-center gap-2 text-lg font-semibold text-ink">
           <Sparkles className="h-5 w-5 text-brand-600" />
@@ -59,7 +62,7 @@ export function LiveQAOverlay({
       </div>
 
       {/* Q&A Conversation History */}
-      <div className="mb-4 max-h-[260px] space-y-4 overflow-y-auto pr-1">
+      <div className="mb-4 flex-1 min-h-[160px] space-y-4 overflow-y-auto pr-1">
         {qaHistory.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-2 py-8 text-center border border-dashed border-border rounded-xl bg-surface-2/30">
             <MessageSquare className="h-8 w-8 text-ink-faint" />
@@ -124,7 +127,7 @@ export function LiveQAOverlay({
       </div>
 
       {/* Question Input Form */}
-      <form onSubmit={handleSubmit} className="flex gap-2">
+      <form onSubmit={handleSubmit} className="mt-auto flex gap-2">
         <input
           type="text"
           value={questionInput}
