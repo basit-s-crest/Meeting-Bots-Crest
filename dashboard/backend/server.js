@@ -7,13 +7,16 @@ import net from 'net';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import cors from 'cors';
+import { Groq } from 'groq-sdk';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 
 import { processManager } from './process-manager.js';
 import { deepgramProxyGoogle } from './deepgram-proxy-google.js';
 import { deepgramProxyZoom } from './deepgram-proxy-zoom.js';
 import { generateFirefliesReport, calculateSpeakerStats, saveSchedulingData } from './report-generator.js';
 import { supabase } from './supabase-client.js';
-import { uploadReport } from './supabase-helper.js';
+import { uploadReport, downloadStorageFile } from './supabase-helper.js';
 import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
 import { getOAuth2Client, saveRefreshToken, loadRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { calendarRouter } from './calendar/calendar-router.js';
@@ -32,15 +35,216 @@ const app = express();
 app.use(cors({ origin: 'http://localhost:3001', credentials: true }));
 app.use(express.json());
 
+const JWT_SECRET = process.env.JWT_SECRET || 'crest-meet-secure-secret-key-xyz-987';
+
+// Middleware to verify JWT token
+const authMiddleware = (req, res, next) => {
+  let token = null;
+
+  // Try parsing from Cookie header first
+  if (req.headers.cookie) {
+    const cookies = req.headers.cookie.split(';').reduce((acc, c) => {
+      const parts = c.trim().split('=');
+      if (parts.length >= 2) {
+        acc[parts[0]] = parts.slice(1).join('=');
+      }
+      return acc;
+    }, {});
+    token = cookies['token'];
+  }
+
+  // Fallback to Authorization header
+  if (!token && req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+    token = req.headers.authorization.split(' ')[1];
+  }
+
+  if (!token) {
+    return res.status(401).json({ error: 'Authentication required. Please log in.' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded; // { id, email, name }
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired session. Please log in again.' });
+  }
+};
+
+// Middleware to verify project ownership
+const projectGuard = async (req, res, next) => {
+  try {
+    // 1. Resolve Project ID from various possible input locations
+    let projectId = req.params.projectId || req.query.projectId || req.query.project_id || req.body.projectId || req.body.project_id;
+
+    // 2. If no direct Project ID, try to resolve via Session ID or Filename
+    const sessionId = req.params.sessionId || req.body.sessionId || req.query.sessionId || req.body.session_id || req.query.session_id;
+    const filename = req.params.filename || req.body.filename || req.query.filename;
+
+    if (!projectId && (sessionId || filename)) {
+      let finalSessionId = sessionId;
+      if (filename) {
+        const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+        finalSessionId = match ? match[2] : filename.replace('.jsonl', '');
+      }
+
+      if (finalSessionId) {
+        const { data: session } = await supabase
+          .from('meeting_sessions')
+          .select('project_id')
+          .eq('session_id', finalSessionId)
+          .single();
+        if (session) {
+          projectId = session.project_id;
+        }
+      }
+    }
+
+    if (!projectId) {
+      return next();
+    }
+
+    // 3. Verify ownership of the resolved project
+    const { data: project, error } = await supabase
+      .from('projects')
+      .select('user_id')
+      .eq('id', projectId)
+      .single();
+
+    if (error || !project) {
+      return res.status(404).json({ error: 'Project not found.' });
+    }
+
+    if (project.user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Access denied: You do not own this project.' });
+    }
+
+    req.resolvedProjectId = projectId;
+    next();
+  } catch (err) {
+    console.error('[Server] projectGuard error:', err.message);
+    res.status(500).json({ error: 'Internal server authorization error' });
+  }
+};
+
+// Auth Route: User Signup
+app.post('/api/auth/signup', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'Name, email, and password are required fields.' });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Invalid email format.' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+    }
+
+    const { data: existingUser } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', email.toLowerCase())
+      .maybeSingle();
+
+    if (existingUser) {
+      return res.status(400).json({ error: 'An account with this email already exists.' });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(password, salt);
+
+    const { data: newUser, error: createError } = await supabase
+      .from('users')
+      .insert({
+        name,
+        email: email.toLowerCase(),
+        password_hash: passwordHash
+      })
+      .select('id, name, email, created_at')
+      .single();
+
+    if (createError) throw createError;
+
+    const token = jwt.sign({ id: newUser.id, email: newUser.email, name: newUser.name }, JWT_SECRET, { expiresIn: '24h' });
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: false,
+      sameSite: 'lax',
+      maxAge: 24 * 60 * 60 * 1000
+    });
+
+    res.status(201).json({ user: newUser, token });
+  } catch (err) {
+    console.error('[Server] Signup error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Auth Route: User Login
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required.' });
+    }
+
+    const { data: user } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', email.toLowerCase())
+      .maybeSingle();
+
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password_hash);
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+
+    const token = jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: '24h' });
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: false,
+      sameSite: 'lax',
+      maxAge: 24 * 60 * 60 * 1000
+    });
+
+    const userProfile = { id: user.id, name: user.name, email: user.email, created_at: user.created_at };
+    res.json({ user: userProfile, token });
+  } catch (err) {
+    console.error('[Server] Login error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Auth Route: User Logout
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('token');
+  res.json({ success: true, message: 'Logged out successfully.' });
+});
+
+// Auth Route: Get Profile
+app.get('/api/auth/me', authMiddleware, (req, res) => {
+  res.json({ user: req.user });
+});
+
 // Serve static frontend files
 const frontendPublicPath = path.resolve(__dirname, '../frontend/public');
 app.use(express.static(frontendPublicPath));
 
 // Google Calendar Scheduling Routes
-app.use('/api/calendar', calendarRouter);
+app.use('/api/calendar', authMiddleware, projectGuard, calendarRouter);
 
 // Memory Service Routes (cross-meeting query + project memory)
-app.post('/api/memory/query', async (req, res) => {
+app.post('/api/memory/query', authMiddleware, projectGuard, async (req, res) => {
   try {
     const result = await queryMemory(req.body);
     res.json(result);
@@ -49,9 +253,9 @@ app.post('/api/memory/query', async (req, res) => {
   }
 });
 
-app.get('/api/memory/projects/:id', async (req, res) => {
+app.get('/api/memory/projects/:projectId', authMiddleware, projectGuard, async (req, res) => {
   try {
-    const data = await getProjectMemory(req.params.id);
+    const data = await getProjectMemory(req.params.projectId);
     res.json(data || {});
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -59,7 +263,7 @@ app.get('/api/memory/projects/:id', async (req, res) => {
 });
 
 // Live Meetings CRUD API endpoints
-app.post('/api/meetings', async (req, res) => {
+app.post('/api/meetings', authMiddleware, projectGuard, async (req, res) => {
   try {
     const meetingData = req.body;
     if (!meetingData.session_id || !meetingData.bot_type || !meetingData.meeting_url) {
@@ -74,17 +278,38 @@ app.post('/api/meetings', async (req, res) => {
   }
 });
 
-app.get('/api/meetings', async (req, res) => {
+app.get('/api/meetings', authMiddleware, projectGuard, async (req, res) => {
   try {
     const projectId = req.query.projectId || req.query.project_id;
     const includeArchived = req.query.includeArchived !== 'false';
+
+    // If no projectId specified, filter meetings by the user's projects
+    let allowedProjectIds = [];
+    if (!projectId) {
+      const { data: userProjects } = await supabase
+        .from('projects')
+        .select('id')
+        .eq('user_id', req.user.id);
+      allowedProjectIds = (userProjects || []).map(p => p.id);
+      if (allowedProjectIds.length === 0) {
+        return res.json({ meetings: [] });
+      }
+    }
+
     const result = await listMeetings(projectId, includeArchived);
     if (result && result.meetings) {
+      if (!projectId) {
+        result.meetings = result.meetings.filter(m => allowedProjectIds.includes(m.project_id));
+      }
       return res.json(result);
     }
     // Direct Supabase fallback
     let query = supabase.from('meeting_sessions').select('*').order('created_at', { ascending: false });
-    if (projectId) query = query.eq('project_id', projectId);
+    if (projectId) {
+      query = query.eq('project_id', projectId);
+    } else {
+      query = query.in('project_id', allowedProjectIds);
+    }
     if (!includeArchived) query = query.neq('status', 'archived');
     const { data, error } = await query;
     if (error) throw error;
@@ -95,7 +320,7 @@ app.get('/api/meetings', async (req, res) => {
   }
 });
 
-app.get('/api/meetings/:sessionId', async (req, res) => {
+app.get('/api/meetings/:sessionId', authMiddleware, projectGuard, async (req, res) => {
   try {
     const sessionId = req.params.sessionId;
     const result = await getMeeting(sessionId);
@@ -109,7 +334,7 @@ app.get('/api/meetings/:sessionId', async (req, res) => {
   }
 });
 
-app.put('/api/meetings/:sessionId', async (req, res) => {
+app.put('/api/meetings/:sessionId', authMiddleware, projectGuard, async (req, res) => {
   try {
     const sessionId = req.params.sessionId;
     const updateData = req.body;
@@ -131,7 +356,7 @@ app.put('/api/meetings/:sessionId', async (req, res) => {
   }
 });
 
-app.delete('/api/meetings/:sessionId', async (req, res) => {
+app.delete('/api/meetings/:sessionId', authMiddleware, projectGuard, async (req, res) => {
   try {
     const sessionId = req.params.sessionId;
 
@@ -174,7 +399,7 @@ app.delete('/api/meetings/:sessionId', async (req, res) => {
   }
 });
 
-app.delete('/api/transcripts/:filename', async (req, res) => {
+app.delete('/api/transcripts/:filename', authMiddleware, projectGuard, async (req, res) => {
   const filename = req.params.filename;
   const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
   const sessionId = match ? match[2] : filename.replace('.jsonl', '');
@@ -203,11 +428,12 @@ app.delete('/api/transcripts/:filename', async (req, res) => {
 });
 
 // GET list of all projects
-app.get('/api/projects', async (req, res) => {
+app.get('/api/projects', authMiddleware, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('projects')
-      .select('*');
+      .select('*')
+      .eq('user_id', req.user.id);
     if (error) throw error;
     res.json(data || []);
   } catch (err) {
@@ -217,12 +443,12 @@ app.get('/api/projects', async (req, res) => {
 });
 
 // POST create a new project
-app.post('/api/projects', async (req, res) => {
+app.post('/api/projects', authMiddleware, async (req, res) => {
   try {
     const { name, description } = req.body;
     const { data, error } = await supabase
       .from('projects')
-      .insert({ name, description })
+      .insert({ name, description, user_id: req.user.id })
       .select()
       .single();
     if (error) throw error;
@@ -297,8 +523,23 @@ async function getFreePort(startPort = 8090) {
 // Map of sessionId -> set of connected client WebSocket connections
 const clientSockets = new Map(); // sessionId -> Set(WebSocket)
 
+// Map of sessionId -> Array<{ speaker: string, text: string, timestamp: string }> for live Q&A context
+const sessionTranscripts = new Map();
+
 // Helper to broadcast messages to all UI clients of a session
 function broadcastToClients(sessionId, type, data) {
+  // Accumulate FINAL transcript segments in server-side buffer for live Q&A context
+  if (type === 'transcript' && data && data.isFinal === true && data.text) {
+    if (!sessionTranscripts.has(sessionId)) {
+      sessionTranscripts.set(sessionId, []);
+    }
+    sessionTranscripts.get(sessionId).push({
+      speaker: data.speaker || 'Unknown',
+      text: data.text.trim(),
+      timestamp: data.timestamp || new Date().toISOString()
+    });
+  }
+
   const sockets = clientSockets.get(sessionId);
   if (!sockets) return;
   
@@ -313,7 +554,7 @@ function broadcastToClients(sessionId, type, data) {
 /**
  * REST API: Start a bot session
  */
-app.post('/api/sessions/start', async (req, res) => {
+app.post('/api/sessions/start', authMiddleware, projectGuard, async (req, res) => {
   let { botType, meetingUrl, botName, isHeadless, googleDriveFolderId, projectId } = req.body;
 
   if (!botType || !meetingUrl) {
@@ -392,7 +633,7 @@ app.post('/api/sessions/start', async (req, res) => {
 /**
  * REST API: Stop a bot session
  */
-app.post('/api/sessions/stop', async (req, res) => {
+app.post('/api/sessions/stop', authMiddleware, projectGuard, async (req, res) => {
   const { sessionId } = req.body;
 
   if (!sessionId) {
@@ -403,6 +644,7 @@ app.post('/api/sessions/stop', async (req, res) => {
     deepgramProxyGoogle.closeSession(sessionId);
     deepgramProxyZoom.closeSession(sessionId);
     await processManager.killBot(sessionId);
+    sessionTranscripts.delete(sessionId);
     // Trigger post-meeting extraction (fire-and-forget)
     processMeeting(sessionId);
     res.json({ success: true, sessionId });
@@ -414,25 +656,48 @@ app.post('/api/sessions/stop', async (req, res) => {
 /**
  * REST API: List active sessions
  */
-app.get('/api/sessions', (req, res) => {
-  const list = [];
-  for (const [id, session] of processManager.activeSessions.entries()) {
-    list.push({
-      sessionId: id,
-      type: session.type,
-      status: session.status,
-      wsPort: session.wsPort
-    });
+app.get('/api/sessions', authMiddleware, async (req, res) => {
+  try {
+    const { data: userProjects } = await supabase
+      .from('projects')
+      .select('id')
+      .eq('user_id', req.user.id);
+    const allowedProjectIds = new Set((userProjects || []).map(p => p.id));
+
+    const list = [];
+    for (const [id, session] of processManager.activeSessions.entries()) {
+      if (allowedProjectIds.has(session.projectId)) {
+        list.push({
+          sessionId: id,
+          type: session.type,
+          status: session.status,
+          wsPort: session.wsPort,
+          projectId: session.projectId
+        });
+      }
+    }
+    res.json({ sessions: list });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  res.json({ sessions: list });
 });
 
 /**
  * REST API: Get saved transcripts
  */
-app.get('/api/transcripts', async (req, res) => {
+app.get('/api/transcripts', authMiddleware, async (req, res) => {
   try {
-    // 1. Fetch sessions from Supabase database
+    // 1. Fetch user's projects first to filter by ownership
+    const { data: userProjects } = await supabase
+      .from('projects')
+      .select('id')
+      .eq('user_id', req.user.id);
+    const allowedProjectIds = (userProjects || []).map(p => p.id);
+
+    if (allowedProjectIds.length === 0) {
+      return res.json({ transcripts: [] });
+    }
+
     let dbQuery = supabase
       .from('meeting_sessions')
       .select('*')
@@ -448,10 +713,16 @@ app.get('/api/transcripts', async (req, res) => {
         .filter(p => p.length > 0);
     }
 
-    if (projectIds.length === 1) {
-      dbQuery = dbQuery.eq('project_id', projectIds[0]);
-    } else if (projectIds.length > 1) {
+    if (projectIds.length > 0) {
+      // Verify user owns all requested projectIds
+      const unauthorized = projectIds.some(pid => !allowedProjectIds.includes(pid));
+      if (unauthorized) {
+        return res.status(403).json({ error: 'Access denied: You do not own one or more requested projects.' });
+      }
       dbQuery = dbQuery.in('project_id', projectIds);
+    } else {
+      // Filter by the user's projects
+      dbQuery = dbQuery.in('project_id', allowedProjectIds);
     }
 
     const { data: dbSessions, error } = await dbQuery;
@@ -511,7 +782,7 @@ app.get('/api/transcripts', async (req, res) => {
 /**
  * REST API: Read individual transcript file
  */
-app.get('/api/transcripts/:filename', async (req, res) => {
+app.get('/api/transcripts/:filename', authMiddleware, projectGuard, async (req, res) => {
   const filename = req.params.filename;
   
   if (!/^[a-zA-Z0-9_\-\.]+$/.test(filename) || filename.includes('..') || !filename.endsWith('.jsonl')) {
@@ -596,7 +867,7 @@ app.get('/api/transcripts/:filename', async (req, res) => {
 /**
  * REST API: Generate post-meeting report
  */
-app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
+app.post('/api/transcripts/:filename/generate-report', authMiddleware, projectGuard, async (req, res) => {
   const filename = req.params.filename;
   
   // Sanitize: reject if it contains '..' or has non-alphanumeric/underscore/hyphen/dot characters
@@ -623,7 +894,6 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
     botType = type;
     sessionId = sid;
   }
-
   // 1. LOCAL REPORT CACHING CHECK:
   if (fs.existsSync(reportPath)) {
     console.log(`[Server] Report already exists for ${filename}. Loading cached files.`);
@@ -645,18 +915,13 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
   if (dbSession && dbSession.report_file_url) {
     try {
       console.log(`[Server] Report already exists in Supabase for ${filename}. Fetching...`);
-      const reportRes = await fetch(dbSession.report_file_url);
-      if (reportRes.ok) {
-        const reportMarkdown = await reportRes.text();
-        
-        // Fetch scheduling companion JSON from storage (replace report.md with scheduling.json)
+      const reportMarkdown = await downloadStorageFile(dbSession.report_file_url);
+      if (reportMarkdown) {
         let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
         const schedUrl = dbSession.report_file_url.replace('/report.md', '/scheduling.json');
         try {
-          const schedRes = await fetch(schedUrl);
-          if (schedRes.ok) {
-            schedulingData = await schedRes.json();
-          }
+          const schedText = await downloadStorageFile(schedUrl);
+          if (schedText) schedulingData = JSON.parse(schedText);
         } catch (e) {
           console.warn(`[Server] Failed to fetch scheduling companion from Supabase:`, e.message);
         }
@@ -685,72 +950,89 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
         .single();
 
       if (!dbErr && session) {
+        dbSession = session;
+
         // If report markdown is stored in Supabase Storage, fetch and return it directly
         if (session.report_file_url) {
           console.log(`[Server] Fetching report from Supabase storage for ${supaSessionId}...`);
-          const reportRes = await fetch(session.report_file_url);
-          if (reportRes.ok) {
-            const reportMarkdown = await reportRes.text();
-            fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
-            let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
-            if (fs.existsSync(schedulingPath)) {
-              schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
-            } else if (fs.existsSync(legacySchedulingPath)) {
+          try {
+            const reportMarkdown = await downloadStorageFile(session.report_file_url);
+            if (reportMarkdown) {
+              fs.writeFileSync(reportPath, reportMarkdown, 'utf8');
+
+              let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
+              const schedUrl = session.report_file_url.replace('/report.md', '/scheduling.json');
               try {
-                schedulingData = JSON.parse(fs.readFileSync(legacySchedulingPath, 'utf8'));
+                const schedText = await downloadStorageFile(schedUrl);
+                schedulingData = JSON.parse(schedText);
                 fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
-                fs.unlinkSync(legacySchedulingPath);
-                console.log(`[Server] Migrated legacy scheduling file in generate-report: ${schedulingFilename}`);
               } catch (e) {
-                console.error('[Server] Failed to migrate legacy scheduling file in generate-report check:', e.message);
+                if (fs.existsSync(schedulingPath)) {
+                  schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+                } else if (fs.existsSync(legacySchedulingPath)) {
+                  try {
+                    schedulingData = JSON.parse(fs.readFileSync(legacySchedulingPath, 'utf8'));
+                    fs.writeFileSync(schedulingPath, JSON.stringify(schedulingData, null, 2), 'utf8');
+                    fs.unlinkSync(legacySchedulingPath);
+                    console.log(`[Server] Migrated legacy scheduling file in generate-report fallback: ${schedulingFilename}`);
+                  } catch (migErr) {
+                    console.error('[Server] Failed to migrate legacy scheduling file in fallback check:', migErr.message);
+                  }
+                }
               }
+
+              return res.json({
+                success: true,
+                cached: true,
+                report: reportMarkdown,
+                scheduling: schedulingData
+              });
             }
-            return res.json({
-              success: true,
-              cached: true,
-              report: reportMarkdown,
-              scheduling: schedulingData
-            });
+          } catch (fetchErr) {
+            console.warn(`[Server] Failed to download report from Supabase storage for ${supaSessionId}:`, fetchErr.message);
           }
         }
 
         // If report is not in storage, but transcript file is in storage and not on local disk, download transcript
         if (!fs.existsSync(filePath) && session.transcript_file_url) {
-          console.log(`[Server] Fetching transcript from Supabase storage for ${supaSessionId}...`);
-          const transcriptRes = await fetch(session.transcript_file_url);
-          if (transcriptRes.ok) {
-            const transcriptContent = await transcriptRes.text();
-            fs.writeFileSync(filePath, transcriptContent, 'utf8');
-            console.log(`[Server] Successfully downloaded transcript to ${filePath}`);
+          console.log(`[Server] Local transcript missing, downloading from Supabase storage for ${supaSessionId}...`);
+          try {
+            const transcriptContent = await downloadStorageFile(session.transcript_file_url);
+            if (transcriptContent) {
+              fs.writeFileSync(filePath, transcriptContent, 'utf8');
+              console.log(`[Server] Successfully downloaded transcript to ${filePath}`);
+            }
+          } catch (tErr) {
+            console.warn(`[Server] Failed to download transcript from Supabase storage:`, tErr.message);
           }
         }
       }
     } catch (supaErr) {
-      console.warn(`[Server] Supabase storage fallback check failed for ${filename}:`, supaErr.message);
+      console.warn(`[Server] Supabase storage check failed for ${filename}:`, supaErr.message);
     }
   }
 
-  // 2. TRANSCRIPT CHECK (Local check with Supabase download fallback):
-  let isTranscriptTemp = false;
-  if (!fs.existsSync(filePath)) {
-    if (dbSession && dbSession.transcript_file_url) {
+  // 2. LOCAL REPORT CACHING CHECK (Fallback if not found in Supabase):
+  if (fs.existsSync(reportPath)) {
+    console.log(`[Server] Report already exists locally for ${filename}. Loading cached files.`);
+    const reportMarkdown = fs.readFileSync(reportPath, 'utf8');
+    let schedulingData = { scheduling_detected: false, scheduling: null, status: 'none' };
+    if (fs.existsSync(schedulingPath)) {
       try {
-        console.log(`[Server] Local transcript missing, fetching from Supabase for ${filename}...`);
-        const transRes = await fetch(dbSession.transcript_file_url);
-        if (transRes.ok) {
-          const transContent = await transRes.text();
-          fs.writeFileSync(filePath, transContent, 'utf8');
-          isTranscriptTemp = true;
-          console.log(`[Server] Saved fetched transcript locally to: ${filePath}`);
-        } else {
-          return res.status(404).json({ error: `Transcript file not found locally or on Supabase (Status: ${transRes.status})` });
-        }
-      } catch (fetchErr) {
-        return res.status(500).json({ error: `Failed to fetch transcript from Supabase: ${fetchErr.message}` });
-      }
-    } else {
-      return res.status(404).json({ error: 'Transcript file not found' });
+        schedulingData = JSON.parse(fs.readFileSync(schedulingPath, 'utf8'));
+      } catch (e) {}
     }
+    return res.json({
+      success: true,
+      cached: true,
+      report: reportMarkdown,
+      scheduling: schedulingData
+    });
+  }
+
+  // 3. TRANSCRIPT CHECK:
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Transcript file not found locally or on Supabase' });
   }
 
   try {
@@ -773,6 +1055,13 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
 
     const schedulingData = await saveSchedulingData(schedulingPath, scheduling);
 
+    // Parse filename to update Supabase row and upload report
+    const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
+    if (match) {
+      const [_, botType, sessionId] = match;
+      console.log(`[Server] Uploading report to Supabase for session: ${sessionId}`);
+      await uploadReport(sessionId, botType);
+    }
     // Update Supabase row and upload report
     if (sessionId) {
       // Parse filename to update Supabase row and upload report
@@ -842,7 +1131,7 @@ app.post('/api/transcripts/:filename/generate-report', async (req, res) => {
 /**
  * REST API: Get post-meeting report and speaker analytics
  */
-app.get('/api/transcripts/:filename/report', async (req, res) => {
+app.get('/api/transcripts/:filename/report', authMiddleware, projectGuard, async (req, res) => {
   const filename = req.params.filename;
   
   // Sanitize: reject if it contains '..' or has non-alphanumeric/underscore/hyphen/dot characters
@@ -891,17 +1180,14 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
           .single();
         
         if (!error && session && session.report_file_url) {
-          const reportRes = await fetch(session.report_file_url);
-          if (reportRes.ok) {
-            const reportMarkdown = await reportRes.text();
+          try {
+            const reportMarkdown = await downloadStorageFile(session.report_file_url);
             
             // Fetch scheduling companion from Supabase Storage (replace report.md with scheduling.json)
             const schedUrl = session.report_file_url.replace('/report.md', '/scheduling.json');
             try {
-              const schedRes = await fetch(schedUrl);
-              if (schedRes.ok) {
-                schedulingData = await schedRes.json();
-              }
+              const schedText = await downloadStorageFile(schedUrl);
+              schedulingData = JSON.parse(schedText);
             } catch (schedErr) {
               console.warn(`[Server] Failed to fetch scheduling companion from Supabase:`, schedErr.message);
             }
@@ -909,11 +1195,10 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
             // Get transcript contents to calculate statistics
             let lines = [];
             if (session.transcript_file_url) {
-              const transRes = await fetch(session.transcript_file_url);
-              if (transRes.ok) {
-                const transText = await transRes.text();
+              try {
+                const transText = await downloadStorageFile(session.transcript_file_url);
                 lines = transText.split('\n').filter(l => l.trim().length > 0).map(JSON.parse);
-              }
+              } catch (tErr) {}
             }
             
             // Local fallback for transcript calculations if storage fails
@@ -928,6 +1213,8 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
               analytics: stats.analytics,
               scheduling: schedulingData
             });
+          } catch (fetchErr) {
+            console.warn(`[Server] Supabase report download failed for ${filename}:`, fetchErr.message);
           }
         }
       } catch (dbErr) {
@@ -964,7 +1251,7 @@ app.get('/api/transcripts/:filename/report', async (req, res) => {
 /**
  * REST API: Download generated docx report file
  */
-app.get('/api/transcripts/:filename/docx', async (req, res) => {
+app.get('/api/transcripts/:filename/docx', authMiddleware, projectGuard, async (req, res) => {
   const filename = req.params.filename;
   
   if (!/^[a-zA-Z0-9_\-\.]+$/.test(filename) || filename.includes('..') || !filename.endsWith('.jsonl')) {
@@ -1191,6 +1478,17 @@ wss.on('connection', (ws, request) => {
     }));
   }
 
+  ws.on('message', async (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === 'qa_question' && msg.data) {
+        await handleLiveQAQuestion(sessionId, ws, msg.data);
+      }
+    } catch (err) {
+      console.error(`[Server][WS] Error handling message for ${sessionId}:`, err.message);
+    }
+  });
+
   ws.on('close', () => {
     console.log(`[Server] UI Client disconnected from session ${sessionId}`);
     const sockets = clientSockets.get(sessionId);
@@ -1198,10 +1496,142 @@ wss.on('connection', (ws, request) => {
       sockets.delete(ws);
       if (sockets.size === 0) {
         clientSockets.delete(sessionId);
+        if (!processManager.activeSessions.has(sessionId)) {
+          sessionTranscripts.delete(sessionId);
+        }
       }
     }
   });
 });
+
+/**
+ * Handle incoming live Q&A questions from UI WebSocket clients.
+ * Streams answers token-by-token using Groq LLM (llama-3.3-70b-versatile).
+ */
+async function handleLiveQAQuestion(sessionId, ws, data) {
+  const questionId = data.id || `qa_${Date.now()}`;
+  const questionText = (data.question || '').trim();
+
+  if (!questionText) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'qa_error',
+        data: { id: questionId, error: 'Question text cannot be empty.' }
+      }));
+    }
+    return;
+  }
+
+  // 1. Context Precedence:
+  // Primary: sessionTranscripts.get(sessionId)
+  // Fallback: data.contextOverride (client-sent liveLines text) only if server buffer is empty/missing
+  let formattedContext = '';
+  const serverBuffer = sessionTranscripts.get(sessionId);
+
+  if (serverBuffer && serverBuffer.length > 0) {
+    formattedContext = serverBuffer
+      .map(item => `${item.speaker}: ${item.text}`)
+      .join('\n');
+  } else if (data.contextOverride && typeof data.contextOverride === 'string') {
+    formattedContext = data.contextOverride.trim();
+  }
+
+  // Graceful response if transcript context is empty
+  if (!formattedContext || !formattedContext.trim()) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'qa_answer_complete',
+        data: {
+          id: questionId,
+          fullAnswer: "That hasn't come up in the meeting yet (no transcript lines recorded so far).",
+          isFinal: true
+        }
+      }));
+    }
+    return;
+  }
+
+  // 2. Truncate context to most recent ~15,000 words if transcript is very long
+  const words = formattedContext.split(/\s+/);
+  if (words.length > 15000) {
+    formattedContext = '...[earlier transcript omitted]\n' + words.slice(-15000).join(' ');
+  }
+
+  // 3. Verify Groq API Key
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    console.error(`[Server][LiveQA] GROQ_API_KEY missing from .env`);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'qa_error',
+        data: { id: questionId, error: 'GROQ_API_KEY is not configured in .env' }
+      }));
+    }
+    return;
+  }
+
+  // 4. Construct System Prompt & Call Groq LLM with streaming
+  const systemPrompt = `You are a helpful AI Meeting Assistant answering questions during a live meeting.
+Answer the user's question accurately and concisely using ONLY the provided meeting transcript context below.
+CRITICAL INSTRUCTIONS:
+- You must answer ONLY based on what is explicitly stated in the transcript.
+- If the question cannot be answered using the transcript context (or the topic has not been discussed), explicitly state: "That hasn't come up in the meeting yet."
+- Do not make up facts, hallucinate, or reason beyond what was actually spoken in the meeting transcript.`;
+
+  const userPrompt = `Live Meeting Transcript Context:\n${formattedContext}\n\nUser Question: ${questionText}`;
+
+  try {
+    const groq = new Groq({ apiKey });
+    const completion = await groq.chat.completions.create({
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.3,
+      max_tokens: 1024,
+      stream: true
+    });
+
+    let fullAnswer = '';
+
+    for await (const chunk of completion) {
+      // Abort stream loop immediately if socket was closed mid-stream
+      if (ws.readyState !== WebSocket.OPEN) {
+        console.log(`[Server][LiveQA] Socket closed mid-stream for session ${sessionId}, aborting LLM stream.`);
+        return;
+      }
+
+      const token = chunk.choices[0]?.delta?.content || '';
+      if (token) {
+        fullAnswer += token;
+        ws.send(JSON.stringify({
+          type: 'qa_answer_chunk',
+          data: { id: questionId, chunk: token, isFinal: false }
+        }));
+      }
+    }
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'qa_answer_complete',
+        data: {
+          id: questionId,
+          fullAnswer: fullAnswer.trim() || "That hasn't come up in the meeting yet.",
+          isFinal: true
+        }
+      }));
+    }
+  } catch (err) {
+    console.error(`[Server][LiveQA] Groq API error for session ${sessionId}:`, err.message);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'qa_error',
+        data: { id: questionId, error: err.message || 'Failed to generate AI answer.' }
+      }));
+    }
+  }
+}
 
 // Port configuration
 if (process.env.NODE_ENV !== 'test') {

@@ -1,18 +1,24 @@
 const PYTHON_SERVICE_URL = process.env.MEMORY_SERVICE_URL || 'http://127.0.0.1:8001';
 
+// Helper to get service URLs (primary configured URL + default local ports)
+function getServiceUrls() {
+  return [...new Set([PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'].filter(Boolean))];
+}
+
 /**
  * Fire-and-forget: push a transcript segment to the memory service.
  * Called on every Deepgram final chunk during a live meeting.
  */
-function ingestSegment(sessionId, { speaker, text, startTs, endTs, isFinal, projectId }) {
-  const urls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8000'];
-  for (const url of urls) {
+function ingestSegment(sessionId, { speaker, text, startTs, endTs, isFinal, projectId, project_id }) {
+  const pid = projectId || project_id || null;
+  const sid = sessionId;
+  for (const url of getServiceUrls()) {
     fetch(`${url}/api/memory/ingest`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        session_id: sessionId,
-        project_id: projectId ?? null,
+        session_id: sid,
+        project_id: pid,
         speaker,
         text,
         start_ts: startTs ?? 0,
@@ -28,19 +34,18 @@ function ingestSegment(sessionId, { speaker, text, startTs, endTs, isFinal, proj
 /**
  * Ask a natural language question. Returns { answer, citations }.
  */
-async function queryMemory({ question, sessionId, projectId, project_id }) {
+async function queryMemory({ question, sessionId, session_id, projectId, project_id }) {
   const pid = projectId || project_id; // accept both camelCase and snake_case
-  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
-  const uniqueUrls = [...new Set(serviceUrls.filter(Boolean))];
+  const sid = sessionId || session_id;
 
-  for (const url of uniqueUrls) {
+  for (const url of getServiceUrls()) {
     try {
       const res = await fetch(`${url}/api/memory/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           question,
-          session_id: sessionId,
+          session_id: sid,
           project_id: pid,
         }),
       });
@@ -52,7 +57,7 @@ async function queryMemory({ question, sessionId, projectId, project_id }) {
     }
   }
 
-  console.warn('[MemoryClient] Python memory service unreachable.');
+  console.warn('[MemoryClient] Python memory service is unreachable.');
   return {
     answer: "The AI Memory Service is currently unavailable. Please ensure the memory service is running.",
     citations: []
@@ -64,9 +69,8 @@ async function queryMemory({ question, sessionId, projectId, project_id }) {
  * Called when a meeting ends.
  */
 function processMeeting(sessionId) {
-  const urls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8000'];
   console.log(`[MemoryClient] Triggering processMeeting for session ${sessionId}...`);
-  for (const url of urls) {
+  for (const url of getServiceUrls()) {
     fetch(`${url}/api/memory/process-meeting`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -84,8 +88,7 @@ function processMeeting(sessionId) {
  * Fetch project memory rollup for the dashboard.
  */
 async function getProjectMemory(projectId) {
-  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
-  for (const url of serviceUrls) {
+  for (const url of getServiceUrls()) {
     try {
       const res = await fetch(`${url}/api/memory/projects/${projectId}`);
       if (res.ok) return await res.json();
@@ -98,8 +101,7 @@ async function getProjectMemory(projectId) {
  * Meeting CRUD client helpers targeting Python memory service
  */
 async function createMeeting(data) {
-  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
-  for (const url of serviceUrls) {
+  for (const url of getServiceUrls()) {
     try {
       const res = await fetch(`${url}/api/memory/meetings`, {
         method: 'POST',
@@ -113,8 +115,7 @@ async function createMeeting(data) {
 }
 
 async function listMeetings(projectId, includeArchived = true) {
-  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
-  for (const url of serviceUrls) {
+  for (const url of getServiceUrls()) {
     try {
       const q = new URLSearchParams();
       if (projectId) q.append('project_id', projectId);
@@ -127,8 +128,7 @@ async function listMeetings(projectId, includeArchived = true) {
 }
 
 async function getMeeting(sessionId) {
-  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
-  for (const url of serviceUrls) {
+  for (const url of getServiceUrls()) {
     try {
       const res = await fetch(`${url}/api/memory/meetings/${sessionId}`);
       if (res.ok) return await res.json();
@@ -138,8 +138,7 @@ async function getMeeting(sessionId) {
 }
 
 async function updateMeeting(sessionId, updateData) {
-  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
-  for (const url of serviceUrls) {
+  for (const url of getServiceUrls()) {
     try {
       const res = await fetch(`${url}/api/memory/meetings/${sessionId}`, {
         method: 'PUT',
@@ -153,8 +152,7 @@ async function updateMeeting(sessionId, updateData) {
 }
 
 async function deleteMeeting(sessionId) {
-  const serviceUrls = [PYTHON_SERVICE_URL, 'http://127.0.0.1:8001', 'http://127.0.0.1:8000'];
-  for (const url of serviceUrls) {
+  for (const url of getServiceUrls()) {
     try {
       const res = await fetch(`${url}/api/memory/meetings/${sessionId}`, {
         method: 'DELETE'
