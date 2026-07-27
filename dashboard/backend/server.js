@@ -296,12 +296,21 @@ app.get('/api/meetings', authMiddleware, projectGuard, async (req, res) => {
       }
     }
 
+    const filterValidMeetings = (meetings) => {
+      return (meetings || []).filter(m => {
+        if (m.status === 'active' || m.status === 'starting') return true;
+        if (m.status === 'empty') return false;
+        return Boolean(m.transcript_file_url);
+      });
+    };
+
     const result = await listMeetings(projectId, includeArchived);
     if (result && result.meetings) {
+      let filtered = result.meetings;
       if (!projectId) {
-        result.meetings = result.meetings.filter(m => allowedProjectIds.includes(m.project_id));
+        filtered = filtered.filter(m => allowedProjectIds.includes(m.project_id));
       }
-      return res.json(result);
+      return res.json({ meetings: filterValidMeetings(filtered) });
     }
     // Direct Supabase fallback
     let query = supabase.from('meeting_sessions').select('*').order('created_at', { ascending: false });
@@ -313,7 +322,7 @@ app.get('/api/meetings', authMiddleware, projectGuard, async (req, res) => {
     if (!includeArchived) query = query.neq('status', 'archived');
     const { data, error } = await query;
     if (error) throw error;
-    res.json({ meetings: data || [] });
+    res.json({ meetings: filterValidMeetings(data) });
   } catch (err) {
     console.error('[Server] GET /api/meetings error:', err.message);
     res.status(500).json({ error: err.message });
@@ -728,8 +737,15 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
     const { data: dbSessions, error } = await dbQuery;
     if (error) throw error;
 
-    // Convert dbSessions to the format expected by the frontend
-    const list = dbSessions.map(s => ({
+    // Filter dbSessions: Keep active/starting sessions, or completed sessions that have a valid transcript_file_url and are not empty
+    const validDbSessions = (dbSessions || []).filter(s => {
+      if (s.status === 'active' || s.status === 'starting') return true;
+      if (s.status === 'empty') return false;
+      return Boolean(s.transcript_file_url);
+    });
+
+    // Convert validDbSessions to the format expected by the frontend
+    const list = validDbSessions.map(s => ({
       fileName: `${s.bot_type}_${s.session_id}.jsonl`,
       sessionId: s.session_id,
       title: s.title || s.bot_name || 'Meeting Session',
@@ -752,15 +768,17 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
           if (!dbSessionIds.has(sessionId)) {
             try {
               const stats = fs.statSync(path.join(transcriptsDir, f));
-              list.push({
-                fileName: f,
-                sessionId: sessionId,
-                created: stats.birthtime,
-                size: stats.size,
-                isDbBacked: false,
-                botType: type,
-                status: 'completed'
-              });
+              if (stats.size > 0) {
+                list.push({
+                  fileName: f,
+                  sessionId: sessionId,
+                  created: stats.birthtime,
+                  size: stats.size,
+                  isDbBacked: false,
+                  botType: type,
+                  status: 'completed'
+                });
+              }
             } catch (e) {
               // Ignore missing file stats
             }
@@ -1032,7 +1050,12 @@ app.post('/api/transcripts/:filename/generate-report', authMiddleware, projectGu
 
   // 3. TRANSCRIPT CHECK:
   if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Transcript file not found locally or on Supabase' });
+    return res.status(400).json({ error: 'Meeting is empty or no speech was recorded. AI summary report cannot be generated.' });
+  }
+
+  const transcriptStats = fs.statSync(filePath);
+  if (transcriptStats.size === 0) {
+    return res.status(400).json({ error: 'Meeting is empty or no speech was recorded. AI summary report cannot be generated.' });
   }
 
   try {

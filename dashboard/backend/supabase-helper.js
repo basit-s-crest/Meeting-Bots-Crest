@@ -134,23 +134,21 @@ export async function saveSessionEnd(sessionId, botType) {
     let publicUrl = null;
     try {
       const stats = await fs.stat(localTranscriptPath);
-      if (stats.isFile()) {
+      if (stats.isFile() && stats.size > 0) {
         const storagePath = `sessions/${sessionId}/transcript.jsonl`;
         console.log(`[Supabase] Uploading transcript file to cloud: ${storagePath}`);
         publicUrl = await uploadToStorage(localTranscriptPath, storagePath);
+      } else {
+        console.warn(`[Supabase] Transcript file is empty (0 bytes) for session ${sessionId}. Skipping storage upload.`);
       }
     } catch (e) {
       console.warn(`[Supabase] Local transcript file not found for upload: ${transcriptFilename}`);
     }
 
-    if (!publicUrl) {
-      console.error(`[Supabase] ERROR: Failed to upload transcript file to cloud for session ${sessionId}. transcript_file_url will be null!`);
-    }
-
-    const updateData = { status: 'completed' };
-    if (publicUrl) {
-      updateData.transcript_file_url = publicUrl;
-    }
+    const updateData = { 
+      status: publicUrl ? 'completed' : 'empty',
+      transcript_file_url: publicUrl || null
+    };
 
     const { error } = await supabase
       .from('meeting_sessions')
@@ -158,7 +156,7 @@ export async function saveSessionEnd(sessionId, botType) {
       .eq('session_id', sessionId);
 
     if (error) throw error;
-    console.log(`[Supabase] Logged session end and uploaded transcripts for: ${sessionId}`);
+    console.log(`[Supabase] Logged session end for: ${sessionId} (status: ${updateData.status})`);
   } catch (err) {
     console.error(`[Supabase] Failed to log session end for ${sessionId}:`, err.message);
   }
@@ -179,10 +177,13 @@ export async function uploadReport(sessionId, botType) {
     let publicUrl = null;
     try {
       const stats = await fs.stat(localReportPath);
-      if (stats.isFile()) {
+      if (stats.isFile() && stats.size > 0) {
         const storagePath = `sessions/${sessionId}/report.md`;
         console.log(`[Supabase] Uploading report file to cloud: ${storagePath}`);
         publicUrl = await uploadToStorage(localReportPath, storagePath);
+      } else {
+        console.warn(`[Supabase] Report file is empty (0 bytes) for session ${sessionId}. Skipping upload.`);
+        return null;
       }
     } catch (e) {
       console.warn(`[Supabase] Local report file not found for upload: ${reportFilename}`);
@@ -195,13 +196,13 @@ export async function uploadReport(sessionId, botType) {
       const localSchedulingPath = path.join(TRANSCRIPTS_DIR, schedulingFilename);
       try {
         const statsSched = await fs.stat(localSchedulingPath);
-        if (statsSched.isFile()) {
+        if (statsSched.isFile() && statsSched.size > 0) {
           const schedStoragePath = `sessions/${sessionId}/scheduling.json`;
           console.log(`[Supabase] Uploading scheduling companion to cloud: ${schedStoragePath}`);
           await uploadToStorage(localSchedulingPath, schedStoragePath);
         }
       } catch (e) {
-        console.log(`[Supabase] Local scheduling file not found or not created: ${schedulingFilename}`);
+        console.log(`[Supabase] Local scheduling file not found or empty: ${schedulingFilename}`);
       }
 
       const { error } = await supabase

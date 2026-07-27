@@ -82,8 +82,8 @@ async def process_meeting(req: ProcessMeetingRequest):
     # 2. Fetch all transcript segments
     segments = await get_segments(session_id)
     if not segments:
-        print(f"[PostMeeting] No transcript segments found for {session_id}")
-        await mark_meeting_completed(session_id)
+        print(f"[PostMeeting] No transcript segments found for {session_id}. Marking as empty.")
+        await update_meeting(session_id, {"status": "empty", "transcript_file_url": None})
         return {"status": "processed", "events_count": 0, "reason": "no segments"}
 
     # 3. Format transcript text for the LLM

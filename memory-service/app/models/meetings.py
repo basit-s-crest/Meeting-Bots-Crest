@@ -38,7 +38,13 @@ async def list_meetings(project_id: str | None = None, include_archived: bool = 
         query = query.neq("status", "archived")
     query = query.order("created_at", desc=True).limit(limit)
     res = query.execute()
-    return res.data or []
+    raw_data = res.data or []
+    # Filter out empty/cancelled meetings without transcripts (allow active/starting meetings)
+    filtered = [
+        m for m in raw_data
+        if m.get("status") in ("active", "starting") or (m.get("status") != "empty" and m.get("transcript_file_url"))
+    ]
+    return filtered
 
 
 async def update_meeting(session_id: str, update_data: dict) -> dict | None:

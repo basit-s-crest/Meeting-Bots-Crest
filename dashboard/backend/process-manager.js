@@ -223,6 +223,14 @@ class ProcessManager {
 
           if (!fs.existsSync(localTranscriptPath)) {
             console.warn(`[ProcessManager] Transcript file not found at exit: ${localTranscriptPath}`);
+            await saveSessionEnd(sessionId, botType);
+            return;
+          }
+
+          const stats = fs.statSync(localTranscriptPath);
+          if (stats.size === 0) {
+            console.warn(`[ProcessManager] Transcript file is 0 bytes for session ${sessionId}. Marking session as empty and skipping report generation.`);
+            await saveSessionEnd(sessionId, botType);
             return;
           }
 
