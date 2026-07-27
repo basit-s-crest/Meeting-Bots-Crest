@@ -127,7 +127,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
 
   const fetchSessions = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/transcripts?projectId=${projectId}`);
+      const res = await fetch(`${BACKEND_URL}/api/transcripts?projectId=${projectId}`, {
+        credentials: "include"
+      });
       if (!res.ok) throw new Error("Failed to load project session history");
       const data = await res.json();
       setSessions(data.transcripts || []);
@@ -142,7 +144,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     function fetchProjectDetails() {
       (async () => {
         try {
-          const res = await fetch(`${BACKEND_URL}/api/projects`);
+          const res = await fetch(`${BACKEND_URL}/api/projects`, {
+            credentials: "include"
+          });
           if (res.ok) {
             const list: ProjectListItem[] = await res.json();
             const found = list.find((p) => p.id === projectId);
@@ -170,6 +174,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
       const res = await fetch(`${BACKEND_URL}/api/meetings/${renameSession.sessionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ title: renameTitleInput.trim() }),
       });
       if (!res.ok) throw new Error("Failed to rename meeting");
@@ -193,6 +198,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
       const res = await fetch(`${BACKEND_URL}/api/meetings/${session.sessionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ status: newStatus }),
       });
       if (!res.ok) throw new Error(`Failed to ${isArchived ? "unarchive" : "archive"} meeting`);
@@ -280,7 +286,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleViewTranscript = async (session: Session) => {
     setLoadingModal(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`);
+      const res = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`, {
+        credentials: "include"
+      });
       if (!res.ok) throw new Error("Could not download transcript");
       const data = await res.json();
       setActiveTranscript({ sessionId: session.sessionId, lines: data.lines || [] });
@@ -297,11 +305,14 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     try {
       const res = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}/generate-report`, {
         method: "POST",
+        credentials: "include"
       });
       if (!res.ok) throw new Error("Could not retrieve AI report");
       const data = await res.json();
 
-      const transRes = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`);
+      const transRes = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`, {
+        credentials: "include"
+      });
       let speakerStats: Array<{ speaker: string; percentage: number; talkTime: string }> = [];
       if (transRes.ok) {
         const transData = await transRes.json();
@@ -343,9 +354,10 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleConfirmSchedule = async () => {
     if (!activeReport) return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/calendar/schedule`, {
+      const res = await fetch(`${BACKEND_URL}/api/calendar/confirm-report-schedule`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           title: schedTitle,
           date: schedDate,
@@ -377,6 +389,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
       const res = await fetch(`${BACKEND_URL}/api/calendar/dismiss-report-schedule`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           filename: activeReport.filename
         })
