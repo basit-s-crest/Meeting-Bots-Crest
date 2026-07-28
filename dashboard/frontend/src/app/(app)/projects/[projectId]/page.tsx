@@ -505,9 +505,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const displayedSessions = activeTab === "active" ? activeSessions : archivedSessions;
 
   return (
-    <Container className="py-8">
+    <Container className="flex h-[calc(100vh-5.5rem)] flex-col gap-4 overflow-hidden py-3">
       {/* Header */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex shrink-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4">
           <Link
             href="/projects"
@@ -553,11 +553,11 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
       </div>
 
       {/* Grid */}
-      <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
+      <div className="grid flex-1 grid-cols-1 gap-5 overflow-hidden lg:grid-cols-3 min-h-0">
         {/* Sessions Section */}
-        <section className="lg:col-span-2">
-          <Card className="flex h-full flex-col p-6">
-            <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <section className="flex flex-col overflow-hidden lg:col-span-2 min-h-0">
+          <Card className="flex h-full flex-col overflow-hidden p-5">
+            <div className="mb-4 flex shrink-0 flex-wrap items-center justify-between gap-3">
               <h2 className="flex items-center gap-2 text-lg font-semibold text-ink">
                 <FileText className="h-5 w-5 text-brand-600" />
                 Session history
@@ -603,7 +603,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
                 </p>
               </div>
             ) : (
-              <div className="max-h-[70vh] flex-1 space-y-3 overflow-y-auto pr-1">
+              <div className="flex-1 space-y-3 overflow-y-auto pr-1 min-h-0">
                 {displayedSessions.map((session) => (
                   <div
                     key={session.sessionId}
@@ -740,9 +740,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
         </section>
 
         {/* Right Sidebar Section */}
-        <section className="flex flex-col gap-6">
+        <section className="flex flex-col gap-4 overflow-hidden lg:col-span-1 min-h-0">
           {/* Upcoming Meetings Card */}
-          <Card className="p-5">
+          <Card className="shrink-0 p-4">
             <div className="flex items-center justify-between mb-3">
               <h2 className="flex items-center gap-2 text-base font-semibold text-ink">
                 <Calendar className="h-4 w-4 text-brand-600" />
@@ -756,7 +756,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
             ) : upcomingEvents.length === 0 ? (
               <p className="py-3 text-center text-xs text-ink-mute">No upcoming meetings found in Google Calendar for today.</p>
             ) : (
-              <div className="space-y-2.5 max-h-56 overflow-y-auto pr-1">
+              <div className="space-y-2 max-h-28 overflow-y-auto pr-1">
                 {upcomingEvents.map((evt) => (
                   <div key={evt.id} className="rounded-xl border border-border bg-surface-2/60 p-3 text-xs flex flex-col gap-1.5">
                     <div className="flex items-center justify-between gap-2">
@@ -788,13 +788,13 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
           </Card>
 
           {/* Chat Section */}
-          <Card className="flex h-full min-h-[420px] flex-col p-6">
-            <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-ink">
+          <Card className="flex flex-1 flex-col overflow-hidden p-5 min-h-0">
+            <h2 className="mb-3 flex shrink-0 items-center gap-2 text-base font-semibold text-ink">
               <MessageSquare className="h-5 w-5 text-brand-600" />
               Project AI chat
             </h2>
 
-            <div className="mb-4 min-h-[300px] flex-1 space-y-4 overflow-y-auto pr-1">
+            <div className="mb-3 flex-1 min-h-0 space-y-3 overflow-y-auto pr-1">
               {chatMessages.map((msg, idx) => (
                 <div key={idx} className={`flex flex-col ${msg.sender === "user" ? "items-end" : "items-start"}`}>
                   <div
@@ -834,7 +834,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
               <div ref={chatEndRef} />
             </div>
 
-            <form onSubmit={handleAskQuestion} className="flex gap-2 border-t border-border pt-4">
+            <form onSubmit={handleAskQuestion} className="flex shrink-0 gap-2 border-t border-border pt-3">
               <Input
                 placeholder="Ask about meetings…"
                 value={question}

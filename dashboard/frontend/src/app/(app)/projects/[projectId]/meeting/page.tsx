@@ -381,8 +381,8 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const isCapturing = botStatus === "capturing";
 
   return (
-    <Container className="py-6 max-w-none px-4 sm:px-6 lg:px-8">
-      <div className="flex items-center justify-between gap-4">
+    <Container className="flex h-[calc(100vh-5.5rem)] flex-col gap-4 overflow-hidden py-3 max-w-none px-4 sm:px-6 lg:px-8">
+      <div className="flex shrink-0 items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <Link
             href={`/projects/${projectId}`}
@@ -407,16 +407,16 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
         )}
       </div>
 
-      <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-12">
+      <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden lg:grid-cols-12 min-h-0">
         {/* Config */}
-        <section className="space-y-6 lg:col-span-3">
-          <Card className="p-6">
-            <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-ink">
+        <section className="flex flex-col gap-3 overflow-hidden lg:col-span-3 min-h-0">
+          <Card className="flex flex-1 flex-col overflow-hidden p-4 min-h-0">
+            <h2 className="mb-3 flex shrink-0 items-center gap-2 text-base font-semibold text-ink">
               <Layers className="h-5 w-5 text-brand-600" />
               Bot settings
             </h2>
 
-            <form onSubmit={handleLaunchBot} className="space-y-4">
+            <form onSubmit={handleLaunchBot} className="flex flex-1 flex-col justify-between space-y-3 overflow-y-auto pr-1 min-h-0">
               <Select
                 id="bot-type"
                 label="Meeting platform"
@@ -491,7 +491,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             </form>
           </Card>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="grid shrink-0 grid-cols-1 gap-2.5 sm:grid-cols-2">
             <Card className="flex flex-col justify-between p-4">
               <div className="flex items-center gap-2">
                 <span className="text-base shrink-0">📁</span>
@@ -531,8 +531,8 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
         </section>
 
         {/* Monitor */}
-        <section className="space-y-6 lg:col-span-9">
-          <Card className="flex flex-col items-center justify-between gap-6 p-6 sm:flex-row">
+        <section className="flex flex-col gap-3 overflow-hidden lg:col-span-9 min-h-0">
+          <Card className="flex shrink-0 items-center justify-between gap-4 p-3 sm:flex-row">
             <div className="flex items-center gap-4">
               <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-brand-50 font-display text-2xl font-bold text-brand-600">
                 {activeSpeaker === "Connecting…"
@@ -565,10 +565,10 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
           </Card>
 
           {/* Sub-grid for Live Transcript (Column A) and Live Q&A (Column B) */}
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+          <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden lg:grid-cols-12 min-h-0">
             {/* Column A: Live Transcript Stream Card */}
-            <Card className="relative flex flex-col p-6 min-h-[440px] max-h-[calc(100vh-280px)] lg:col-span-7">
-              <h3 className="mb-4 flex items-center gap-2 text-lg font-semibold text-ink">
+            <Card className="relative flex flex-col overflow-hidden p-4 lg:col-span-7 min-h-0">
+              <h3 className="mb-3 flex shrink-0 items-center gap-2 text-base font-semibold text-ink">
                 <Volume2 className="h-5 w-5 text-brand-600" />
                 Live transcript stream
               </h3>
@@ -576,7 +576,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
               <div
                 ref={transcriptContainerRef}
                 onScroll={handleScroll}
-                className="mb-4 flex-1 space-y-4 overflow-y-auto pr-1 scroll-smooth"
+                className="mb-2 flex-1 space-y-3 overflow-y-auto pr-1 scroll-smooth min-h-0"
               >
                 {liveLines.length === 0 ? (
                   <div className="flex flex-col items-center justify-center gap-3 py-20 text-center">
@@ -629,7 +629,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             <LiveQAOverlay
               qaHistory={qaHistory}
               onCitationClick={(lineId) => handleJumpToLine(lineId)}
-              className="min-h-[440px] max-h-[calc(100vh-280px)] lg:col-span-5"
+              className="flex flex-col overflow-hidden lg:col-span-5 h-full min-h-0"
               onSendQuestion={(questionText) => {
                 if (!questionText.trim()) return;
                 const id = `qa_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
