@@ -31,16 +31,23 @@ export function getDefaultDurationMinutes() {
   return DEFAULT_DURATION;
 }
 
-const CALENDAR_TOKEN_PATH = path.join(process.cwd(), 'google_calendar_refresh_token.json');
+function getCandidateTokenPaths() {
+  return [
+    path.resolve(__dirname, '../google_calendar_refresh_token.json'),
+    path.resolve(process.cwd(), 'dashboard/backend/google_calendar_refresh_token.json'),
+    path.resolve(process.cwd(), 'google_calendar_refresh_token.json')
+  ];
+}
 
 /**
  * Saves refresh token to dedicated JSON file and updates process.env in memory.
  */
 export function saveRefreshToken(token) {
   try {
-    fs.writeFileSync(CALENDAR_TOKEN_PATH, JSON.stringify({ refresh_token: token }), 'utf8');
+    const targetPath = getCandidateTokenPaths()[0];
+    fs.writeFileSync(targetPath, JSON.stringify({ refresh_token: token }), 'utf8');
     process.env.GOOGLE_CALENDAR_REFRESH_TOKEN = token;
-    console.log('[Calendar Service] Refresh token saved successfully to google_calendar_refresh_token.json.');
+    console.log(`[Calendar Service] Refresh token saved successfully to ${targetPath}.`);
   } catch (err) {
     console.error('[Calendar Service] Failed to save refresh token:', err.message);
     throw err;
@@ -51,14 +58,16 @@ export function saveRefreshToken(token) {
  * Loads refresh token from dedicated JSON file, falling back to process.env.
  */
 export function loadRefreshToken() {
-  if (fs.existsSync(CALENDAR_TOKEN_PATH)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(CALENDAR_TOKEN_PATH, 'utf8'));
-      if (data.refresh_token) {
-        return data.refresh_token;
+  for (const tokenPath of getCandidateTokenPaths()) {
+    if (fs.existsSync(tokenPath)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+        if (data.refresh_token) {
+          return data.refresh_token;
+        }
+      } catch (e) {
+        console.error(`[Calendar Service] Error reading refresh token file at ${tokenPath}:`, e.message);
       }
-    } catch (e) {
-      console.error('[Calendar Service] Error reading refresh token file:', e.message);
     }
   }
   return process.env.GOOGLE_CALENDAR_REFRESH_TOKEN || null;
@@ -267,4 +276,59 @@ export function handleGoogleApiError(error) {
     status: 500,
     error: `Google Calendar service error: ${errMsg}`
   };
+}
+
+/**
+ * Query primary calendar events in the given time frame.
+ * @param {Date} timeMin 
+ * @param {Date} timeMax 
+ */
+export async function listUpcomingEvents(timeMin, timeMax) {
+  const calendar = await getCalendarClient();
+  const response = await calendar.events.list({
+    calendarId: 'primary',
+    timeMin: timeMin.toISOString(),
+    timeMax: timeMax.toISOString(),
+    singleEvents: true,
+    orderBy: 'startTime',
+  });
+  return response.data.items || [];
+}
+
+/**
+ * Searches location, description, and conferenceData fields for meeting links.
+ * Returns { url, type } or null.
+ * @param {Object} event 
+ */
+export function extractMeetingDetails(event) {
+  if (!event) return null;
+
+  const entryPointUris = event.conferenceData?.entryPoints?.map(ep => ep.uri || '') || [];
+
+  const sources = [
+    event.hangoutLink || '',
+    ...entryPointUris,
+    event.location || '',
+    event.description || '',
+    event.summary || '',
+    event.htmlLink || ''
+  ];
+  
+  const meetRegex = /(https:\/\/meet\.google\.com\/[a-z0-9\-]+)/i;
+  const zoomRegex = /(https:\/\/[a-z0-9\.-]*zoom\.us\/[^\s>"\',\)]+)/i;
+  const teamsRegex = /(https:\/\/[a-z0-9\.-]*teams\.(microsoft|live)\.com\/[^\s>"\',\)]+)/i;
+
+  for (const str of sources) {
+    if (!str) continue;
+    if (meetRegex.test(str)) {
+      return { url: str.match(meetRegex)[0], type: 'google-meet' };
+    }
+    if (zoomRegex.test(str)) {
+      return { url: str.match(zoomRegex)[0], type: 'zoom' };
+    }
+    if (teamsRegex.test(str)) {
+      return { url: str.match(teamsRegex)[0], type: 'teams' };
+    }
+  }
+  return null;
 }

@@ -8,10 +8,13 @@ import {
   parseInstruction,
   createCalendarEvent,
   handleGoogleApiError,
-  getDefaultDurationMinutes
+  getDefaultDurationMinutes,
+  listUpcomingEvents,
+  extractMeetingDetails
 } from './calendar-service.js';
 
 import { supabase } from '../supabase-client.js';
+import { autoJoinScheduler } from './auto-join-scheduler.js';
 
 /**
  * Downloads the scheduling companion JSON from Supabase Storage to local transcripts folder on demand.
@@ -279,7 +282,18 @@ calendarRouter.post('/confirm-report-schedule', async (req, res) => {
   
   const endIsoStr = `${endYear}-${pad(endMonth)}-${pad(endDay)}T${pad(endHour)}:${pad(endMinute)}:${pad(endSecond)}`;
   
-  const description = zoomLink ? `Zoom Meeting Link: ${zoomLink}` : null;
+  let description = null;
+  if (zoomLink) {
+    if (zoomLink.includes('teams.microsoft.com') || zoomLink.includes('teams.live.com')) {
+      description = `Microsoft Teams Meeting Link: ${zoomLink}`;
+    } else if (zoomLink.includes('meet.google.com')) {
+      description = `Google Meet Meeting Link: ${zoomLink}`;
+    } else if (zoomLink.includes('zoom.us')) {
+      description = `Zoom Meeting Link: ${zoomLink}`;
+    } else {
+      description = `Meeting Link: ${zoomLink}`;
+    }
+  }
   const location = zoomLink || null;
   
   try {
@@ -387,4 +401,55 @@ calendarRouter.post('/dismiss-report-schedule', async (req, res) => {
     }
     return res.status(500).json({ error: `Failed to dismiss suggestion: ${err.message}` });
   }
+});
+
+/**
+ * Route: Get upcoming calendar events in next 24 hours.
+ */
+calendarRouter.get('/upcoming', async (req, res) => {
+  try {
+    const now = new Date();
+    const timeMin = now;
+    const timeMax = new Date(now.getTime() + 24 * 60 * 60 * 1000); // next 24 hours
+
+    const events = await listUpcomingEvents(timeMin, timeMax);
+    
+    // Parse events and format them for frontend
+    const formatted = events.map(e => {
+      const meeting = extractMeetingDetails(e);
+      return {
+        id: e.id,
+        summary: e.summary || 'No Title',
+        start: e.start.dateTime || e.start.date,
+        end: e.end.dateTime || e.end.date,
+        meetingUrl: meeting?.url || null,
+        botType: meeting?.type || null
+      };
+    });
+
+    res.json({ events: formatted });
+  } catch (err) {
+    const apiErr = handleGoogleApiError(err);
+    res.status(apiErr.status).json({ error: apiErr.error });
+  }
+});
+
+/**
+ * Route: Get auto-join background scheduler status.
+ */
+calendarRouter.get('/auto-join/status', (req, res) => {
+  res.json({ active: autoJoinScheduler.isActive });
+});
+
+/**
+ * Route: Toggle auto-join background scheduler.
+ */
+calendarRouter.post('/auto-join/toggle', (req, res) => {
+  const { enable, projectId } = req.body;
+  if (enable) {
+    autoJoinScheduler.start(projectId);
+  } else {
+    autoJoinScheduler.stop();
+  }
+  res.json({ active: autoJoinScheduler.isActive });
 });

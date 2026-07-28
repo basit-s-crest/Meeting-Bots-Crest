@@ -517,7 +517,7 @@ const server = createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 // Port finder helper
-async function getFreePort(startPort = 8090) {
+export async function getFreePort(startPort = 8090) {
   return new Promise((resolve) => {
     const srv = net.createServer();
     srv.listen(startPort, () => {
@@ -758,6 +758,10 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
       transcriptFileUrl: s.transcript_file_url,
       reportFileUrl: s.report_file_url
     }));
+
+    const transcriptsDir = path.join(__dirname, 'transcripts');
+    const localFiles = fs.existsSync(transcriptsDir) ? fs.readdirSync(transcriptsDir) : [];
+    const dbSessionIds = new Set(validDbSessions.map(s => s.session_id));
 
     // 2. Add local files that are not in the database (only when no specific projectId filter is requested)
     if (projectIds.length === 0) {
@@ -1336,6 +1340,7 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
   let botSocket = null;
   let attempts = 0;
   const maxAttempts = 120; // 60 seconds total wait
+  let logStream = null;
 
   // Select the right Deepgram proxy based on bot type.
   // Google Meet uses the new SpeakerBinder (speaker_event messages as ground truth).
@@ -1352,10 +1357,10 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
       console.log(`[Server] Connected to bot audio stream for session ${sessionId}`);
       broadcastToClients(sessionId, 'status', { status: 'capturing' });
 
-      // Create transcript log file for Meet/Zoom (disabled — using Supabase only)
-      // const transcriptsDir = path.join(__dirname, 'transcripts');
-      // const logPath = path.join(transcriptsDir, `${processManager.getSession(sessionId)?.type || 'session'}_${sessionId}.jsonl`);
-      // const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+      // Create transcript log file for Meet/Zoom
+      const transcriptsDir = path.join(__dirname, 'transcripts');
+      const logPath = path.join(transcriptsDir, `${processManager.getSession(sessionId)?.type || 'session'}_${sessionId}.jsonl`);
+      logStream = fs.createWriteStream(logPath, { flags: 'a' });
 
       // Initialize Deepgram Proxy connection
       dgProxy.initializeSession(sessionId, {
@@ -1363,10 +1368,10 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
         onTranscript: (event) => {
           // Send to UI clients
           broadcastToClients(sessionId, 'transcript', event);
-          // Write to local jsonl file if final (disabled — using Supabase only)
-          // if (event.isFinal) {
-          //   logStream.write(JSON.stringify(event) + '\n');
-          // }
+          // Write to local jsonl file if final
+          if (event.isFinal && logStream) {
+            logStream.write(JSON.stringify(event) + '\n');
+          }
           // Push to memory service for cross-meeting search (Supabase)
           if (event.isFinal) {
             ingestSegment(sessionId, {
@@ -1448,6 +1453,11 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
     botSocket.on('close', () => {
       console.log(`[Server] Bot audio stream closed for session ${sessionId}`);
       dgProxy.closeSession(sessionId);
+      if (logStream) {
+        try {
+          logStream.end();
+        } catch (e) {}
+      }
     });
 
     botSocket.on('error', (err) => {

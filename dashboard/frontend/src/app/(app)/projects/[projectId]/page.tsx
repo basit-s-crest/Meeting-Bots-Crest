@@ -1,10 +1,11 @@
 "use client";
 
 import { use, useEffect, useState, useRef } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   ArrowLeft, FileText, Calendar, MessageSquare, Play, Send, Sparkles, Download, Eye, Clock, CheckCircle2, AlertCircle, X,
-  MoreVertical, Edit2, Archive, ArchiveRestore, Trash2, Check, AlertTriangle
+  MoreVertical, Edit2, Archive, ArchiveRestore, Trash2, Check, AlertTriangle, Wifi, WifiOff
 } from "lucide-react";
 import { Container } from "@/components/ui/Container";
 import { Card } from "@/components/ui/Card";
@@ -139,6 +140,66 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
       setLoading(false);
     }
   };
+
+  // useRouter hook
+  const router = useRouter();
+
+  // Upcoming Meetings State
+  const [upcomingEvents, setUpcomingEvents] = useState<any[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(false);
+
+  const fetchUpcomingEvents = async () => {
+    setEventsLoading(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/calendar/upcoming`);
+      if (res.ok) {
+        const data = await res.json();
+        setUpcomingEvents(data.events || []);
+      }
+    } catch {
+    } finally {
+      setEventsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchUpcomingEvents();
+  }, []);
+
+  // Auto-Connect Bot State
+  const [autoJoinActive, setAutoJoinActive] = useState(false);
+
+  const checkAutoJoinStatus = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/calendar/auto-join/status`);
+      if (res.ok) {
+        const data = await res.json();
+        setAutoJoinActive(!!data.active);
+      }
+    } catch {
+    }
+  };
+
+  const toggleAutoJoin = async () => {
+    try {
+      const nextState = !autoJoinActive;
+      const res = await fetch(`${BACKEND_URL}/api/calendar/auto-join/toggle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enable: nextState, projectId })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAutoJoinActive(!!data.active);
+      }
+    } catch {
+      alert("Failed to toggle Auto-Connect Bot");
+    }
+  };
+
+  useEffect(() => {
+    checkAutoJoinStatus();
+  }, []);
 
   useEffect(() => {
     function fetchProjectDetails() {
@@ -463,12 +524,32 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
             </p>
           </div>
         </div>
-        <Link href={`/projects/${projectId}/meeting`}>
-          <Button>
-            <Play className="h-4 w-4" />
-            Launch bot session
-          </Button>
-        </Link>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={toggleAutoJoin}
+            className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all ${
+              autoJoinActive
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20"
+                : "border-border bg-surface-2 text-ink-mute hover:bg-surface-3 hover:text-ink"
+            }`}
+            title="Automatically connect bot to Google Calendar meetings starting in the next 15 minutes"
+          >
+            {autoJoinActive ? (
+              <Wifi className="h-3.5 w-3.5 text-emerald-500 animate-pulse" />
+            ) : (
+              <WifiOff className="h-3.5 w-3.5 text-ink-mute" />
+            )}
+            Auto-Connect Bot: {autoJoinActive ? "ON" : "OFF"}
+          </button>
+
+          <Link href={`/projects/${projectId}/meeting`}>
+            <Button>
+              <Play className="h-4 w-4" />
+              Launch bot session
+            </Button>
+          </Link>
+        </div>
       </div>
 
       {/* Grid */}
@@ -658,9 +739,56 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
           </Card>
         </section>
 
-        {/* Chat Section */}
-        <section>
-          <Card className="flex h-full max-h-[85vh] flex-col p-6">
+        {/* Right Sidebar Section */}
+        <section className="flex flex-col gap-6">
+          {/* Upcoming Meetings Card */}
+          <Card className="p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="flex items-center gap-2 text-base font-semibold text-ink">
+                <Calendar className="h-4 w-4 text-brand-600" />
+                Upcoming Meetings (Next 24h)
+              </h2>
+              {eventsLoading && <Sparkles className="h-3.5 w-3.5 animate-spin text-brand-600" />}
+            </div>
+
+            {eventsLoading ? (
+              <p className="py-3 text-center text-xs text-ink-mute">Checking calendar…</p>
+            ) : upcomingEvents.length === 0 ? (
+              <p className="py-3 text-center text-xs text-ink-mute">No upcoming meetings found in Google Calendar for today.</p>
+            ) : (
+              <div className="space-y-2.5 max-h-56 overflow-y-auto pr-1">
+                {upcomingEvents.map((evt) => (
+                  <div key={evt.id} className="rounded-xl border border-border bg-surface-2/60 p-3 text-xs flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-ink truncate max-w-[70%]" title={evt.summary}>
+                        {evt.summary}
+                      </span>
+                      {evt.botType && <Badge tone="brand">{evt.botType}</Badge>}
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] text-ink-mute">
+                      <span>{new Date(evt.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                      {evt.meetingUrl ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            router.push(`/projects/${projectId}/meeting?url=${encodeURIComponent(evt.meetingUrl)}&type=${evt.botType || 'google-meet'}`);
+                          }}
+                          className="font-semibold text-brand-600 hover:text-brand-700 hover:underline"
+                        >
+                          Join Session
+                        </button>
+                      ) : (
+                        <span className="italic text-ink-faint">No link attached</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          {/* Chat Section */}
+          <Card className="flex h-full min-h-[420px] flex-col p-6">
             <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-ink">
               <MessageSquare className="h-5 w-5 text-brand-600" />
               Project AI chat

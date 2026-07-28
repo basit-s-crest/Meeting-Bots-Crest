@@ -13,6 +13,8 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
   let projectB;
   let sessionAId;
   let sessionBId;
+  let token;
+  let testUser;
 
   before(async () => {
     // Start server on an ephemeral port
@@ -24,10 +26,27 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
       });
     });
 
-    // 1. Create project A and project B
+    // 0. Sign up a test user
+    const signupRes = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Test User',
+        email: `testuser_${Date.now()}_${Math.random().toString(36).substring(2, 6)}@example.com`,
+        password: 'password123'
+      })
+    });
+    const signupData = await signupRes.json();
+    if (!signupRes.ok) {
+      throw new Error(`Failed to sign up test user: ${signupData.error}`);
+    }
+    token = signupData.token;
+    testUser = signupData.user;
+
+    // 1. Create project A and project B linked to the test user
     const { data: projA, error: errA } = await supabase
       .from('projects')
-      .insert({ name: 'UnitTest Project A ' + Date.now(), description: 'Test project A' })
+      .insert({ name: 'UnitTest Project A ' + Date.now(), description: 'Test project A', user_id: testUser.id })
       .select()
       .single();
     if (errA) throw new Error(`Failed to create Project A: ${errA.message}`);
@@ -35,7 +54,7 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
 
     const { data: projB, error: errB } = await supabase
       .from('projects')
-      .insert({ name: 'UnitTest Project B ' + Date.now(), description: 'Test project B' })
+      .insert({ name: 'UnitTest Project B ' + Date.now(), description: 'Test project B', user_id: testUser.id })
       .select()
       .single();
     if (errB) throw new Error(`Failed to create Project B: ${errB.message}`);
@@ -53,7 +72,8 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
         meeting_url: 'https://zoom.us/test-a',
         bot_name: 'Test Bot A',
         status: 'completed',
-        project_id: projectA.id
+        project_id: projectA.id,
+        transcript_file_url: 'https://example.com/test-a.jsonl'
       });
     if (sessErrA) throw new Error(`Failed to insert session A: ${sessErrA.message}`);
 
@@ -65,13 +85,14 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
         meeting_url: 'https://meet.google.com/test-b',
         bot_name: 'Test Bot B',
         status: 'completed',
-        project_id: projectB.id
+        project_id: projectB.id,
+        transcript_file_url: 'https://example.com/test-b.jsonl'
       });
     if (sessErrB) throw new Error(`Failed to insert session B: ${sessErrB.message}`);
   });
 
   after(async () => {
-    // Cleanup sessions and projects created during test
+    // Cleanup sessions, projects and users created during test
     if (sessionAId) {
       await supabase.from('meeting_sessions').delete().eq('session_id', sessionAId);
     }
@@ -84,6 +105,9 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
     if (projectB?.id) {
       await supabase.from('projects').delete().eq('id', projectB.id);
     }
+    if (testUser?.id) {
+      await supabase.from('users').delete().eq('id', testUser.id);
+    }
 
     if (server) {
       await new Promise((resolve) => server.close(resolve));
@@ -91,7 +115,9 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
   });
 
   it("asserts project A's read returns project A's transcript and NEVER project B's data", async () => {
-    const res = await fetch(`${baseUrl}/api/transcripts?projectId=${projectA.id}`);
+    const res = await fetch(`${baseUrl}/api/transcripts?projectId=${projectA.id}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     const sessionIds = body.transcripts.map(t => t.sessionId);
@@ -101,7 +127,9 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
   });
 
   it("asserts project B's read returns project B's transcript and NEVER project A's data", async () => {
-    const res = await fetch(`${baseUrl}/api/transcripts?projectId=${projectB.id}`);
+    const res = await fetch(`${baseUrl}/api/transcripts?projectId=${projectB.id}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     const sessionIds = body.transcripts.map(t => t.sessionId);
@@ -111,7 +139,9 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
   });
 
   it('handles empty string projectId ("") by falling back to unfiltered read without errors', async () => {
-    const res = await fetch(`${baseUrl}/api/transcripts?projectId=`);
+    const res = await fetch(`${baseUrl}/api/transcripts?projectId=`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     const sessionIds = body.transcripts.map(t => t.sessionId);
@@ -121,7 +151,9 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
   });
 
   it('handles whitespace projectId ("   ") without errors', async () => {
-    const res = await fetch(`${baseUrl}/api/transcripts?projectId=%20%20%20`);
+    const res = await fetch(`${baseUrl}/api/transcripts?projectId=%20%20%20`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     const sessionIds = body.transcripts.map(t => t.sessionId);
@@ -131,7 +163,9 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
   });
 
   it('handles multiple projectId values in query (array instead of string)', async () => {
-    const res = await fetch(`${baseUrl}/api/transcripts?projectId=${projectA.id}&projectId=${projectB.id}`);
+    const res = await fetch(`${baseUrl}/api/transcripts?projectId=${projectA.id}&projectId=${projectB.id}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     const sessionIds = body.transcripts.map(t => t.sessionId);
