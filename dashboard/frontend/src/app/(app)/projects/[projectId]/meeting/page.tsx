@@ -62,9 +62,31 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const visualizerTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    // Auto-detect and connect to any active session running on backend
+    // Auto-detect and connect to active session running on backend
     (async () => {
       try {
+        const searchParams = new URLSearchParams(window.location.search);
+        const urlSessionId = searchParams.get("sessionId");
+
+        if (urlSessionId) {
+          // If sessionId is explicitly passed in URL query parameter
+          const res = await fetch(`${BACKEND_URL}/api/sessions/${urlSessionId}`);
+          if (res.ok) {
+            const data = await res.json();
+            const session = data.session;
+            if (session && session.sessionId) {
+              setActiveSessionId(session.sessionId);
+              setBotStatus(session.status || "capturing");
+              if (session.botType) setBotType(session.botType);
+              if (session.meetingUrl) setMeetingUrl(session.meetingUrl);
+              if (session.botName) setBotName(session.botName);
+              connectWebSocket(session.sessionId);
+              return;
+            }
+          }
+        }
+
+        // Fallback: check active sessions list
         const res = await fetch(`${BACKEND_URL}/api/sessions`);
         if (res.ok) {
           const data = await res.json();
@@ -78,7 +100,6 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
               if (active.botName) setBotName(active.botName);
               connectWebSocket(active.sessionId);
             }
-
           }
         }
       } catch (err) {
@@ -153,6 +174,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
       const res = await fetch(`${BACKEND_URL}/api/sessions/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           botType,
           meetingUrl,
@@ -322,9 +344,13 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
       const res = await fetch(`${BACKEND_URL}/api/sessions/stop`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: activeSessionId })
+        credentials: "include",
+        body: JSON.stringify({ sessionId: activeSessionId, projectId })
       });
-      if (!res.ok) throw new Error("Stop request failed");
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Stop request failed");
+      }
 
       disconnectWebSocket();
       setActiveSessionId(null);
@@ -357,9 +383,18 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             </h1>
           </div>
         </div>
-        {botStatus !== "idle" ? (
-          <Badge tone="success">
-            <Wifi className="h-3.5 w-3.5 animate-pulse" /> Active connection
+        {botStatus !== "idle" && botStatus !== "stopped" ? (
+          <Badge tone={botStatus === "capturing" ? "success" : "warning"}>
+            <Wifi className="h-3.5 w-3.5 animate-pulse" />{" "}
+            {botStatus === "capturing"
+              ? "Capturing Live Audio"
+              : botStatus === "joining"
+              ? "Bot Joining..."
+              : botStatus === "starting"
+              ? "Bot Starting..."
+              : botStatus === "stopping"
+              ? "Stopping Bot..."
+              : "Active connection"}
           </Badge>
         ) : (
           <Badge tone="neutral">

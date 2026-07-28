@@ -264,7 +264,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
       await fetch(`${BACKEND_URL}/api/calendar/auto-join/settings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: newVal, projectId: targetProjectId || projectId })
+        body: JSON.stringify({ enabled: newVal, projectId })
       });
     } catch (err) {
       console.error("Failed to toggle auto-join setting:", err);
@@ -694,22 +694,6 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
                     />
                     <span>Auto-join Google Meet meetings</span>
                   </label>
-                  {allProjects.length > 0 && (
-                    <div className="flex items-center gap-2 pt-0.5">
-                      <span className="text-[11px] text-ink-mute font-medium">Assign Auto-Joins To:</span>
-                      <select
-                        value={targetProjectId || projectId}
-                        onChange={(e) => handleChangeTargetProject(e.target.value)}
-                        className="rounded-lg border border-border bg-surface px-2 py-0.5 text-xs font-semibold text-ink shadow-sm focus:border-brand-500 focus:outline-none"
-                      >
-                        {allProjects.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
                 </div>
               ) : (
                 <p className="text-xs text-ink-mute">Sync calendar events & enable automatic bot joins</p>

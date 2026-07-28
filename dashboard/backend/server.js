@@ -11,7 +11,7 @@ import { Groq } from 'groq-sdk';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
-import { processManager, setOnBotStartCallback } from './process-manager.js';
+import { processManager, setOnBotStartCallback, setOnBotStopCallback } from './process-manager.js';
 
 import { deepgramProxyGoogle } from './deepgram-proxy-google.js';
 import { deepgramProxyZoom } from './deepgram-proxy-zoom.js';
@@ -246,26 +246,75 @@ const frontendPublicPath = path.resolve(__dirname, '../frontend/public');
 app.post('/api/calendar/webhook', handleWebhookNotification);
 
 // Real-time Event Stream (Server-Sent Events) for instant backend-to-frontend notifications
-const sseClients = new Set();
+const sseClients = new Map(); // userId -> Set<Response>
 
-export function broadcastGlobalEvent(eventType, data) {
+export function broadcastToUser(userId, eventType, data) {
+  if (!userId) return;
+  const userClients = sseClients.get(String(userId));
+  if (!userClients || userClients.size === 0) return;
   const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const clientRes of sseClients) {
+  for (const clientRes of userClients) {
     try {
       clientRes.write(payload);
     } catch (e) {
-      sseClients.delete(clientRes);
+      userClients.delete(clientRes);
     }
   }
 }
 
-setOnBotStartCallback((data) => {
+export function broadcastGlobalEvent(eventType, data) {
+  const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const userClients of sseClients.values()) {
+    for (const clientRes of userClients) {
+      try {
+        clientRes.write(payload);
+      } catch (e) {
+        userClients.delete(clientRes);
+      }
+    }
+  }
+}
+
+setOnBotStartCallback(async (data) => {
   console.log(`[EventStream] Emitting bot_started event for session ${data.sessionId}`);
-  broadcastGlobalEvent('bot_started', data);
+
+  // Automatically connect backend to bot audio stream for Deepgram transcription
+  if (data.sessionId && data.wsPort) {
+    connectToBotAudioStream(data.sessionId, data.wsPort, data.botType || 'google-meet', data.projectId);
+  }
+
+  let targetUserId = null;
+  if (data.projectId && supabase) {
+    try {
+      const { data: proj } = await supabase
+        .from('projects')
+        .select('user_id')
+        .eq('id', data.projectId)
+        .single();
+      if (proj && proj.user_id) {
+        targetUserId = proj.user_id;
+      }
+    } catch (err) {
+      console.error('[EventStream] Error fetching project owner for bot_started event:', err.message);
+    }
+  }
+
+  if (targetUserId) {
+    console.log(`[EventStream] Broadcasting bot_started to target user ${targetUserId}`);
+    broadcastToUser(targetUserId, 'bot_started', data);
+  } else {
+    console.log(`[EventStream] Broadcasting bot_started globally (no target user found)`);
+    broadcastGlobalEvent('bot_started', data);
+  }
+});
+
+setOnBotStopCallback((data) => {
+  console.log(`[EventStream] Emitting bot_stopped event for session ${data.sessionId}`);
+  broadcastGlobalEvent('bot_stopped', data);
 });
 
 
-app.get('/api/events/subscribe', (req, res) => {
+app.get('/api/events/subscribe', authMiddleware, (req, res) => {
   const origin = req.headers.origin || 'http://localhost:3001';
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -275,12 +324,20 @@ app.get('/api/events/subscribe', (req, res) => {
     'Access-Control-Allow-Credentials': 'true'
   });
 
-
   res.write(`event: connected\ndata: ${JSON.stringify({ message: 'Connected to event stream' })}\n\n`);
-  sseClients.add(res);
+
+  const userId = String(req.user.id);
+  if (!sseClients.has(userId)) {
+    sseClients.set(userId, new Set());
+  }
+  const userClients = sseClients.get(userId);
+  userClients.add(res);
 
   req.on('close', () => {
-    sseClients.delete(res);
+    userClients.delete(res);
+    if (userClients.size === 0) {
+      sseClients.delete(userId);
+    }
   });
 });
 
@@ -311,6 +368,56 @@ app.post('/api/sessions/update-project', authMiddleware, async (req, res) => {
     res.json({ success: true, sessionId, projectId });
   } catch (err) {
     console.error('[Server] Error updating session project ID:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint to fetch details of a single active or stored session
+app.get('/api/sessions/:sessionId', authMiddleware, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    // Check in-memory active sessions first
+    const active = processManager.activeSessions.get(sessionId);
+    if (active) {
+      return res.json({
+        session: {
+          sessionId,
+          botType: active.type,
+          status: active.status || 'capturing',
+          wsPort: active.wsPort,
+          meetingUrl: active.meetingUrl,
+          botName: active.botName,
+          projectId: active.projectId,
+          googleDriveFolderId: active.googleDriveFolderId
+        }
+      });
+    }
+
+    // Fallback to Supabase database if session has stopped/stored
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('meeting_sessions')
+        .select('*')
+        .eq('session_id', sessionId)
+        .single();
+      if (data) {
+        return res.json({
+          session: {
+            sessionId: data.session_id,
+            botType: data.bot_type,
+            status: data.status || 'stopped',
+            meetingUrl: data.meeting_url,
+            botName: data.bot_name,
+            projectId: data.project_id
+          }
+        });
+      }
+    }
+
+    res.status(404).json({ error: 'Session not found' });
+  } catch (err) {
+    console.error('[Server] Error fetching session by ID:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -739,7 +846,7 @@ app.post('/api/sessions/start', authMiddleware, projectGuard, async (req, res) =
 /**
  * REST API: Stop a bot session
  */
-app.post('/api/sessions/stop', authMiddleware, projectGuard, async (req, res) => {
+app.post('/api/sessions/stop', authMiddleware, async (req, res) => {
   const { sessionId } = req.body;
 
   if (!sessionId) {
@@ -835,12 +942,8 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
     const { data: dbSessions, error } = await dbQuery;
     if (error) throw error;
 
-    // Filter dbSessions: Keep active/starting/capturing sessions, or completed sessions that have a valid transcript_file_url and are not empty
-    const validDbSessions = (dbSessions || []).filter(s => {
-      if (s.status === 'active' || s.status === 'starting' || s.status === 'capturing') return true;
-      if (s.status === 'empty') return false;
-      return Boolean(s.transcript_file_url);
-    });
+    // Keep all valid meeting sessions for the project except deleted ones
+    const validDbSessions = (dbSessions || []).filter(s => s.status !== 'deleted');
 
 
     // Convert validDbSessions to the format expected by the frontend
@@ -853,7 +956,7 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
       size: 0, // DB-backed files sizes are fetched from storage metadata if needed
       isDbBacked: true,
       botType: s.bot_type,
-      status: s.status,
+      status: s.status === 'empty' ? 'completed' : s.status,
       transcriptFileUrl: s.transcript_file_url,
       reportFileUrl: s.report_file_url
     }));
@@ -1427,10 +1530,19 @@ app.get('/api/transcripts/:filename/docx', authMiddleware, projectGuard, async (
   }
 });
 
+const connectedAudioSessions = new Set();
+
 /**
  * Backend WebSocket logic: connect to Google Meet/Zoom's output port
  */
 function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
+  if (!sessionId || !wsPort) return;
+  if (connectedAudioSessions.has(sessionId)) {
+    console.log(`[Server] Already connected to audio stream for session ${sessionId}`);
+    return;
+  }
+  connectedAudioSessions.add(sessionId);
+
   const url = `ws://localhost:${wsPort}`;
   let botSocket = null;
   let attempts = 0;
@@ -1600,6 +1712,20 @@ wss.on('connection', (ws, request) => {
     }));
   }
 
+  // Replay existing transcript history to late-connecting UI client
+  const pastLines = sessionTranscripts.get(sessionId) || [];
+  for (const line of pastLines) {
+    ws.send(JSON.stringify({
+      type: 'transcript',
+      data: {
+        speaker: line.speaker || 'Unknown',
+        text: line.text || '',
+        isFinal: true,
+        timestamp: line.timestamp || new Date().toISOString()
+      }
+    }));
+  }
+
   ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data.toString());
@@ -1763,6 +1889,11 @@ if (process.env.NODE_ENV !== 'test') {
     console.log(`Central Meeting Bot Dashboard is running at: http://localhost:${PORT}`);
     console.log(`==================================================================\n`);
     startCalendarPoller();
+    if (supabase) {
+      supabase.from('meeting_sessions').update({ status: 'completed' }).eq('status', 'empty').then(() => {
+        console.log('[Server] Migrated legacy empty session statuses to completed.');
+      }).catch(() => {});
+    }
   });
 
 }

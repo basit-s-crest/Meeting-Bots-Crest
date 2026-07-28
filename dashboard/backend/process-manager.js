@@ -10,9 +10,14 @@ import { saveMarkdownAsDocx } from './docx-generator.js';
 import { processMeeting } from './memory-client.js';
 
 let onBotStartCallback = null;
+let onBotStopCallback = null;
 
 export function setOnBotStartCallback(fn) {
   onBotStartCallback = fn;
+}
+
+export function setOnBotStopCallback(fn) {
+  onBotStopCallback = fn;
 }
 
 /**
@@ -184,7 +189,7 @@ class ProcessManager {
 
     if (onBotStartCallback) {
       try {
-        onBotStartCallback({ sessionId, botType, meetingUrl, botName, projectId });
+        onBotStartCallback({ sessionId, botType, meetingUrl, botName, projectId, wsPort });
       } catch (err) {
         console.error(`[ProcessManager] onBotStartCallback error:`, err.message);
       }
@@ -252,6 +257,14 @@ class ProcessManager {
         sessionInfo.onStatusCallback('stopped');
       }
       this.activeSessions.delete(sessionId);
+
+      if (onBotStopCallback) {
+        try {
+          onBotStopCallback({ sessionId });
+        } catch (err) {
+          console.error(`[ProcessManager] onBotStopCallback error:`, err.message);
+        }
+      }
 
       const filename = `${botType}_${sessionId}.jsonl`;
       const localTranscriptPath = path.join(TRANSCRIPTS_DIR, filename);
