@@ -941,7 +941,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
 
                   <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
                     <Input label="Meeting title" value={schedTitle} onChange={(e) => setSchedTitle(e.target.value)} />
-                    <Input label="Zoom link (optional)" value={schedZoom} onChange={(e) => setSchedZoom(e.target.value)} />
+                    <Input label="Meeting link (optional)" value={schedZoom} onChange={(e) => setSchedZoom(e.target.value)} />
                     <Input label="Date" type="date" value={schedDate} onChange={(e) => setSchedDate(e.target.value)} />
                     <Input label="Time" type="time" value={schedTime} onChange={(e) => setSchedTime(e.target.value)} />
                   </div>

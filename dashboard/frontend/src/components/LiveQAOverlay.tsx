@@ -2,9 +2,15 @@
 
 import React, { useState, useRef, useEffect } from "react";
 import { cn } from "@/lib/cn";
-import { Sparkles, Send, MessageSquare, Loader2, AlertCircle } from "lucide-react";
+import { Sparkles, Send, MessageSquare, Loader2, AlertCircle, MapPin } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+
+export interface Citation {
+  lineId: string;
+  speaker: string;
+  timestamp: string;
+}
 
 export interface QAPair {
   id: string;
@@ -13,11 +19,13 @@ export interface QAPair {
   isStreaming: boolean;
   error?: string;
   timestamp?: string;
+  citations?: Citation[];
 }
 
 interface LiveQAOverlayProps {
   qaHistory: QAPair[];
   onSendQuestion: (question: string) => void;
+  onCitationClick?: (lineId: string) => void;
   disabled?: boolean;
   className?: string;
 }
@@ -25,6 +33,7 @@ interface LiveQAOverlayProps {
 export function LiveQAOverlay({
   qaHistory,
   onSendQuestion,
+  onCitationClick,
   disabled = false,
   className,
 }: LiveQAOverlayProps) {
@@ -104,18 +113,41 @@ export function LiveQAOverlay({
                     <span>{item.error}</span>
                   </div>
                 ) : (
-                  <div className="text-sm leading-relaxed text-ink-soft">
-                    {item.answer ? (
-                      <span>{item.answer}</span>
-                    ) : item.isStreaming ? (
-                      <span className="text-xs italic text-ink-mute flex items-center gap-1.5">
-                        <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-600" />
-                        Analyzing transcript...
-                      </span>
-                    ) : null}
+                  <div>
+                    <div className="text-sm leading-relaxed text-ink-soft">
+                      {item.answer ? (
+                        <span>{item.answer}</span>
+                      ) : item.isStreaming ? (
+                        <span className="text-xs italic text-ink-mute flex items-center gap-1.5">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-600" />
+                          Analyzing transcript...
+                        </span>
+                      ) : null}
 
-                    {item.isStreaming && item.answer && (
-                      <span className="inline-block w-1.5 h-4 ml-1 bg-brand-600 animate-pulse align-middle" />
+                      {item.isStreaming && item.answer && (
+                        <span className="inline-block w-1.5 h-4 ml-1 bg-brand-600 animate-pulse align-middle" />
+                      )}
+                    </div>
+
+                    {/* Citation Chips */}
+                    {item.citations && item.citations.length > 0 && (
+                      <div className="mt-2.5 flex flex-wrap items-center gap-1.5 pt-1">
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-mute">
+                          Sources:
+                        </span>
+                        {item.citations.map((cite, cIdx) => (
+                          <button
+                            key={`${cite.lineId}-${cIdx}`}
+                            type="button"
+                            onClick={() => onCitationClick?.(cite.lineId)}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-brand-200 bg-brand-50/80 px-2 py-0.5 text-xs font-semibold text-brand-700 hover:bg-brand-100 hover:border-brand-300 transition-all cursor-pointer shadow-2xs"
+                            title={`Jump to line by ${cite.speaker} at ${cite.timestamp}`}
+                          >
+                            <MapPin className="h-3 w-3 text-brand-600" />
+                            <span>{cite.speaker} ({cite.timestamp})</span>
+                          </button>
+                        ))}
+                      </div>
                     )}
                   </div>
                 )}

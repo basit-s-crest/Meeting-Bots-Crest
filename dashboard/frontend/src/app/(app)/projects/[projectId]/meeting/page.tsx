@@ -14,6 +14,7 @@ import { Input, Select } from "@/components/ui/Input";
 import { LiveQAOverlay, QAPair } from "@/components/LiveQAOverlay";
 
 interface TranscriptLine {
+  lineId: string;
   segmentId?: number;
   speaker: string;
   text: string;
@@ -59,12 +60,32 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const [liveLines, setLiveLines] = useState<TranscriptLine[]>([]);
   const [qaHistory, setQaHistory] = useState<QAPair[]>([]);
   const [showJumpButton, setShowJumpButton] = useState(false);
+  const [highlightedLineId, setHighlightedLineId] = useState<string | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
   const wasNearBottomRef = useRef(true);
+  const manualJumpAtRef = useRef<number | null>(null);
+  const highlightTimerRef = useRef<NodeJS.Timeout | null>(null);
   const visualizerTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleJumpToLine = (lineId: string) => {
+    if (!lineId) return;
+    wasNearBottomRef.current = false;
+    manualJumpAtRef.current = Date.now();
+    setShowJumpButton(true);
+
+    const targetEl = document.getElementById(`transcript-line-${lineId}`);
+    if (targetEl) {
+      targetEl.scrollIntoView({ behavior: "smooth", block: "center" });
+      setHighlightedLineId(lineId);
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = setTimeout(() => {
+        setHighlightedLineId(null);
+      }, 2500);
+    }
+  };
 
   useEffect(() => {
     checkGoogleDriveStatus();
@@ -78,7 +99,9 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
     const container = transcriptContainerRef.current;
     if (!container) return;
 
-    if (wasNearBottomRef.current) {
+    const recentlyJumped = Boolean(manualJumpAtRef.current && (Date.now() - manualJumpAtRef.current < 3000));
+
+    if (wasNearBottomRef.current && !recentlyJumped) {
       if (transcriptEndRef.current) {
         transcriptEndRef.current.scrollIntoView({ behavior: "smooth" });
       }
@@ -254,8 +277,12 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
               return updated;
             }
 
+            // Assign a stable lineId (e.g. L0, L1...)
+            const lineId = msg.data.lineId || `L${segmentId ?? prev.length}`;
+
             // Different speaker (or first block) — start a new box.
             const newBlock: TranscriptLine = {
+              lineId,
               segmentId: segmentId ?? prev.length,
               speaker,
               committedText: isFinal ? text : "",
@@ -263,7 +290,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
               text,
               isFinal,
               provisional,
-              timestamp: new Date().toISOString()
+              timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
             };
             return [...prev, newBlock];
           });
@@ -289,12 +316,13 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             return item;
           }));
         } else if (msg.type === "qa_answer_complete") {
-          const { id, fullAnswer } = msg.data;
+          const { id, fullAnswer, citations } = msg.data;
           setQaHistory(prev => prev.map(item => {
             if (item.id === id) {
               return {
                 ...item,
                 answer: fullAnswer || item.answer,
+                citations: Array.isArray(citations) ? citations : [],
                 isStreaming: false
               };
             }
@@ -560,10 +588,11 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
                 ) : (
                   liveLines.map((line, idx) => (
                     <div
-                      key={idx}
-                      className={`border border-border bg-surface-2/50 rounded-xl p-4 transition-all duration-200 ${
-                        line.isFinal === false ? "opacity-70 italic border-dashed border-brand-300" : ""
-                      }`}
+                      key={line.lineId || idx}
+                      id={`transcript-line-${line.lineId}`}
+                      className={`border bg-surface-2/50 rounded-xl p-4 transition-all duration-300 ${
+                        highlightedLineId === line.lineId ? "ring-2 ring-brand-500 bg-brand-50/80 shadow-md border-brand-300" : "border-border"
+                      } ${line.isFinal === false ? "opacity-70 italic border-dashed border-brand-300" : ""}`}
                     >
                       <span className="mb-1 block text-xs font-bold text-brand-600">
                         {line.speaker}
@@ -599,6 +628,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             {/* Column B: Live Q&A Overlay Card */}
             <LiveQAOverlay
               qaHistory={qaHistory}
+              onCitationClick={(lineId) => handleJumpToLine(lineId)}
               className="min-h-[440px] max-h-[calc(100vh-280px)] lg:col-span-5"
               onSendQuestion={(questionText) => {
                 if (!questionText.trim()) return;
@@ -614,7 +644,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
 
                 if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
                   const contextOverride = liveLines
-                    .map(l => `${l.speaker}: ${l.committedText}`)
+                    .map(l => `[${l.lineId} | ${l.timestamp || 'Live'} | ${l.speaker}]: ${l.committedText}`)
                     .filter(t => t.trim().length > 0)
                     .join("\n");
 
