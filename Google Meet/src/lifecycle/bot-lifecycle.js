@@ -156,10 +156,15 @@ export class BotLifecycle {
       this.output?.sendSpeakerEvent(data);  // NEW: precise, unquantized signal for the backend
     });
 
+    // Commented out auto-exit on empty meeting per user request.
+    // The bot will only stop when manually canceled from the UI.
+    /*
     this.speakerDetector.setEmptyCallback(() => {
       console.log('[BotLifecycle] Meeting is empty (only the bot remains). Shutting down bot...');
       this.stop();
     });
+    */
+
 
     // Start with retry logic for audio capture
     await this.startAudioWithRetry();

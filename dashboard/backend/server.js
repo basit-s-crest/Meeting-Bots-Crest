@@ -11,7 +11,8 @@ import { Groq } from 'groq-sdk';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
-import { processManager } from './process-manager.js';
+import { processManager, setOnBotStartCallback } from './process-manager.js';
+
 import { deepgramProxyGoogle } from './deepgram-proxy-google.js';
 import { deepgramProxyZoom } from './deepgram-proxy-zoom.js';
 import { generateFirefliesReport, calculateSpeakerStats, saveSchedulingData } from './report-generator.js';
@@ -20,6 +21,9 @@ import { uploadReport, downloadStorageFile } from './supabase-helper.js';
 import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
 import { getOAuth2Client, saveRefreshToken, loadRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { calendarRouter } from './calendar/calendar-router.js';
+import { startCalendarPoller } from './calendar/calendar-poller.js';
+import { handleWebhookNotification } from './calendar/calendar-webhook.js';
+
 import { ingestSegment, queryMemory, processMeeting, getProjectMemory, createMeeting, listMeetings, getMeeting, updateMeeting, deleteMeeting } from './memory-client.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -238,9 +242,102 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
 
 // Serve static frontend files
 const frontendPublicPath = path.resolve(__dirname, '../frontend/public');
-app.use(express.static(frontendPublicPath));
+// Google Calendar Push Notification Webhook (Unauthenticated for Google push servers)
+app.post('/api/calendar/webhook', handleWebhookNotification);
 
-// Google Calendar Scheduling Routes
+// Real-time Event Stream (Server-Sent Events) for instant backend-to-frontend notifications
+const sseClients = new Set();
+
+export function broadcastGlobalEvent(eventType, data) {
+  const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const clientRes of sseClients) {
+    try {
+      clientRes.write(payload);
+    } catch (e) {
+      sseClients.delete(clientRes);
+    }
+  }
+}
+
+setOnBotStartCallback((data) => {
+  console.log(`[EventStream] Emitting bot_started event for session ${data.sessionId}`);
+  broadcastGlobalEvent('bot_started', data);
+});
+
+
+app.get('/api/events/subscribe', (req, res) => {
+  const origin = req.headers.origin || 'http://localhost:3001';
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Credentials': 'true'
+  });
+
+
+  res.write(`event: connected\ndata: ${JSON.stringify({ message: 'Connected to event stream' })}\n\n`);
+  sseClients.add(res);
+
+  req.on('close', () => {
+    sseClients.delete(res);
+  });
+});
+
+
+// Endpoint to update active session's assigned project ID dynamically from frontend modal
+app.post('/api/sessions/update-project', authMiddleware, async (req, res) => {
+  try {
+    const { sessionId, projectId } = req.body;
+    if (!sessionId || !projectId) {
+      return res.status(400).json({ error: 'Missing sessionId or projectId' });
+    }
+
+    // Update in-memory active session if currently running
+    const active = processManager.activeSessions.get(sessionId);
+    if (active) {
+      active.projectId = projectId;
+      console.log(`[Server] Updated in-memory active session ${sessionId} to project ${projectId}`);
+    }
+
+    // Update session record in Supabase database
+    if (supabase) {
+      await supabase
+        .from('meeting_sessions')
+        .update({ project_id: projectId })
+        .eq('session_id', sessionId);
+    }
+
+    res.json({ success: true, sessionId, projectId });
+  } catch (err) {
+    console.error('[Server] Error updating session project ID:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint to list active running bot sessions
+app.get('/api/sessions', (req, res) => {
+  const sessions = [];
+  for (const [sessionId, info] of processManager.activeSessions.entries()) {
+    sessions.push({
+      sessionId,
+      botType: info.type,
+      status: info.status || 'capturing',
+      wsPort: info.wsPort,
+      meetingUrl: info.meetingUrl,
+      botName: info.botName,
+      projectId: info.projectId,
+      googleDriveFolderId: info.googleDriveFolderId
+    });
+  }
+  res.json({ sessions });
+});
+
+
+
+
+
+// Google Calendar Scheduling & Management Routes
 app.use('/api/calendar', authMiddleware, projectGuard, calendarRouter);
 
 // Memory Service Routes (cross-meeting query + project memory)
@@ -675,7 +772,7 @@ app.get('/api/sessions', authMiddleware, async (req, res) => {
 
     const list = [];
     for (const [id, session] of processManager.activeSessions.entries()) {
-      if (allowedProjectIds.has(session.projectId)) {
+      if (allowedProjectIds.has(session.projectId) || !session.projectId) {
         list.push({
           sessionId: id,
           type: session.type,
@@ -685,6 +782,7 @@ app.get('/api/sessions', authMiddleware, async (req, res) => {
         });
       }
     }
+
     res.json({ sessions: list });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -737,12 +835,13 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
     const { data: dbSessions, error } = await dbQuery;
     if (error) throw error;
 
-    // Filter dbSessions: Keep active/starting sessions, or completed sessions that have a valid transcript_file_url and are not empty
+    // Filter dbSessions: Keep active/starting/capturing sessions, or completed sessions that have a valid transcript_file_url and are not empty
     const validDbSessions = (dbSessions || []).filter(s => {
-      if (s.status === 'active' || s.status === 'starting') return true;
+      if (s.status === 'active' || s.status === 'starting' || s.status === 'capturing') return true;
       if (s.status === 'empty') return false;
       return Boolean(s.transcript_file_url);
     });
+
 
     // Convert validDbSessions to the format expected by the frontend
     const list = validDbSessions.map(s => ({
@@ -1663,7 +1762,9 @@ if (process.env.NODE_ENV !== 'test') {
     console.log(`\n==================================================================`);
     console.log(`Central Meeting Bot Dashboard is running at: http://localhost:${PORT}`);
     console.log(`==================================================================\n`);
+    startCalendarPoller();
   });
+
 }
 
 export { app, server };

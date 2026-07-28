@@ -5,6 +5,7 @@ import { Logo } from "@/components/ui/Logo";
 import { Container } from "@/components/ui/Container";
 import { useAuth } from "@/context/AuthContext";
 import { LogOut, User } from "lucide-react";
+import { LiveMeetingModal } from "@/components/LiveMeetingModal";
 
 export default function AppLayout({
   children,
@@ -49,6 +50,8 @@ export default function AppLayout({
         </Container>
       </header>
       <main className="flex-1">{children}</main>
+      <LiveMeetingModal />
     </div>
   );
 }
+

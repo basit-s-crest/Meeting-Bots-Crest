@@ -5,13 +5,17 @@ import {
   getOAuth2Client,
   saveRefreshToken,
   loadRefreshToken,
+  deleteRefreshToken,
   parseInstruction,
   createCalendarEvent,
   handleGoogleApiError,
   getDefaultDurationMinutes
 } from './calendar-service.js';
 
+
 import { supabase } from '../supabase-client.js';
+import { autoJoinStore } from './auto-join-store.js';
+import { handleWebhookNotification, setupWatchChannel, processUpcomingEvents } from './calendar-webhook.js';
 
 /**
  * Downloads the scheduling companion JSON from Supabase Storage to local transcripts folder on demand.
@@ -90,7 +94,11 @@ calendarRouter.get('/auth', (req, res) => {
     const authUrl = oauth2Client.generateAuthUrl({
       access_type: 'offline',
       prompt: 'consent',
-      scope: ['https://www.googleapis.com/auth/calendar.events']
+      scope: [
+        'https://www.googleapis.com/auth/calendar.events',
+        'https://www.googleapis.com/auth/calendar.events.readonly',
+        'https://www.googleapis.com/auth/calendar.readonly'
+      ]
     });
     res.redirect(authUrl);
   } catch (err) {
@@ -115,16 +123,53 @@ calendarRouter.get('/auth/callback', async (req, res) => {
     
     if (tokens.refresh_token) {
       saveRefreshToken(tokens.refresh_token);
-      res.send('Successfully authenticated! The refresh token has been saved to google_calendar_refresh_token.json and loaded in memory. You can close this window now.');
+
+      // Trigger setup for Push Watch Channel & initial scan
+      setupWatchChannel().catch(err => {
+        console.warn('[Calendar Router Auth] Watch setup warning:', err.message);
+      });
+      processUpcomingEvents().catch(err => {
+        console.warn('[Calendar Router Auth] Initial scan warning:', err.message);
+      });
+
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Google Calendar Connected</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; background-color: #f8fafc; margin: 0; padding: 1rem;">
+          <div style="text-align: center; background: white; padding: 2.5rem; border-radius: 1.25rem; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.05); max-width: 420px; width: 100%;">
+            <div style="width: 56px; height: 56px; background-color: #d1fae5; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 1.25rem auto;">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+            </div>
+            <h2 style="color: #0f172a; margin: 0 0 0.5rem 0; font-size: 1.25rem; font-weight: 700;">Google Calendar Connected!</h2>
+            <p style="color: #64748b; font-size: 0.875rem; line-height: 1.5; margin: 0 0 1.5rem 0;">Your calendar has been authorized. Redirecting you back to your project workspace...</p>
+            <a href="${frontendUrl}" style="display: inline-block; background-color: #4f46e5; color: white; text-decoration: none; padding: 0.625rem 1.25rem; border-radius: 0.5rem; font-size: 0.875rem; font-weight: 600;">Return to Dashboard</a>
+          </div>
+          <script>
+            setTimeout(function() {
+              window.location.href = "${frontendUrl}";
+            }, 1200);
+          </script>
+        </body>
+        </html>
+      `);
     } else {
       console.warn('[Calendar Router Auth] Warning: No refresh token returned in callback.');
-      res.send('Authentication completed, but no refresh token was returned. If this is a re-authentication, you must revoke the app permission in your Google account settings first to force a new refresh token.');
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
+      return res.redirect(frontendUrl);
     }
   } catch (err) {
     console.error('[Calendar Router] OAuth callback exchange failed:', err.message);
     res.status(500).send(`Google authentication failed during code exchange: ${err.message}`);
   }
 });
+
 
 /**
  * Route: Checks OAuth config and connection status.
@@ -139,9 +184,72 @@ calendarRouter.get('/auth/status', (req, res) => {
   res.json({
     connected: hasToken && isConfigured,
     configured: isConfigured,
-    hasRefreshToken: hasToken
+    hasRefreshToken: hasToken,
+    autoJoinEnabled: autoJoinStore.isEnabled(),
+    leadTimeMinutes: autoJoinStore.getLeadTimeMinutes()
   });
 });
+
+/**
+ * Route: Disconnects Google Calendar account.
+ */
+calendarRouter.post('/auth/disconnect', (req, res) => {
+  try {
+    deleteRefreshToken();
+    res.json({ success: true, message: 'Google Calendar disconnected successfully.' });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to disconnect Google Calendar: ${err.message}` });
+  }
+});
+
+calendarRouter.post('/disconnect', (req, res) => {
+  try {
+    deleteRefreshToken();
+    res.json({ success: true, message: 'Google Calendar disconnected successfully.' });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to disconnect Google Calendar: ${err.message}` });
+  }
+});
+
+
+/**
+ * Route: Google Calendar Push Notification Webhook Receiver.
+ */
+calendarRouter.post('/webhook', handleWebhookNotification);
+
+/**
+ * Route: Gets Auto-Join settings.
+ */
+calendarRouter.get('/auto-join/settings', (req, res) => {
+  res.json({
+    enabled: autoJoinStore.isEnabled(),
+    leadTimeMinutes: autoJoinStore.getLeadTimeMinutes()
+  });
+});
+
+/**
+ * Route: Updates Auto-Join settings.
+ */
+calendarRouter.post('/auto-join/settings', (req, res) => {
+  const { enabled, leadTimeMinutes, projectId } = req.body;
+  if (enabled !== undefined) {
+    autoJoinStore.setEnabled(enabled);
+  }
+  if (leadTimeMinutes !== undefined) {
+    autoJoinStore.setLeadTimeMinutes(leadTimeMinutes);
+  }
+  if (projectId) {
+    autoJoinStore.setProjectId(projectId);
+  }
+  res.json({
+    success: true,
+    enabled: autoJoinStore.isEnabled(),
+    leadTimeMinutes: autoJoinStore.getLeadTimeMinutes(),
+    projectId: autoJoinStore.getProjectId()
+  });
+});
+
+
 
 /**
  * Route: Natural language scheduling.

@@ -51,11 +51,6 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [botStatus, setBotStatus] = useState<"idle" | "starting" | "joining" | "capturing" | "stopping" | "stopped">("idle");
   const [activeSpeaker, setActiveSpeaker] = useState("No active speaker");
-  const [isDriveConnected, setIsDriveConnected] = useState(false);
-  const [driveConnecting, setDriveConnecting] = useState(true);
-  const [isCalendarConnected, setIsCalendarConnected] = useState(false);
-  const [calendarConnecting, setCalendarConnecting] = useState(true);
-
   const [liveLines, setLiveLines] = useState<TranscriptLine[]>([]);
   const [qaHistory, setQaHistory] = useState<QAPair[]>([]);
   const [showJumpButton, setShowJumpButton] = useState(false);
@@ -67,12 +62,35 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const visualizerTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    checkGoogleDriveStatus();
-    checkGoogleCalendarStatus();
+    // Auto-detect and connect to any active session running on backend
+    (async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/sessions`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.sessions && data.sessions.length > 0) {
+            const active = data.sessions.find((s: any) => s.projectId === projectId) || data.sessions[0];
+            if (active && active.sessionId) {
+              setActiveSessionId(active.sessionId);
+              setBotStatus(active.status || "capturing");
+              if (active.botType) setBotType(active.botType);
+              if (active.meetingUrl) setMeetingUrl(active.meetingUrl);
+              if (active.botName) setBotName(active.botName);
+              connectWebSocket(active.sessionId);
+            }
+
+          }
+        }
+      } catch (err) {
+        console.error("[Meeting Page] Error checking active session on mount:", err);
+      }
+    })();
+
     return () => {
       disconnectWebSocket();
     };
-  }, []);
+  }, [projectId]);
+
 
   useEffect(() => {
     const container = transcriptContainerRef.current;
@@ -109,35 +127,6 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   };
 
 
-  function checkGoogleDriveStatus() {
-    (async () => {
-      try {
-        const res = await fetch(`${BACKEND_URL}/api/auth/google/status`);
-        if (res.ok) {
-          const data = await res.json();
-          setIsDriveConnected(data.connected);
-        }
-      } catch {
-      } finally {
-        setDriveConnecting(false);
-      }
-    })();
-  }
-
-  function checkGoogleCalendarStatus() {
-    (async () => {
-      try {
-        const res = await fetch(`${BACKEND_URL}/api/calendar/auth/status`);
-        if (res.ok) {
-          const data = await res.json();
-          setIsCalendarConnected(data.connected);
-        }
-      } catch {
-      } finally {
-        setCalendarConnecting(false);
-      }
-    })();
-  }
 
   function disconnectWebSocket() {
     if (socketRef.current) {
@@ -463,43 +452,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             </form>
           </Card>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Card className="flex flex-col justify-between p-4">
-              <div className="flex items-center gap-2">
-                <span className="text-base shrink-0">📁</span>
-                <h4 className="text-xs font-semibold text-ink">Google Drive auth</h4>
-              </div>
-              <div className="mt-3">
-                {driveConnecting ? (
-                  <span className="text-xs text-ink-mute">Checking…</span>
-                ) : isDriveConnected ? (
-                  <Badge tone="success">Connected</Badge>
-                ) : (
-                  <a href={`${BACKEND_URL}/api/auth/google`} className="inline-block text-xs font-semibold text-brand-600 hover:text-brand-700">
-                    Connect
-                  </a>
-                )}
-              </div>
-            </Card>
 
-            <Card className="flex flex-col justify-between p-4">
-              <div className="flex items-center gap-2">
-                <span className="text-base shrink-0">📅</span>
-                <h4 className="text-xs font-semibold text-ink">Google Calendar auth</h4>
-              </div>
-              <div className="mt-3">
-                {calendarConnecting ? (
-                  <span className="text-xs text-ink-mute">Checking…</span>
-                ) : isCalendarConnected ? (
-                  <Badge tone="success">Connected</Badge>
-                ) : (
-                  <a href={`${BACKEND_URL}/api/calendar/auth`} className="inline-block text-xs font-semibold text-brand-600 hover:text-brand-700">
-                    Connect
-                  </a>
-                )}
-              </div>
-            </Card>
-          </div>
         </section>
 
         {/* Monitor */}

@@ -65,6 +65,22 @@ export function loadRefreshToken() {
 }
 
 /**
+ * Deletes saved refresh token file and clears process.env in memory.
+ */
+export function deleteRefreshToken() {
+  try {
+    if (fs.existsSync(CALENDAR_TOKEN_PATH)) {
+      fs.unlinkSync(CALENDAR_TOKEN_PATH);
+    }
+    delete process.env.GOOGLE_CALENDAR_REFRESH_TOKEN;
+    console.log('[Calendar Service] Refresh token deleted successfully.');
+  } catch (err) {
+    console.error('[Calendar Service] Failed to delete refresh token:', err.message);
+  }
+}
+
+
+/**
  * Creates and returns the Google OAuth2 client.
  */
 export function getOAuth2Client() {

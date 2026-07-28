@@ -2,6 +2,8 @@
 
 import { use, useEffect, useState, useRef } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+
 import {
   ArrowLeft, FileText, Calendar, MessageSquare, Play, Send, Sparkles, Download, Eye, Clock, CheckCircle2, AlertCircle, X,
   MoreVertical, Edit2, Archive, ArchiveRestore, Trash2, Check, AlertTriangle
@@ -80,11 +82,15 @@ const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
 
 export default function ProjectWorkspacePage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = use(params);
+  const router = useRouter();
+
 
   const [project, setProject] = useState<ProjectListItem | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [hasAutoRedirected, setHasAutoRedirected] = useState(false);
+
 
   const [activeTab, setActiveTab] = useState<"active" | "archived">("active");
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
@@ -127,12 +133,40 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
 
   const fetchSessions = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/transcripts?projectId=${projectId}`, {
-        credentials: "include"
-      });
-      if (!res.ok) throw new Error("Failed to load project session history");
-      const data = await res.json();
-      setSessions(data.transcripts || []);
+      const [transcriptsRes, activeSessionsRes] = await Promise.all([
+        fetch(`${BACKEND_URL}/api/transcripts?projectId=${projectId}`, { credentials: "include" }),
+        fetch(`${BACKEND_URL}/api/sessions`, { credentials: "include" })
+      ]);
+
+      let transcriptList: Session[] = [];
+      if (transcriptsRes.ok) {
+        const data = await transcriptsRes.json();
+        transcriptList = data.transcripts || [];
+      }
+
+      if (activeSessionsRes.ok) {
+        const activeData = await activeSessionsRes.json();
+        const activeList = activeData.sessions || [];
+
+        for (const act of activeList) {
+          const exists = transcriptList.some(s => s.sessionId === act.sessionId);
+          if (!exists) {
+            transcriptList.unshift({
+              fileName: `${act.type}_${act.sessionId}.jsonl`,
+              sessionId: act.sessionId,
+              title: `Live ${act.type} Meeting`,
+              botName: 'Meeting Assistant Bot',
+              created: new Date().toISOString(),
+              size: 0,
+              isDbBacked: false,
+              botType: act.type,
+              status: act.status || 'capturing'
+            });
+          }
+        }
+      }
+
+      setSessions(transcriptList);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error connecting to backend");
     } finally {
@@ -149,16 +183,125 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
           });
           if (res.ok) {
             const list: ProjectListItem[] = await res.json();
+            setAllProjects(list);
             const found = list.find((p) => p.id === projectId);
             if (found) setProject(found);
           }
+
         } catch {
         }
       })();
     }
     fetchProjectDetails();
     fetchSessions();
+    checkGoogleDriveStatus();
+    checkGoogleCalendarStatus();
   }, [projectId]);
+
+
+
+
+
+
+  const capturingSession = sessions.find(s => s.status !== "completed" && s.status !== "archived" && s.status !== "empty");
+
+  // Auto-redirect to live meeting transcript page when active capturing session starts
+  useEffect(() => {
+    if (capturingSession && !hasAutoRedirected) {
+      setHasAutoRedirected(true);
+      router.push(`/projects/${projectId}/meeting`);
+    }
+  }, [capturingSession, hasAutoRedirected, projectId, router]);
+
+
+
+
+  const [allProjects, setAllProjects] = useState<ProjectListItem[]>([]);
+  const [targetProjectId, setTargetProjectId] = useState<string>(projectId);
+  const [isDriveConnected, setIsDriveConnected] = useState(false);
+  const [driveConnecting, setDriveConnecting] = useState(true);
+  const [isCalendarConnected, setIsCalendarConnected] = useState(false);
+  const [calendarConnecting, setCalendarConnecting] = useState(true);
+  const [autoJoinEnabled, setAutoJoinEnabled] = useState(true);
+  const [leadTimeMinutes, setLeadTimeMinutes] = useState(2);
+
+  function checkGoogleDriveStatus() {
+    (async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/auth/google/status`);
+        if (res.ok) {
+          const data = await res.json();
+          setIsDriveConnected(data.connected);
+        }
+      } catch {
+      } finally {
+        setDriveConnecting(false);
+      }
+    })();
+  }
+
+  function checkGoogleCalendarStatus() {
+    (async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/calendar/auth/status`);
+        if (res.ok) {
+          const data = await res.json();
+          setIsCalendarConnected(data.connected);
+          if (data.autoJoinEnabled !== undefined) setAutoJoinEnabled(data.autoJoinEnabled);
+          if (data.leadTimeMinutes !== undefined) setLeadTimeMinutes(data.leadTimeMinutes);
+          if (data.projectId) setTargetProjectId(data.projectId);
+        }
+      } catch {
+      } finally {
+        setCalendarConnecting(false);
+      }
+    })();
+  }
+
+  async function handleToggleAutoJoin(newVal: boolean) {
+    setAutoJoinEnabled(newVal);
+    try {
+      await fetch(`${BACKEND_URL}/api/calendar/auto-join/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: newVal, projectId: targetProjectId || projectId })
+      });
+    } catch (err) {
+      console.error("Failed to toggle auto-join setting:", err);
+    }
+  }
+
+  async function handleChangeTargetProject(newProjId: string) {
+    setTargetProjectId(newProjId);
+    try {
+      await fetch(`${BACKEND_URL}/api/calendar/auto-join/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: newProjId })
+      });
+    } catch (err) {
+      console.error("Failed to update target project for auto-join:", err);
+    }
+  }
+
+
+
+  async function handleDisconnectCalendar() {
+    if (!confirm("Are you sure you want to disconnect your Google Calendar account?")) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/calendar/auth/disconnect`, {
+        method: "POST",
+        credentials: "include"
+      });
+      if (res.ok) {
+        setIsCalendarConnected(false);
+      }
+    } catch (err) {
+      console.error("Failed to disconnect calendar:", err);
+    }
+  }
+
+
 
   // Rename action handler
   const handleOpenRenameModal = (session: Session) => {
@@ -470,6 +613,137 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
           </Button>
         </Link>
       </div>
+
+      {/* Live Active Session Banner */}
+
+      {capturingSession && (
+        <div className="mt-6 flex flex-col items-center justify-between gap-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 sm:flex-row shadow-sm">
+          <div className="flex items-center gap-3">
+            <span className="relative flex h-3.5 w-3.5 shrink-0">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex h-3.5 w-3.5 rounded-full bg-emerald-500" />
+            </span>
+            <div>
+              <h4 className="text-sm font-bold text-ink flex items-center gap-2">
+                Live Bot Capturing: {capturingSession.title || capturingSession.botName || "Meeting Bot"}
+                <Badge tone="success">{capturingSession.botType}</Badge>
+              </h4>
+              <p className="text-xs text-ink-soft mt-0.5">
+                Auto-joined meeting. Capturing live audio, transcript, and AI Q&A assistant.
+              </p>
+            </div>
+          </div>
+          <Link href={`/projects/${projectId}/meeting`}>
+            <Button size="sm" className="whitespace-nowrap bg-emerald-600 hover:bg-emerald-700 text-white">
+              <Eye className="h-4 w-4" />
+              Open Live Transcript & Q&A
+            </Button>
+          </Link>
+        </div>
+      )}
+
+      {/* Cloud Integrations Section */}
+
+      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Card className="flex items-center justify-between p-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/10 text-xl text-blue-500">
+              📁
+            </div>
+            <div>
+              <h4 className="text-sm font-semibold text-ink">Google Drive Sync</h4>
+              <p className="text-xs text-ink-mute">Sync meeting docs & transcripts to cloud folder</p>
+            </div>
+          </div>
+          <div>
+            {driveConnecting ? (
+              <span className="text-xs text-ink-mute">Checking…</span>
+            ) : isDriveConnected ? (
+              <Badge tone="success">Connected</Badge>
+            ) : (
+              <a
+                href={`${BACKEND_URL}/api/auth/google`}
+                className="inline-flex items-center gap-1 rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-brand-700"
+              >
+                Connect Drive
+              </a>
+            )}
+          </div>
+        </Card>
+
+        <Card className="flex items-center justify-between p-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/10 text-xl text-emerald-500">
+              📅
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h4 className="text-sm font-semibold text-ink">Google Calendar & Auto-Join</h4>
+                {isCalendarConnected && (
+                  <span className="text-[10px] text-ink-mute">Auto-joins {leadTimeMinutes}m before</span>
+                )}
+              </div>
+              {isCalendarConnected ? (
+                <div className="space-y-1.5 mt-1">
+                  <label className="flex items-center gap-1.5 text-xs text-ink-soft cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={autoJoinEnabled}
+                      onChange={(e) => handleToggleAutoJoin(e.target.checked)}
+                      className="rounded border-gray-300 text-brand-600 focus:ring-brand-500 h-3.5 w-3.5"
+                    />
+                    <span>Auto-join Google Meet meetings</span>
+                  </label>
+                  {allProjects.length > 0 && (
+                    <div className="flex items-center gap-2 pt-0.5">
+                      <span className="text-[11px] text-ink-mute font-medium">Assign Auto-Joins To:</span>
+                      <select
+                        value={targetProjectId || projectId}
+                        onChange={(e) => handleChangeTargetProject(e.target.value)}
+                        className="rounded-lg border border-border bg-surface px-2 py-0.5 text-xs font-semibold text-ink shadow-sm focus:border-brand-500 focus:outline-none"
+                      >
+                        {allProjects.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-ink-mute">Sync calendar events & enable automatic bot joins</p>
+              )}
+
+            </div>
+          </div>
+          <div>
+            {calendarConnecting ? (
+              <span className="text-xs text-ink-mute">Checking…</span>
+            ) : isCalendarConnected ? (
+              <div className="flex items-center gap-2">
+                <Badge tone="success">Connected</Badge>
+                <button
+                  type="button"
+                  onClick={handleDisconnectCalendar}
+                  className="text-xs font-semibold text-rose-500 hover:text-rose-600 hover:underline transition-colors"
+                >
+                  Disconnect
+                </button>
+              </div>
+            ) : (
+              <a
+                href={`${BACKEND_URL}/api/calendar/auth`}
+                className="inline-flex items-center gap-1 rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-brand-700"
+              >
+                Connect Calendar
+              </a>
+            )}
+          </div>
+
+        </Card>
+      </div>
+
 
       {/* Grid */}
       <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
