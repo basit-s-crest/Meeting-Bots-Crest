@@ -357,6 +357,9 @@ app.post('/api/sessions/update-project', authMiddleware, async (req, res) => {
       console.log(`[Server] Updated in-memory active session ${sessionId} to project ${projectId}`);
     }
 
+    // Also update the stable sessionProjectIds map for transcript routing
+    sessionProjectIds.set(sessionId, projectId);
+
     // Update session record in Supabase database
     if (supabase) {
       await supabase
@@ -1548,6 +1551,8 @@ app.get('/api/transcripts/:filename/docx', authMiddleware, projectGuard, async (
 });
 
 const connectedAudioSessions = new Set();
+// Stable projectId per session, survives activeSessions cleanup so final transcript segments go to the right project
+const sessionProjectIds = new Map();
 
 /**
  * Backend WebSocket logic: connect to Google Meet/Zoom's output port
@@ -1587,6 +1592,9 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
       const logPath = path.join(transcriptsDir, `${actualBotType}_${sessionId}.jsonl`);
       logStream = fs.createWriteStream(logPath, { flags: 'a' });
 
+      // Set stable projectId for transcript routing
+      sessionProjectIds.set(sessionId, projectId);
+
       // Initialize Deepgram Proxy connection
       dgProxy.initializeSession(sessionId, {
         apiKey: DEEPGRAM_API_KEY,
@@ -1599,8 +1607,8 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
           }
           // Push to memory service for cross-meeting search (Supabase)
           if (event.isFinal) {
-            // Read projectId dynamically to pick up frontend project selection changes
-            const currentProjectId = processManager.activeSessions.get(sessionId)?.projectId || projectId;
+            // Use stable sessionProjectIds map — survives activeSessions cleanup on bot exit
+            const currentProjectId = sessionProjectIds.get(sessionId) || projectId;
             ingestSegment(sessionId, {
               speaker: event.speaker,
               text: event.text,
@@ -1681,6 +1689,8 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
       console.log(`[Server] Bot audio stream closed for session ${sessionId}`);
       dgProxy.closeSession(sessionId);
       try { logStream.end(); } catch (e) {}
+      // Delay cleanup so inflight transcript segments can still resolve
+      setTimeout(() => sessionProjectIds.delete(sessionId), 5000);
     });
 
     botSocket.on('error', (err) => {
