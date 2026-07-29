@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { getCalendarClient, loadRefreshToken } from './calendar-service.js';
-import { extractGoogleMeetUrl } from './link-extractor.js';
+import { extractMeetingLink } from './link-extractor.js';
 import { autoJoinStore } from './auto-join-store.js';
 import { processManager, getFreePort } from '../process-manager.js';
 import { supabase } from '../supabase-client.js';
@@ -102,8 +102,10 @@ export async function processUpcomingEvents() {
       const eventId = event.id;
       if (autoJoinStore.hasJoined(eventId)) continue;
 
-      const meetUrl = extractGoogleMeetUrl(event);
-      if (!meetUrl) continue;
+      const extracted = extractMeetingLink(event);
+      if (!extracted) continue;
+
+      const { platform: botType, url: meetingUrl } = extracted;
 
       const startDateTime = event.start?.dateTime || event.start?.date;
       if (!startDateTime) continue;
@@ -115,17 +117,17 @@ export async function processUpcomingEvents() {
 
       if (autoJoinStore.hasScheduled(eventId)) continue;
 
-      const meetingTitle = event.summary || 'Google Meet Meeting';
+      const meetingTitle = event.summary || `${botType} Meeting`;
 
-      console.log(`[Calendar Webhook] Scheduling auto-join for Google Meet:
+      console.log(`[Calendar Webhook] Scheduling auto-join for ${botType}:
   - Event ID: ${eventId}
   - Title: "${meetingTitle}"
-  - Meet URL: ${meetUrl}
+  - URL: ${meetingUrl}
   - Meeting Start: ${new Date(startTimeMs).toLocaleTimeString()}
   - Bot Join Time: ${new Date(targetJoinTimeMs).toLocaleTimeString()} (in ${(delayMs / 1000).toFixed(0)}s)`);
 
       const timerObj = setTimeout(() => {
-        triggerBotJoin(eventId, meetUrl, meetingTitle);
+        triggerBotJoin(eventId, meetingUrl, meetingTitle, botType);
       }, delayMs);
 
       autoJoinStore.scheduleTimer(eventId, timerObj);
@@ -136,16 +138,17 @@ export async function processUpcomingEvents() {
 }
 
 /**
- * Launches the Google Meet bot process.
+ * Launches the bot process for the detected platform.
  */
-async function triggerBotJoin(eventId, meetUrl, meetingTitle) {
+async function triggerBotJoin(eventId, meetingUrl, meetingTitle, botType) {
   if (autoJoinStore.hasJoined(eventId)) return;
 
   // Mark as processed immediately to prevent duplicate triggers
   autoJoinStore.markJoined(eventId);
 
-  const sessionId = `meet_auto_${eventId.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}`;
-  console.log(`[Calendar Auto-Join] Launching Google Meet bot for: "${meetingTitle}" (Session: ${sessionId})`);
+  const prefix = botType === 'zoom' ? 'zoom' : botType === 'teams' ? 'teams' : 'meet';
+  const sessionId = `${prefix}_auto_${eventId.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}`;
+  console.log(`[Calendar Auto-Join] Launching ${botType} bot for: "${meetingTitle}" (Session: ${sessionId})`);
 
   let projectId = autoJoinStore.getProjectId() || process.env.DEFAULT_PROJECT_ID || null;
   if (!projectId && supabase) {
@@ -161,8 +164,8 @@ async function triggerBotJoin(eventId, meetUrl, meetingTitle) {
   try {
     const wsPort = await getFreePort(8090);
     processManager.spawnBot(sessionId, {
-      botType: 'google-meet',
-      meetingUrl: meetUrl,
+      botType,
+      meetingUrl,
       botName: process.env.AUTO_JOIN_BOT_NAME || 'Meeting Assistant Bot',
       isHeadless: true,
       wsPort,
