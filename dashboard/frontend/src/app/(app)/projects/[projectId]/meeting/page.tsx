@@ -30,10 +30,9 @@ interface TranscriptLine {
 
 const BACKEND_URL = "http://localhost:3000";
 
-const originalFetch = typeof window !== "undefined" ? window.fetch : null;
-const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  if (!originalFetch) return Promise.reject(new Error("fetch called on server"));
-  return originalFetch(input, {
+const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
+  if (typeof window === "undefined") return Promise.resolve(new Response());
+  return window.fetch(input, {
     ...init,
     credentials: "include"
   });
@@ -135,7 +134,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   function checkGoogleDriveStatus() {
     (async () => {
       try {
-        const res = await fetch(`${BACKEND_URL}/api/auth/google/status`);
+        const res = await apiFetch(`${BACKEND_URL}/api/auth/google/status`);
         if (res.ok) {
           const data = await res.json();
           setIsDriveConnected(data.connected);
@@ -150,7 +149,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   function checkGoogleCalendarStatus() {
     (async () => {
       try {
-        const res = await fetch(`${BACKEND_URL}/api/calendar/auth/status`);
+        const res = await apiFetch(`${BACKEND_URL}/api/calendar/auth/status`);
         if (res.ok) {
           const data = await res.json();
           setIsCalendarConnected(data.connected);

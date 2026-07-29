@@ -70,10 +70,9 @@ interface SchedulingData {
 
 const BACKEND_URL = "http://localhost:3000";
 
-const originalFetch = typeof window !== "undefined" ? window.fetch : null;
-const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  if (!originalFetch) return Promise.reject(new Error("fetch called on server"));
-  return originalFetch(input, {
+const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
+  if (typeof window === "undefined") return Promise.resolve(new Response());
+  return window.fetch(input, {
     ...init,
     credentials: "include"
   });
@@ -128,7 +127,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
 
   const fetchSessions = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/transcripts?projectId=${projectId}`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/transcripts?projectId=${projectId}`, {
         credentials: "include"
       });
       if (!res.ok) throw new Error("Failed to load project session history");
@@ -151,7 +150,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const fetchUpcomingEvents = async () => {
     setEventsLoading(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/calendar/upcoming`);
+      const res = await apiFetch(`${BACKEND_URL}/api/calendar/upcoming`);
       if (res.ok) {
         const data = await res.json();
         setUpcomingEvents(data.events || []);
@@ -171,7 +170,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
 
   const checkAutoJoinStatus = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/calendar/auto-join/status`);
+      const res = await apiFetch(`${BACKEND_URL}/api/calendar/auto-join/status`);
       if (res.ok) {
         const data = await res.json();
         setAutoJoinActive(!!data.active);
@@ -183,7 +182,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const toggleAutoJoin = async () => {
     try {
       const nextState = !autoJoinActive;
-      const res = await fetch(`${BACKEND_URL}/api/calendar/auto-join/toggle`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/calendar/auto-join/toggle`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enable: nextState, projectId })
@@ -205,7 +204,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     function fetchProjectDetails() {
       (async () => {
         try {
-          const res = await fetch(`${BACKEND_URL}/api/projects`, {
+          const res = await apiFetch(`${BACKEND_URL}/api/projects`, {
             credentials: "include"
           });
           if (res.ok) {
@@ -232,7 +231,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     if (!renameSession || !renameTitleInput.trim()) return;
     setRenameLoading(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/meetings/${renameSession.sessionId}`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/meetings/${renameSession.sessionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -256,7 +255,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     const newStatus = isArchived ? "completed" : "archived";
     setOpenMenuSessionId(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/meetings/${session.sessionId}`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/meetings/${session.sessionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -277,13 +276,13 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     setDeleteLoading(true);
     try {
       // Try primary DELETE /api/meetings/:sessionId
-      let res = await fetch(`${BACKEND_URL}/api/meetings/${deleteSession.sessionId}`, {
+      let res = await apiFetch(`${BACKEND_URL}/api/meetings/${deleteSession.sessionId}`, {
         method: "DELETE",
       });
 
       // Fallback: try DELETE /api/transcripts/:fileName if primary route returned 404
       if (res.status === 404 && deleteSession.fileName) {
-        res = await fetch(`${BACKEND_URL}/api/transcripts/${deleteSession.fileName}`, {
+        res = await apiFetch(`${BACKEND_URL}/api/transcripts/${deleteSession.fileName}`, {
           method: "DELETE",
         });
       }
