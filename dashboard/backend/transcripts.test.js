@@ -112,6 +112,7 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
     if (server) {
       await new Promise((resolve) => server.close(resolve));
     }
+    setTimeout(() => process.exit(0), 100);
   });
 
   it("asserts project A's read returns project A's transcript and NEVER project B's data", async () => {

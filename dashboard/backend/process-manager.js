@@ -67,6 +67,16 @@ class ProcessManager {
   }
 
   /**
+   * Cleans up all timers and intervals attached to a session object.
+   */
+  cleanupSessionTimers(sessionInfo) {
+    if (sessionInfo && sessionInfo.tailInterval) {
+      clearInterval(sessionInfo.tailInterval);
+      sessionInfo.tailInterval = null;
+    }
+  }
+
+  /**
    * Spawns the requested meeting bot process.
    */
   spawnBot(sessionId, { botType, meetingUrl, botName, isHeadless, wsPort, googleDriveFolderId, projectId }) {
@@ -202,11 +212,23 @@ class ProcessManager {
       console.error(`[BotStderr][${botType}][${sessionId}] ${data.toString().trim()}`);
     });
 
+    child.on('error', (err) => {
+      console.error(`[ProcessManager] Session ${sessionId} process error:`, err.message);
+      this.cleanupSessionTimers(sessionInfo);
+      sessionInfo.status = 'stopped';
+      if (sessionInfo.onStatusCallback) {
+        sessionInfo.onStatusCallback('stopped');
+      }
+      this.activeSessions.delete(sessionId);
+    });
+
+    child.on('exit', (code) => {
+      this.cleanupSessionTimers(sessionInfo);
+    });
+
     child.on('close', (code) => {
       console.log(`[ProcessManager] Session ${sessionId} exited with code ${code}`);
-      if (sessionInfo.tailInterval) {
-        clearInterval(sessionInfo.tailInterval);
-      }
+      this.cleanupSessionTimers(sessionInfo);
       sessionInfo.status = 'stopped';
       if (sessionInfo.onStatusCallback) {
         sessionInfo.onStatusCallback('stopped');
@@ -375,9 +397,7 @@ class ProcessManager {
 
     console.log(`[ProcessManager] Terminating session ${sessionId}`);
     
-    if (session.tailInterval) {
-      clearInterval(session.tailInterval);
-    }
+    this.cleanupSessionTimers(session);
 
     return new Promise((resolve) => {
       const child = session.childProcess;
@@ -386,6 +406,7 @@ class ProcessManager {
       // Handle process exit during kill
       child.once('exit', () => {
         killed = true;
+        this.cleanupSessionTimers(session);
         this.activeSessions.delete(sessionId);
         resolve();
       });

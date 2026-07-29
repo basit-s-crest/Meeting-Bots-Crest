@@ -35,7 +35,12 @@ const app = express();
 app.use(cors({ origin: 'http://localhost:3001', credentials: true }));
 app.use(express.json());
 
-const JWT_SECRET = process.env.JWT_SECRET || 'crest-meet-secure-secret-key-xyz-987';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('\x1b[31m[Server] FATAL ERROR: JWT_SECRET environment variable is missing in .env!\x1b[0m');
+  console.error('\x1b[31m[Server] Please set JWT_SECRET in your .env file to start the server securely.\x1b[0m');
+  process.exit(1);
+}
 
 // Middleware to verify JWT token
 const authMiddleware = (req, res, next) => {

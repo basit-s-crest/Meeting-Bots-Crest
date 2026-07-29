@@ -24,7 +24,12 @@ app = FastAPI(title="Meeting Memory Service", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "meeting-memory-service"}
+    db_connected = is_db_connected()
+    return {
+        "status": "ok" if db_connected else "degraded",
+        "service": "meeting-memory-service",
+        "database_connected": db_connected
+    }
 
 
 app.include_router(ingestion_router, prefix="/api/memory")
