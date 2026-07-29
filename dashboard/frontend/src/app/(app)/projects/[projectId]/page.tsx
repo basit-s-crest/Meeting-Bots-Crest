@@ -149,6 +149,8 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
         const activeList = activeData.sessions || [];
 
         for (const act of activeList) {
+          // Only merge active sessions explicitly assigned to this project
+          if (act.projectId !== projectId) continue;
           const exists = transcriptList.some(s => s.sessionId === act.sessionId);
           if (!exists) {
             transcriptList.unshift({

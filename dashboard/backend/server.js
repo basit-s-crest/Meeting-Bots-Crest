@@ -119,7 +119,7 @@ const projectGuard = async (req, res, next) => {
       return res.status(404).json({ error: 'Project not found.' });
     }
 
-    if (project.user_id !== req.user.id) {
+    if (project.user_id && project.user_id !== req.user.id) {
       return res.status(403).json({ error: 'Access denied: You do not own this project.' });
     }
 
@@ -421,28 +421,6 @@ app.get('/api/sessions/:sessionId', authMiddleware, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-// Endpoint to list active running bot sessions
-app.get('/api/sessions', (req, res) => {
-  const sessions = [];
-  for (const [sessionId, info] of processManager.activeSessions.entries()) {
-    sessions.push({
-      sessionId,
-      botType: info.type,
-      status: info.status || 'capturing',
-      wsPort: info.wsPort,
-      meetingUrl: info.meetingUrl,
-      botName: info.botName,
-      projectId: info.projectId,
-      googleDriveFolderId: info.googleDriveFolderId
-    });
-  }
-  res.json({ sessions });
-});
-
-
-
-
 
 // Google Calendar Scheduling & Management Routes
 app.use('/api/calendar', authMiddleware, projectGuard, calendarRouter);
@@ -847,13 +825,27 @@ app.post('/api/sessions/start', authMiddleware, projectGuard, async (req, res) =
  * REST API: Stop a bot session
  */
 app.post('/api/sessions/stop', authMiddleware, async (req, res) => {
-  const { sessionId } = req.body;
+  const { sessionId, projectId } = req.body;
 
   if (!sessionId) {
     return res.status(400).json({ error: 'Missing sessionId' });
   }
 
   try {
+    // Persist projectId to active session and Supabase before killing the bot
+    if (projectId) {
+      const active = processManager.activeSessions.get(sessionId);
+      if (active) {
+        active.projectId = projectId;
+      }
+      if (supabase) {
+        await supabase
+          .from('meeting_sessions')
+          .update({ project_id: projectId })
+          .eq('session_id', sessionId);
+      }
+    }
+
     deepgramProxyGoogle.closeSession(sessionId);
     deepgramProxyZoom.closeSession(sessionId);
     await processManager.killBot(sessionId);
@@ -871,23 +863,25 @@ app.post('/api/sessions/stop', authMiddleware, async (req, res) => {
  */
 app.get('/api/sessions', authMiddleware, async (req, res) => {
   try {
-    const { data: userProjects } = await supabase
-      .from('projects')
-      .select('id')
-      .eq('user_id', req.user.id);
-    const allowedProjectIds = new Set((userProjects || []).map(p => p.id));
-
     const list = [];
     for (const [id, session] of processManager.activeSessions.entries()) {
-      if (allowedProjectIds.has(session.projectId) || !session.projectId) {
-        list.push({
-          sessionId: id,
-          type: session.type,
-          status: session.status,
-          wsPort: session.wsPort,
-          projectId: session.projectId
-        });
+      // Check project access if the session is linked to a project
+      if (session.projectId) {
+        const { data: project } = await supabase
+          .from('projects')
+          .select('user_id')
+          .eq('id', session.projectId)
+          .single();
+        const canAccess = !project || !project.user_id || project.user_id === req.user.id;
+        if (!canAccess) continue;
       }
+      list.push({
+        sessionId: id,
+        type: session.type,
+        status: session.status,
+        wsPort: session.wsPort,
+        projectId: session.projectId
+      });
     }
 
     res.json({ sessions: list });
@@ -901,17 +895,6 @@ app.get('/api/sessions', authMiddleware, async (req, res) => {
  */
 app.get('/api/transcripts', authMiddleware, async (req, res) => {
   try {
-    // 1. Fetch user's projects first to filter by ownership
-    const { data: userProjects } = await supabase
-      .from('projects')
-      .select('id')
-      .eq('user_id', req.user.id);
-    const allowedProjectIds = (userProjects || []).map(p => p.id);
-
-    if (allowedProjectIds.length === 0) {
-      return res.json({ transcripts: [] });
-    }
-
     let dbQuery = supabase
       .from('meeting_sessions')
       .select('*')
@@ -928,14 +911,31 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
     }
 
     if (projectIds.length > 0) {
-      // Verify user owns all requested projectIds
-      const unauthorized = projectIds.some(pid => !allowedProjectIds.includes(pid));
-      if (unauthorized) {
-        return res.status(403).json({ error: 'Access denied: You do not own one or more requested projects.' });
+      // Direct project lookup — supports legacy projects with user_id: null
+      for (const pid of projectIds) {
+        const { data: project } = await supabase
+          .from('projects')
+          .select('user_id')
+          .eq('id', pid)
+          .single();
+        if (!project) {
+          return res.status(404).json({ error: `Project ${pid} not found` });
+        }
+        if (project.user_id && project.user_id !== req.user.id) {
+          return res.status(403).json({ error: 'Access denied: You do not own this project.' });
+        }
       }
       dbQuery = dbQuery.in('project_id', projectIds);
     } else {
-      // Filter by the user's projects
+      // No projectId filter — fall back to user's owned projects
+      const { data: userProjects } = await supabase
+        .from('projects')
+        .select('id')
+        .eq('user_id', req.user.id);
+      const allowedProjectIds = (userProjects || []).map(p => p.id);
+      if (allowedProjectIds.length === 0) {
+        return res.json({ transcripts: [] });
+      }
       dbQuery = dbQuery.in('project_id', allowedProjectIds);
     }
 
@@ -943,7 +943,14 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
     if (error) throw error;
 
     // Keep all valid meeting sessions for the project except deleted ones
-    const validDbSessions = (dbSessions || []).filter(s => s.status !== 'deleted');
+    // and filter out completed sessions with no transcript file (empty/no-speech meetings)
+    const validDbSessions = (dbSessions || []).filter(s => {
+      if (s.status === 'deleted') return false;
+      if (s.status === 'active' || s.status === 'starting' || s.status === 'capturing') return true;
+      if (s.status === 'empty') return false;
+      if (s.status === 'completed' && !s.transcript_file_url) return false;
+      return true;
+    });
 
 
     // Convert validDbSessions to the format expected by the frontend
@@ -963,6 +970,15 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
 
     // 2. Add local files that are not in the database (only when no specific projectId filter is requested)
     if (projectIds.length === 0) {
+      const transcriptsDir = path.join(__dirname, 'transcripts');
+      const dbSessionIds = new Set(validDbSessions.map(s => s.session_id));
+      let localFiles = [];
+      try {
+        if (fs.existsSync(transcriptsDir)) {
+          localFiles = fs.readdirSync(transcriptsDir).filter(f => f.endsWith('.jsonl'));
+        }
+      } catch (e) {}
+
       for (const f of localFiles) {
         const match = f.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
         if (match) {
@@ -992,6 +1008,7 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
     // Sort final combined list by created date descending
     list.sort((a, b) => new Date(b.created) - new Date(a.created));
 
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.json({ transcripts: list });
   } catch (err) {
     console.error('[Server] Supabase transcripts fetch failed:', err.message);
@@ -1558,15 +1575,17 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
     console.log(`[Server] Connecting to bot audio stream at ${url} (Attempt ${attempts}/${maxAttempts})...`);
     
     botSocket = new WebSocket(url);
+    let logStream = null;
 
     botSocket.on('open', () => {
       console.log(`[Server] Connected to bot audio stream for session ${sessionId}`);
       broadcastToClients(sessionId, 'status', { status: 'capturing' });
 
-      // Create transcript log file for Meet/Zoom (disabled — using Supabase only)
-      // const transcriptsDir = path.join(__dirname, 'transcripts');
-      // const logPath = path.join(transcriptsDir, `${processManager.getSession(sessionId)?.type || 'session'}_${sessionId}.jsonl`);
-      // const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+      // Create transcript log file for Meet/Zoom
+      const transcriptsDir = path.join(__dirname, 'transcripts');
+      const actualBotType = processManager.getSession(sessionId)?.type || botType || 'session';
+      const logPath = path.join(transcriptsDir, `${actualBotType}_${sessionId}.jsonl`);
+      logStream = fs.createWriteStream(logPath, { flags: 'a' });
 
       // Initialize Deepgram Proxy connection
       dgProxy.initializeSession(sessionId, {
@@ -1574,19 +1593,21 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
         onTranscript: (event) => {
           // Send to UI clients
           broadcastToClients(sessionId, 'transcript', event);
-          // Write to local jsonl file if final (disabled — using Supabase only)
-          // if (event.isFinal) {
-          //   logStream.write(JSON.stringify(event) + '\n');
-          // }
+          // Write to local jsonl file if final
+          if (event.isFinal) {
+            logStream.write(JSON.stringify(event) + '\n');
+          }
           // Push to memory service for cross-meeting search (Supabase)
           if (event.isFinal) {
+            // Read projectId dynamically to pick up frontend project selection changes
+            const currentProjectId = processManager.activeSessions.get(sessionId)?.projectId || projectId;
             ingestSegment(sessionId, {
               speaker: event.speaker,
               text: event.text,
               startTs: 0,
               endTs: 0,
               isFinal: true,
-              projectId,
+              projectId: currentProjectId,
             });
           }
         },
@@ -1659,6 +1680,7 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
     botSocket.on('close', () => {
       console.log(`[Server] Bot audio stream closed for session ${sessionId}`);
       dgProxy.closeSession(sessionId);
+      try { logStream.end(); } catch (e) {}
     });
 
     botSocket.on('error', (err) => {

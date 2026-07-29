@@ -106,15 +106,18 @@ export function LiveMeetingModal() {
         if (res.ok) {
           const list: ProjectItem[] = await res.json();
           setProjects(list);
-          if (list.length > 0 && !selectedProjectId) {
-            setSelectedProjectId(list[0].id);
-          }
+          setSelectedProjectId(prev => {
+            // If previous selection is valid and in list, keep it
+            if (prev && list.some(p => p.id === prev)) return prev;
+            // Otherwise reset to first project
+            return list.length > 0 ? list[0].id : "";
+          });
         }
       } catch (err) {
         console.error("[LiveMeetingModal] Error fetching projects list:", err);
       }
     })();
-  }, [activeSessionData, selectedProjectId]);
+  }, [activeSessionData]);
 
   async function handleJoinLiveSession() {
     if (!selectedProjectId) {

@@ -1,52 +1,47 @@
 import { processUpcomingEvents, setupWatchChannel, getActiveWatchChannel } from './calendar-webhook.js';
 import { loadRefreshToken } from './calendar-service.js';
 
-let pollerInterval = null;
+let renewalInterval = null;
 
 /**
- * Starts the background calendar poller / watchdog.
- * Runs processUpcomingEvents every 60 seconds as a fallback.
+ * Sets up the watch channel and runs an initial scan on boot.
+ * Does NOT poll — relies entirely on push notifications from Google.
+ * Runs a once-per-hour check only to renew the watch channel before it expires.
  */
 export function startCalendarPoller() {
-  if (pollerInterval) return;
+  if (renewalInterval) return;
 
-  console.log('[Calendar Poller] Starting Google Calendar background poller...');
+  console.log('[Calendar Poller] Setting up Google Calendar watch channel...');
 
   // Setup initial push watch channel if possible
   setupWatchChannel().catch(err => {
     console.warn('[Calendar Poller] Watch channel setup warning:', err.message);
   });
 
-  // Initial check on boot
+  // Initial scan on boot to catch events starting right now or already in progress
   if (loadRefreshToken()) {
     processUpcomingEvents().catch(err => {
       console.error('[Calendar Poller] Initial scan error:', err.message);
     });
   }
 
-  // Poll every 60 seconds
-  pollerInterval = setInterval(() => {
-    if (loadRefreshToken()) {
-      processUpcomingEvents().catch(err => {
-        console.error('[Calendar Poller] Interval scan error:', err.message);
+  // Hourly check just to renew the watch channel before it expires (7 day max)
+  // No event polling — relies on Google push notifications for real-time updates
+  renewalInterval = setInterval(() => {
+    const channel = getActiveWatchChannel();
+    if (channel && channel.expiration - Date.now() < 24 * 60 * 60 * 1000) {
+      console.log('[Calendar Poller] Watch channel near expiration. Renewing...');
+      setupWatchChannel().catch(err => {
+        console.error('[Calendar Poller] Failed to renew watch channel:', err.message);
       });
-
-      // Renew watch channel if near expiration (under 1 day remaining)
-      const channel = getActiveWatchChannel();
-      if (channel && channel.expiration - Date.now() < 24 * 60 * 60 * 1000) {
-        console.log('[Calendar Poller] Watch channel near expiration. Renewing...');
-        setupWatchChannel().catch(err => {
-          console.error('[Calendar Poller] Failed to renew watch channel:', err.message);
-        });
-      }
     }
-  }, 60000);
+  }, 60 * 60 * 1000); // once per hour
 }
 
 export function stopCalendarPoller() {
-  if (pollerInterval) {
-    clearInterval(pollerInterval);
-    pollerInterval = null;
-    console.log('[Calendar Poller] Stopped Google Calendar background poller.');
+  if (renewalInterval) {
+    clearInterval(renewalInterval);
+    renewalInterval = null;
+    console.log('[Calendar Poller] Stopped watch channel renewal.');
   }
 }
