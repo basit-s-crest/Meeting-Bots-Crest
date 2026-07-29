@@ -142,6 +142,7 @@ export function LiveMeetingModal() {
       const targetId = selectedProjectId;
       const sessionId = activeSessionData?.sessionId;
       setIsModalOpen(false);
+      setActiveSessionData(null);
       setJoining(false);
 
       // Redirect to live transcript page for the chosen project with ?sessionId=
@@ -155,6 +156,7 @@ export function LiveMeetingModal() {
       setJoining(false);
       const sessionId = activeSessionData?.sessionId;
       setIsModalOpen(false);
+      setActiveSessionData(null);
       if (sessionId) {
         router.push(`/projects/${selectedProjectId}/meeting?sessionId=${sessionId}`);
       } else {
