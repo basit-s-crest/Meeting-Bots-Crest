@@ -183,7 +183,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
     setActiveSpeaker("Connecting…");
 
     try {
-      const res = await fetch(`${BACKEND_URL}/api/sessions/start`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/sessions/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -357,7 +357,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
     setBotStatus("stopping");
 
     try {
-      const res = await fetch(`${BACKEND_URL}/api/sessions/stop`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/sessions/stop`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId: activeSessionId })

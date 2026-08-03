@@ -274,26 +274,7 @@ export class AudioChunker {
     this.stats.totalChunks++;
     this.stats.avgGain = this.stats.totalGain / this.stats.totalChunks;
     
-    // If initial speaker not detected yet and we have voice, buffer the chunk
-    if (!this.initialSpeakerDetected && vadResult && vadResult.isVoice && !speaker) {
-      console.log(`[AudioChunker] Buffering chunk ${chunk.chunk_id} until speaker is detected`);
-      this.pendingChunks.push(chunk);
-      
-      // Safety: Don't buffer forever, flush after max pending
-      if (this.pendingChunks.length >= this.maxPendingChunks) {
-        console.log(`[AudioChunker] Max pending chunks reached, flushing with 'Unknown' speaker`);
-        this.initialSpeakerDetected = true; // Stop buffering
-        for (const pendingChunk of this.pendingChunks) {
-          if (this.onChunk) {
-            this.onChunk(pendingChunk);
-          }
-        }
-        this.pendingChunks = [];
-      }
-      return; // Don't emit yet
-    }
-    
-    // Emit the chunk immediately if speaker is known or it's silence
+    // Emit the chunk immediately to output handler so Deepgram receives raw audio stream
     if (this.onChunk) {
       this.onChunk(chunk);
     }
