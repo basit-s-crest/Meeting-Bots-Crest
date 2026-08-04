@@ -131,7 +131,7 @@ export default function AppLayout({
     <div className="flex min-h-dvh flex-col bg-bg">
       {/* Top header — logo left, user + logout right */}
       <header className="sticky top-0 z-40 border-b border-border bg-surface/80 backdrop-blur-md">
-        <div className="flex h-16 items-center justify-between px-4 sm:px-6 lg:px-8">
+        <div className="flex h-16 items-center justify-between pl-3 pr-4 sm:pl-3 sm:pr-6 lg:pl-3 lg:pr-8">
           <div className="flex items-center gap-2">
             <button
               onClick={() => setMobileOpen(true)}
