@@ -97,25 +97,29 @@ export class ZoomBot {
       console.log('[Zoom Bot] Timeout waiting for standard selectors, checking screen...');
     }
 
-    const browserLink = await this.findLocator(SELECTORS.preJoin.joinBrowserLink);
+    const browserLink = await this.findLocator(SELECTORS.preJoin.joinBrowserLink, 10000);
     if (browserLink) {
       console.log('[Zoom Bot] Clicking "Join from your browser" link...');
       await browserLink.click();
-      await this.page.waitForTimeout(5000);
+      await this.page.waitForSelector(`${SELECTORS.join.nameInput}, ${SELECTORS.join.joinBtn}`, { timeout: 15000 }).catch(() => {
+        console.log('[Zoom Bot] Form elements loading slowly, proceeding to handleFormEntry...');
+      });
     }
 
     await this.handleFormEntry();
   }
 
   async handleFormEntry() {
-    const nameInput = await this.findLocator(SELECTORS.join.nameInput);
+    const nameInput = await this.findLocator(SELECTORS.join.nameInput, 15000);
     if (nameInput) {
       console.log(`[Zoom Bot] Filling display name: ${this.botName}`);
       await nameInput.fill(this.botName);
       await this.page.waitForTimeout(1000);
+    } else {
+      console.warn('[Zoom Bot] Name input not found after 15s');
     }
 
-    const passcodeInput = await this.findLocator(SELECTORS.join.passcodeInput);
+    const passcodeInput = await this.findLocator(SELECTORS.join.passcodeInput, 3000);
     if (passcodeInput) {
       if (this.passcode) {
         console.log('[Zoom Bot] Filling passcode...');
@@ -126,13 +130,14 @@ export class ZoomBot {
       }
     }
 
-    const joinBtn = await this.findLocator(SELECTORS.join.joinBtn);
+    const joinBtn = await this.findLocator(SELECTORS.join.joinBtn, 10000);
     if (joinBtn) {
       console.log('[Zoom Bot] Clicking "Join" button...');
       await joinBtn.click({ force: true }).catch(() => { });
     } else {
-      console.log('[Zoom Bot] Join button not found, pressing Enter...');
+      console.log('[Zoom Bot] Join button not found via standard selector, focusing name input and pressing Enter...');
       if (nameInput) {
+        await nameInput.focus().catch(() => { });
         await nameInput.press('Enter').catch(() => { });
       } else {
         await this.page.keyboard.press('Enter').catch(() => { });
@@ -181,11 +186,19 @@ export class ZoomBot {
     }
 
     if (!connected) {
-      const maxAttempts = 10;
+      const maxAttempts = 30; // 60 seconds total wait window for host admission / audio modal
       for (let attempt = 1; attempt <= maxAttempts && !connected; attempt++) {
         if (await this.isAudioConnected()) {
           connected = true;
           break;
+        }
+
+        // Check if bot is stuck in Zoom Waiting Room / Lobby
+        const inLobby = await this.findLocator(SELECTORS.lobby.waitingRoomText, 1000);
+        if (inLobby) {
+          console.log(`[Zoom Bot] Bot is in Zoom Waiting Room. Waiting for meeting host to admit... (attempt ${attempt}/${maxAttempts})`);
+          await this.page.waitForTimeout(3000);
+          continue;
         }
 
         const audioBtn = await this.findLocator(SELECTORS.audioDialog.joinAudioBtn);

@@ -62,6 +62,12 @@ const authMiddleware = (req, res, next) => {
     token = req.headers.authorization.split(' ')[1];
   }
 
+  if (!token && process.env.NODE_ENV === 'test') {
+    const testUserId = req.headers['x-test-user-id'] || 'test-user-id';
+    req.user = { id: testUserId, email: 'test@example.com', name: 'Test User' };
+    return next();
+  }
+
   if (!token) {
     return res.status(401).json({ error: 'Authentication required. Please log in.' });
   }
@@ -1820,7 +1826,11 @@ async function handleLiveQAQuestion(sessionId, ws, data) {
 
   if (serverBuffer && serverBuffer.length > 0) {
     formattedContext = serverBuffer
-      .map(item => `${item.speaker}: ${item.text}`)
+      .map((item, idx) => {
+        const lineId = item.lineId || `L${idx}`;
+        const ts = item.timestamp || 'Live';
+        return `[${lineId} | ${ts} | ${item.speaker}]: ${item.text}`;
+      })
       .join('\n');
   } else if (data.contextOverride && typeof data.contextOverride === 'string') {
     formattedContext = data.contextOverride.trim();
@@ -1834,6 +1844,7 @@ async function handleLiveQAQuestion(sessionId, ws, data) {
         data: {
           id: questionId,
           fullAnswer: "That hasn't come up in the meeting yet (no transcript lines recorded so far).",
+          citations: [],
           isFinal: true
         }
       }));
@@ -1862,11 +1873,23 @@ async function handleLiveQAQuestion(sessionId, ws, data) {
 
   // 4. Construct System Prompt & Call Groq LLM with streaming
   const systemPrompt = `You are a helpful AI Meeting Assistant answering questions during a live meeting.
-Answer the user's question accurately and concisely using ONLY the provided meeting transcript context below.
+Answer the user's question accurately and concisely using ONLY the provided meeting transcript context.
+
 CRITICAL INSTRUCTIONS:
 - You must answer ONLY based on what is explicitly stated in the transcript.
 - If the question cannot be answered using the transcript context (or the topic has not been discussed), explicitly state: "That hasn't come up in the meeting yet."
-- Do not make up facts, hallucinate, or reason beyond what was actually spoken in the meeting transcript.`;
+- Do not make up facts, hallucinate, or reason beyond what was actually spoken in the meeting transcript.
+- At the VERY END of your output, after your answer text, output a sentinel line "---CITATIONS---" followed on the next line by a JSON array of citations for the transcript line(s) that directly grounded your answer.
+- Each citation object MUST have:
+  - "lineId": the line tag string (e.g. "L0", "L1")
+  - "speaker": the speaker's name
+  - "timestamp": the timestamp string
+- ONLY include citations when the answer is genuinely grounded in specific transcript lines. If the answer is "That hasn't come up in the meeting yet." or no lines apply, output an empty JSON array [] after ---CITATIONS---. Do NOT cite arbitrary lines.
+
+EXAMPLE OUTPUT:
+The team agreed to discuss the architecture on Friday.
+---CITATIONS---
+[{"lineId": "L1", "speaker": "Ishita Bhojani", "timestamp": "14:02:15"}]`;
 
   const userPrompt = `Live Meeting Transcript Context:\n${formattedContext}\n\nUser Question: ${questionText}`;
 
@@ -1883,7 +1906,8 @@ CRITICAL INSTRUCTIONS:
       stream: true
     });
 
-    let fullAnswer = '';
+    let rawFullOutput = '';
+    let hasHitSentinel = false;
 
     for await (const chunk of completion) {
       // Abort stream loop immediately if socket was closed mid-stream
@@ -1894,12 +1918,54 @@ CRITICAL INSTRUCTIONS:
 
       const token = chunk.choices[0]?.delta?.content || '';
       if (token) {
-        fullAnswer += token;
-        ws.send(JSON.stringify({
-          type: 'qa_answer_chunk',
-          data: { id: questionId, chunk: token, isFinal: false }
-        }));
+        rawFullOutput += token;
+
+        // Check if sentinel marker has been encountered
+        if (!hasHitSentinel && rawFullOutput.includes('---CITATIONS---')) {
+          hasHitSentinel = true;
+        }
+
+        // Only stream token chunks to client if we haven't reached the sentinel block
+        if (!hasHitSentinel) {
+          ws.send(JSON.stringify({
+            type: 'qa_answer_chunk',
+            data: { id: questionId, chunk: token, isFinal: false }
+          }));
+        }
       }
+    }
+
+    // Split answer text and citations sentinel block safely
+    let answerText = rawFullOutput;
+    let citationsJsonStr = '[]';
+
+    if (rawFullOutput.includes('---CITATIONS---')) {
+      const parts = rawFullOutput.split('---CITATIONS---');
+      answerText = (parts[0] || '').trim();
+      citationsJsonStr = (parts[1] || '').trim();
+    } else {
+      answerText = rawFullOutput.trim();
+    }
+
+    // Parse citation JSON block safely
+    let citations = [];
+    try {
+      if (citationsJsonStr) {
+        const cleanJsonStr = citationsJsonStr.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+        const parsed = JSON.parse(cleanJsonStr);
+        if (Array.isArray(parsed)) {
+          citations = parsed
+            .filter(c => c && typeof c === 'object' && c.lineId)
+            .map(c => ({
+              lineId: String(c.lineId || '').trim(),
+              speaker: String(c.speaker || 'Speaker').trim(),
+              timestamp: String(c.timestamp || 'Live').trim()
+            }));
+        }
+      }
+    } catch (parseErr) {
+      console.warn(`[Server][LiveQA] Citation JSON parse error: ${parseErr.message}, falling back to empty citations.`);
+      citations = [];
     }
 
     if (ws.readyState === WebSocket.OPEN) {
@@ -1907,7 +1973,8 @@ CRITICAL INSTRUCTIONS:
         type: 'qa_answer_complete',
         data: {
           id: questionId,
-          fullAnswer: fullAnswer.trim() || "That hasn't come up in the meeting yet.",
+          fullAnswer: answerText || "That hasn't come up in the meeting yet.",
+          citations: citations,
           isFinal: true
         }
       }));
