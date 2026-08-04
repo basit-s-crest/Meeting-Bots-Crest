@@ -43,6 +43,17 @@ export function loadRefreshToken() {
   return null;
 }
 
+export function deleteRefreshToken() {
+  try {
+    if (fs.existsSync(TOKEN_PATH)) {
+      fs.unlinkSync(TOKEN_PATH);
+      console.log('[Google Drive Helper] Refresh token deleted successfully.');
+    }
+  } catch (err) {
+    console.error('[Google Drive Helper] Failed to delete refresh token:', err.message);
+  }
+}
+
 export async function getDriveClient() {
   const refreshToken = loadRefreshToken();
   if (!refreshToken) {

@@ -1,11 +1,12 @@
 "use client";
 
 import { use, useEffect, useState, useRef } from "react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+
 import {
   ArrowLeft, FileText, Calendar, MessageSquare, Play, Send, Sparkles, Download, Eye, Clock, CheckCircle2, AlertCircle, X,
-  MoreVertical, Edit2, Archive, ArchiveRestore, Trash2, Check, AlertTriangle, Wifi, WifiOff
+  MoreVertical, Edit2, Archive, ArchiveRestore, Trash2, Check, AlertTriangle
 } from "lucide-react";
 import { Container } from "@/components/ui/Container";
 import { Card } from "@/components/ui/Card";
@@ -13,6 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Input } from "@/components/ui/Input";
+import { GoogleDriveStatusBadge } from "@/components/GoogleDriveStatusBadge";
 
 interface TranscriptLine {
   speaker: string;
@@ -70,9 +72,10 @@ interface SchedulingData {
 
 const BACKEND_URL = "http://localhost:3000";
 
-const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  if (typeof window === "undefined") return Promise.resolve(new Response());
-  return window.fetch(input, {
+const originalFetch = typeof window !== "undefined" ? window.fetch : null;
+const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+  if (!originalFetch) return Promise.reject(new Error("fetch called on server"));
+  return originalFetch(input, {
     ...init,
     credentials: "include"
   });
@@ -80,11 +83,15 @@ const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
 
 export default function ProjectWorkspacePage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = use(params);
+  const router = useRouter();
+
 
   const [project, setProject] = useState<ProjectListItem | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [hasAutoRedirected, setHasAutoRedirected] = useState(false);
+
 
   const [activeTab, setActiveTab] = useState<"active" | "archived">("active");
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
@@ -127,12 +134,42 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
 
   const fetchSessions = async () => {
     try {
-      const res = await apiFetch(`${BACKEND_URL}/api/transcripts?projectId=${projectId}`, {
-        credentials: "include"
-      });
-      if (!res.ok) throw new Error("Failed to load project session history");
-      const data = await res.json();
-      setSessions(data.transcripts || []);
+      const [transcriptsRes, activeSessionsRes] = await Promise.all([
+        fetch(`${BACKEND_URL}/api/transcripts?projectId=${projectId}`, { credentials: "include" }),
+        fetch(`${BACKEND_URL}/api/sessions`, { credentials: "include" })
+      ]);
+
+      let transcriptList: Session[] = [];
+      if (transcriptsRes.ok) {
+        const data = await transcriptsRes.json();
+        transcriptList = data.transcripts || [];
+      }
+
+      if (activeSessionsRes.ok) {
+        const activeData = await activeSessionsRes.json();
+        const activeList = activeData.sessions || [];
+
+        for (const act of activeList) {
+          // Only merge active sessions explicitly assigned to this project
+          if (act.projectId !== projectId) continue;
+          const exists = transcriptList.some(s => s.sessionId === act.sessionId);
+          if (!exists) {
+            transcriptList.unshift({
+              fileName: `${act.type}_${act.sessionId}.jsonl`,
+              sessionId: act.sessionId,
+              title: `Live ${act.type} Meeting`,
+              botName: 'Meeting Assistant Bot',
+              created: new Date().toISOString(),
+              size: 0,
+              isDbBacked: false,
+              botType: act.type,
+              status: act.status || 'capturing'
+            });
+          }
+        }
+      }
+
+      setSessions(transcriptList);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error connecting to backend");
     } finally {
@@ -140,78 +177,20 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     }
   };
 
-  // useRouter hook
-  const router = useRouter();
-
-  // Upcoming Meetings State
-  const [upcomingEvents, setUpcomingEvents] = useState<any[]>([]);
-  const [eventsLoading, setEventsLoading] = useState(false);
-
-  const fetchUpcomingEvents = async () => {
-    setEventsLoading(true);
-    try {
-      const res = await apiFetch(`${BACKEND_URL}/api/calendar/upcoming`);
-      if (res.ok) {
-        const data = await res.json();
-        setUpcomingEvents(data.events || []);
-      }
-    } catch {
-    } finally {
-      setEventsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchUpcomingEvents();
-  }, []);
-
-  // Auto-Connect Bot State
-  const [autoJoinActive, setAutoJoinActive] = useState(false);
-
-  const checkAutoJoinStatus = async () => {
-    try {
-      const res = await apiFetch(`${BACKEND_URL}/api/calendar/auto-join/status`);
-      if (res.ok) {
-        const data = await res.json();
-        setAutoJoinActive(!!data.active);
-      }
-    } catch {
-    }
-  };
-
-  const toggleAutoJoin = async () => {
-    try {
-      const nextState = !autoJoinActive;
-      const res = await apiFetch(`${BACKEND_URL}/api/calendar/auto-join/toggle`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enable: nextState, projectId })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setAutoJoinActive(!!data.active);
-      }
-    } catch {
-      alert("Failed to toggle Auto-Connect Bot");
-    }
-  };
-
-  useEffect(() => {
-    checkAutoJoinStatus();
-  }, []);
-
   useEffect(() => {
     function fetchProjectDetails() {
       (async () => {
         try {
-          const res = await apiFetch(`${BACKEND_URL}/api/projects`, {
+          const res = await fetch(`${BACKEND_URL}/api/projects`, {
             credentials: "include"
           });
           if (res.ok) {
             const list: ProjectListItem[] = await res.json();
+            setAllProjects(list);
             const found = list.find((p) => p.id === projectId);
             if (found) setProject(found);
           }
+
         } catch {
         }
       })();
@@ -219,6 +198,28 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     fetchProjectDetails();
     fetchSessions();
   }, [projectId]);
+
+
+
+
+
+
+  const capturingSession = sessions.find(s => s.status !== "completed" && s.status !== "archived" && s.status !== "empty");
+
+  // Auto-redirect to live meeting transcript page when active capturing session starts
+  useEffect(() => {
+    if (capturingSession && !hasAutoRedirected) {
+      setHasAutoRedirected(true);
+      router.push(`/projects/${projectId}/meeting`);
+    }
+  }, [capturingSession, hasAutoRedirected, projectId, router]);
+
+
+
+
+  const [allProjects, setAllProjects] = useState<ProjectListItem[]>([]);
+
+
 
   // Rename action handler
   const handleOpenRenameModal = (session: Session) => {
@@ -231,7 +232,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     if (!renameSession || !renameTitleInput.trim()) return;
     setRenameLoading(true);
     try {
-      const res = await apiFetch(`${BACKEND_URL}/api/meetings/${renameSession.sessionId}`, {
+      const res = await fetch(`${BACKEND_URL}/api/meetings/${renameSession.sessionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -255,7 +256,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     const newStatus = isArchived ? "completed" : "archived";
     setOpenMenuSessionId(null);
     try {
-      const res = await apiFetch(`${BACKEND_URL}/api/meetings/${session.sessionId}`, {
+      const res = await fetch(`${BACKEND_URL}/api/meetings/${session.sessionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -276,13 +277,13 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     setDeleteLoading(true);
     try {
       // Try primary DELETE /api/meetings/:sessionId
-      let res = await apiFetch(`${BACKEND_URL}/api/meetings/${deleteSession.sessionId}`, {
+      let res = await fetch(`${BACKEND_URL}/api/meetings/${deleteSession.sessionId}`, {
         method: "DELETE",
       });
 
       // Fallback: try DELETE /api/transcripts/:fileName if primary route returned 404
       if (res.status === 404 && deleteSession.fileName) {
-        res = await apiFetch(`${BACKEND_URL}/api/transcripts/${deleteSession.fileName}`, {
+        res = await fetch(`${BACKEND_URL}/api/transcripts/${deleteSession.fileName}`, {
           method: "DELETE",
         });
       }
@@ -318,7 +319,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     setChatLoading(true);
 
     try {
-      const res = await apiFetch(`${BACKEND_URL}/api/memory/query`, {
+      const res = await fetch(`${BACKEND_URL}/api/memory/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: userMsg, project_id: projectId }),
@@ -346,7 +347,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleViewTranscript = async (session: Session) => {
     setLoadingModal(true);
     try {
-      const res = await apiFetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`);
+      const res = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`, {
+        credentials: "include"
+      });
       if (!res.ok) throw new Error("Could not download transcript");
       const data = await res.json();
       setActiveTranscript({ sessionId: session.sessionId, lines: data.lines || [] });
@@ -361,13 +364,16 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     setLoadingModal(true);
     setSchedSuccess(false);
     try {
-      const res = await apiFetch(`${BACKEND_URL}/api/transcripts/${session.fileName}/generate-report`, {
-        method: "POST"
+      const res = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}/generate-report`, {
+        method: "POST",
+        credentials: "include"
       });
       if (!res.ok) throw new Error("Could not retrieve AI report");
       const data = await res.json();
 
-      const transRes = await apiFetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`);
+      const transRes = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`, {
+        credentials: "include"
+      });
       let speakerStats: Array<{ speaker: string; percentage: number; talkTime: string }> = [];
       if (transRes.ok) {
         const transData = await transRes.json();
@@ -409,9 +415,10 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleConfirmSchedule = async () => {
     if (!activeReport) return;
     try {
-      const res = await apiFetch(`${BACKEND_URL}/api/calendar/confirm-report-schedule`, {
+      const res = await fetch(`${BACKEND_URL}/api/calendar/confirm-report-schedule`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           title: schedTitle,
           date: schedDate,
@@ -440,9 +447,10 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleDismissSchedule = async () => {
     if (!activeReport) return;
     try {
-      const res = await apiFetch(`${BACKEND_URL}/api/calendar/dismiss-report-schedule`, {
+      const res = await fetch(`${BACKEND_URL}/api/calendar/dismiss-report-schedule`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           filename: activeReport.filename
         })
@@ -497,9 +505,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const displayedSessions = activeTab === "active" ? activeSessions : archivedSessions;
 
   return (
-    <Container className="flex h-[calc(100vh-5.5rem)] flex-col gap-4 overflow-hidden py-3">
+    <Container className="py-8">
       {/* Header */}
-      <div className="flex shrink-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4">
           <Link
             href="/projects"
@@ -516,25 +524,8 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={toggleAutoJoin}
-            className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all ${
-              autoJoinActive
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20"
-                : "border-border bg-surface-2 text-ink-mute hover:bg-surface-3 hover:text-ink"
-            }`}
-            title="Automatically connect bot to Google Calendar meetings starting in the next 15 minutes"
-          >
-            {autoJoinActive ? (
-              <Wifi className="h-3.5 w-3.5 text-emerald-500 animate-pulse" />
-            ) : (
-              <WifiOff className="h-3.5 w-3.5 text-ink-mute" />
-            )}
-            Auto-Connect Bot: {autoJoinActive ? "ON" : "OFF"}
-          </button>
-
+        <div className="flex items-center gap-2.5">
+          <GoogleDriveStatusBadge variant="button" />
           <Link href={`/projects/${projectId}/meeting`}>
             <Button>
               <Play className="h-4 w-4" />
@@ -544,12 +535,40 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
         </div>
       </div>
 
+      {/* Live Active Session Banner */}
+
+      {capturingSession && (
+        <div className="mt-6 flex flex-col items-center justify-between gap-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 sm:flex-row shadow-sm">
+          <div className="flex items-center gap-3">
+            <span className="relative flex h-3.5 w-3.5 shrink-0">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex h-3.5 w-3.5 rounded-full bg-emerald-500" />
+            </span>
+            <div>
+              <h4 className="text-sm font-bold text-ink flex items-center gap-2">
+                Live Bot Capturing: {capturingSession.title || capturingSession.botName || "Meeting Bot"}
+                <Badge tone="success">{capturingSession.botType}</Badge>
+              </h4>
+              <p className="text-xs text-ink-soft mt-0.5">
+                Auto-joined meeting. Capturing live audio, transcript, and AI Q&A assistant.
+              </p>
+            </div>
+          </div>
+          <Link href={`/projects/${projectId}/meeting`}>
+            <Button size="sm" className="whitespace-nowrap bg-emerald-600 hover:bg-emerald-700 text-white">
+              <Eye className="h-4 w-4" />
+              Open Live Transcript & Q&A
+            </Button>
+          </Link>
+        </div>
+      )}
+
       {/* Grid */}
-      <div className="grid flex-1 grid-cols-1 gap-5 overflow-hidden lg:grid-cols-3 min-h-0">
+      <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Sessions Section */}
-        <section className="flex flex-col overflow-hidden lg:col-span-2 min-h-0">
-          <Card className="flex h-full flex-col overflow-hidden p-5">
-            <div className="mb-4 flex shrink-0 flex-wrap items-center justify-between gap-3">
+        <section className="lg:col-span-2">
+          <Card className="flex h-full flex-col p-6">
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
               <h2 className="flex items-center gap-2 text-lg font-semibold text-ink">
                 <FileText className="h-5 w-5 text-brand-600" />
                 Session history
@@ -595,7 +614,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
                 </p>
               </div>
             ) : (
-              <div className="flex-1 space-y-3 overflow-y-auto pr-1 min-h-0">
+              <div className="max-h-[70vh] flex-1 space-y-3 overflow-y-auto pr-1">
                 {displayedSessions.map((session) => (
                   <div
                     key={session.sessionId}
@@ -731,62 +750,15 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
           </Card>
         </section>
 
-        {/* Right Sidebar Section */}
-        <section className="flex flex-col gap-4 overflow-hidden lg:col-span-1 min-h-0">
-          {/* Upcoming Meetings Card */}
-          <Card className="shrink-0 p-4">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="flex items-center gap-2 text-base font-semibold text-ink">
-                <Calendar className="h-4 w-4 text-brand-600" />
-                Upcoming Meetings (Next 24h)
-              </h2>
-              {eventsLoading && <Sparkles className="h-3.5 w-3.5 animate-spin text-brand-600" />}
-            </div>
-
-            {eventsLoading ? (
-              <p className="py-3 text-center text-xs text-ink-mute">Checking calendar…</p>
-            ) : upcomingEvents.length === 0 ? (
-              <p className="py-3 text-center text-xs text-ink-mute">No upcoming meetings found in Google Calendar for today.</p>
-            ) : (
-              <div className="space-y-2 max-h-28 overflow-y-auto pr-1">
-                {upcomingEvents.map((evt) => (
-                  <div key={evt.id} className="rounded-xl border border-border bg-surface-2/60 p-3 text-xs flex flex-col gap-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-semibold text-ink truncate max-w-[70%]" title={evt.summary}>
-                        {evt.summary}
-                      </span>
-                      {evt.botType && <Badge tone="brand">{evt.botType}</Badge>}
-                    </div>
-                    <div className="flex items-center justify-between text-[11px] text-ink-mute">
-                      <span>{new Date(evt.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                      {evt.meetingUrl ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            router.push(`/projects/${projectId}/meeting?url=${encodeURIComponent(evt.meetingUrl)}&type=${evt.botType || 'google-meet'}`);
-                          }}
-                          className="font-semibold text-brand-600 hover:text-brand-700 hover:underline"
-                        >
-                          Join Session
-                        </button>
-                      ) : (
-                        <span className="italic text-ink-faint">No link attached</span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
-
-          {/* Chat Section */}
-          <Card className="flex flex-1 flex-col overflow-hidden p-5 min-h-0">
-            <h2 className="mb-3 flex shrink-0 items-center gap-2 text-base font-semibold text-ink">
+        {/* Chat Section */}
+        <section>
+          <Card className="flex h-full max-h-[85vh] flex-col p-6">
+            <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-ink">
               <MessageSquare className="h-5 w-5 text-brand-600" />
               Project AI chat
             </h2>
 
-            <div className="mb-3 flex-1 min-h-0 space-y-3 overflow-y-auto pr-1">
+            <div className="mb-4 min-h-[300px] flex-1 space-y-4 overflow-y-auto pr-1">
               {chatMessages.map((msg, idx) => (
                 <div key={idx} className={`flex flex-col ${msg.sender === "user" ? "items-end" : "items-start"}`}>
                   <div
@@ -826,7 +798,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
               <div ref={chatEndRef} />
             </div>
 
-            <form onSubmit={handleAskQuestion} className="flex shrink-0 gap-2 border-t border-border pt-3">
+            <form onSubmit={handleAskQuestion} className="flex gap-2 border-t border-border pt-4">
               <Input
                 placeholder="Ask about meetings…"
                 value={question}
@@ -933,7 +905,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
 
                   <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
                     <Input label="Meeting title" value={schedTitle} onChange={(e) => setSchedTitle(e.target.value)} />
-                    <Input label="Meeting link (optional)" value={schedZoom} onChange={(e) => setSchedZoom(e.target.value)} />
+                    <Input label="Zoom link (optional)" value={schedZoom} onChange={(e) => setSchedZoom(e.target.value)} />
                     <Input label="Date" type="date" value={schedDate} onChange={(e) => setSchedDate(e.target.value)} />
                     <Input label="Time" type="time" value={schedTime} onChange={(e) => setSchedTime(e.target.value)} />
                   </div>

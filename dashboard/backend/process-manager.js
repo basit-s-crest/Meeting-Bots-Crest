@@ -2,11 +2,40 @@ import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import net from 'net';
 import { saveSessionStart, saveSessionEnd, uploadReport } from './supabase-helper.js';
 import { uploadTranscriptToGoogleDrive, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { generateReportWithFallback, saveSchedulingData } from './report-generator.js';
 import { saveMarkdownAsDocx } from './docx-generator.js';
 import { processMeeting } from './memory-client.js';
+
+let onBotStartCallback = null;
+let onBotStopCallback = null;
+
+export function setOnBotStartCallback(fn) {
+  onBotStartCallback = fn;
+}
+
+export function setOnBotStopCallback(fn) {
+  onBotStopCallback = fn;
+}
+
+/**
+ * Helper to find a free port for WebSocket server
+ */
+
+export async function getFreePort(startPort = 8090) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.listen(startPort, () => {
+      srv.close(() => resolve(startPort));
+    });
+    srv.on('error', () => {
+      resolve(getFreePort(startPort + 1));
+    });
+  });
+}
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -78,6 +107,8 @@ class ProcessManager {
     const isWin = process.platform === 'win32';
     const nodeCmd = isWin ? 'node' : 'node';
 
+    const targetWsPort = (wsPort && !isNaN(wsPort)) ? Number(wsPort) : 8090;
+
     let cwd = '';
     let scriptPath = '';
     let args = [];
@@ -91,9 +122,10 @@ class ProcessManager {
         '--url', meetingUrl,
         '--name', botName,
         '--output', 'websocket',
-        '--port', String(wsPort),
+        '--port', String(targetWsPort),
         '--channel', 'chrome'
       ];
+
       if (!isHeadless) {
         args.push('--headful');
       } else {
@@ -155,11 +187,23 @@ class ProcessManager {
       console.error(`[ProcessManager] Supabase saveSessionStart error:`, err.message);
     });
 
+    if (onBotStartCallback) {
+      try {
+        onBotStartCallback({ sessionId, botType, meetingUrl, botName, projectId, wsPort });
+      } catch (err) {
+        console.error(`[ProcessManager] onBotStartCallback error:`, err.message);
+      }
+    }
+
+
     const sessionInfo = {
       childProcess: child,
       type: botType,
       status: 'starting',
       wsPort: wsPort,
+      meetingUrl: meetingUrl,
+      botName: botName,
+      projectId: projectId,
       outputPath: outputPath,
       tailInterval: null,
       onTranscriptCallback: null,
@@ -168,6 +212,7 @@ class ProcessManager {
     };
 
     this.activeSessions.set(sessionId, sessionInfo);
+
 
     // Save session Google Drive folder metadata companion file
     if (googleDriveFolderId) {
@@ -212,6 +257,14 @@ class ProcessManager {
         sessionInfo.onStatusCallback('stopped');
       }
       this.activeSessions.delete(sessionId);
+
+      if (onBotStopCallback) {
+        try {
+          onBotStopCallback({ sessionId });
+        } catch (err) {
+          console.error(`[ProcessManager] onBotStopCallback error:`, err.message);
+        }
+      }
 
       const filename = `${botType}_${sessionId}.jsonl`;
       const localTranscriptPath = path.join(TRANSCRIPTS_DIR, filename);

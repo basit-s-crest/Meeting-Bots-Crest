@@ -22,7 +22,9 @@ export class SpeakerDetector {
     this.botParticipantId = null; // Set once detected, then excluded permanently
     this.emptyCallback = null;
     this.solitudeTicks = 0;
+    this.hasHumanJoinedEver = false;
   }
+
 
   async initialize() {
     // Node-side polling — nothing to inject
@@ -162,7 +164,9 @@ export class SpeakerDetector {
       const participantCount = result ? result.participantCount : 0;
       const now = Date.now();
 
-      // Check for solitude (empty meeting)
+      // Solitude (empty meeting) check commented out per user request.
+      // Bot stays in call until manually stopped from UI.
+      /*
       if (this.botParticipantId && participantCount <= 1) {
         this.solitudeTicks++;
         // 200 ticks * 150ms = 30 seconds
@@ -176,6 +180,8 @@ export class SpeakerDetector {
       } else {
         this.solitudeTicks = 0;
       }
+      */
+
 
       // Primary speaker changed → emit as before (handles mic-off / clear handoff).
       if (foundSpeaker !== this.currentSpeaker) {
