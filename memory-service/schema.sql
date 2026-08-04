@@ -255,3 +255,40 @@ BEGIN
   LIMIT p_match_count;
 END;
 $$;
+
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- Scheduled (Upcoming) Meetings — custom calendar + project assignment
+-- ──────────────────────────────────────────────────────────────────────────────
+-- One row per Google Calendar event, upserted by calendar_event_id so
+-- re-syncing never duplicates. project_id is nullable: a meeting can be
+-- unassigned, and "assign to project" simply fills this column.
+-- session_id is backfilled when auto-join spawns a bot, tracing the
+-- calendar event to the real captured session.
+CREATE TABLE IF NOT EXISTS public.scheduled_meetings (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  calendar_event_id text NOT NULL UNIQUE,
+  project_id text,
+  session_id text,
+  title text NOT NULL,
+  description text,
+  meeting_url text,
+  bot_type text,
+  start_time timestamp with time zone NOT NULL,
+  end_time timestamp with time zone,
+  timezone text,
+  status text NOT NULL DEFAULT 'upcoming',
+  auto_join boolean NOT NULL DEFAULT false,
+  html_link text,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT scheduled_meetings_pkey PRIMARY KEY (id),
+  CONSTRAINT scheduled_meetings_project_id_fkey
+    FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE SET NULL,
+  CONSTRAINT scheduled_meetings_session_id_fkey
+    FOREIGN KEY (session_id) REFERENCES public.meeting_sessions(session_id) ON DELETE SET NULL
+);
+
+CREATE INDEX idx_scheduled_meetings_start_time ON public.scheduled_meetings (start_time);
+CREATE INDEX idx_scheduled_meetings_project_id  ON public.scheduled_meetings (project_id);
+CREATE INDEX idx_scheduled_meetings_status      ON public.scheduled_meetings (status);

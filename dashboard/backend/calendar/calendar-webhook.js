@@ -4,6 +4,7 @@ import { extractMeetingLink } from './link-extractor.js';
 import { autoJoinStore } from './auto-join-store.js';
 import { processManager, getFreePort } from '../process-manager.js';
 import { supabase } from '../supabase-client.js';
+import { upsertScheduledMeeting, reconcileDeletedMeetings } from './scheduled-meetings-db.js';
 
 
 
@@ -66,11 +67,6 @@ export async function setupWatchChannel() {
  * Fetches upcoming events and schedules bots for eligible Google Meet meetings.
  */
 export async function processUpcomingEvents() {
-  if (!autoJoinStore.isEnabled()) {
-    console.log('[Calendar Webhook] Auto-join disabled in settings. Skipping check.');
-    return;
-  }
-
   if (!loadRefreshToken()) {
     return;
   }
@@ -79,8 +75,48 @@ export async function processUpcomingEvents() {
     const calendar = await getCalendarClient();
     const now = new Date();
     const timeMin = now.toISOString();
-    // Look ahead 15 minutes
+    // Look ahead 15 minutes for auto-join scheduling, but sync a wider window
+    // so the calendar page stays populated.
     const timeMax = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
+    const syncMax = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000).toISOString();
+
+    // 1. Sync events into scheduled_meetings for the custom calendar.
+    try {
+      const syncResponse = await calendar.events.list({
+        calendarId: 'primary',
+        timeMin,
+        timeMax: syncMax,
+        singleEvents: true,
+        orderBy: 'startTime',
+        showDeleted: true
+      });
+      const syncEvents = syncResponse.data.items || [];
+      let synced = 0;
+      const liveIds = [];
+      for (const event of syncEvents) {
+        const extracted = extractMeetingLink(event);
+        if (extracted && !event.hangoutLink) {
+          event.hangoutLink = extracted.url;
+        }
+        if (event.status !== 'cancelled') {
+          liveIds.push(event.id);
+        }
+        const row = await upsertScheduledMeeting(event);
+        if (row) synced += 1;
+      }
+      // Remove rows whose events are gone from Google entirely.
+      const reconciled = await reconcileDeletedMeetings(liveIds, timeMin, syncMax);
+      if (synced > 0 || reconciled > 0) {
+        console.log(`[Calendar Webhook] Synced ${synced} upcoming events (reconciled ${reconciled} deleted) into scheduled_meetings.`);
+      }
+    } catch (syncErr) {
+      console.error('[Calendar Webhook] Error syncing events into scheduled_meetings:', syncErr.message);
+    }
+
+    // 2. Auto-join scheduling (unchanged, next 15 minutes).
+    if (!autoJoinStore.isEnabled()) {
+      return;
+    }
 
     const response = await calendar.events.list({
       calendarId: 'primary',
@@ -171,6 +207,19 @@ async function triggerBotJoin(eventId, meetingUrl, meetingTitle, botType) {
       wsPort,
       projectId
     });
+
+    // Backfill the scheduled_meetings row so the calendar event traces to the session.
+    try {
+      const { error: sessErr } = await supabase
+        .from('scheduled_meetings')
+        .update({ session_id: sessionId, status: 'joined', project_id: projectId })
+        .eq('calendar_event_id', eventId);
+      if (sessErr) {
+        console.warn(`[Calendar Auto-Join] Failed to link scheduled meeting to session ${sessionId}:`, sessErr.message);
+      }
+    } catch (linkErr) {
+      console.warn('[Calendar Auto-Join] Error linking scheduled meeting:', linkErr.message);
+    }
 
     console.log(`[Calendar Auto-Join] Bot process launched successfully on port ${wsPort} for event: ${eventId} (Project: ${projectId})`);
   } catch (err) {

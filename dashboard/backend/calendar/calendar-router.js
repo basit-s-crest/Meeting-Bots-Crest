@@ -16,6 +16,11 @@ import {
 import { supabase } from '../supabase-client.js';
 import { autoJoinStore } from './auto-join-store.js';
 import { handleWebhookNotification, setupWatchChannel, processUpcomingEvents } from './calendar-webhook.js';
+import { syncCalendarEvents } from './calendar-sync.js';
+import {
+  listScheduledMeetings,
+  assignScheduledMeeting
+} from './scheduled-meetings-db.js';
 
 /**
  * Downloads the scheduling companion JSON from Supabase Storage to local transcripts folder on demand.
@@ -208,6 +213,103 @@ calendarRouter.post('/disconnect', (req, res) => {
     res.json({ success: true, message: 'Google Calendar disconnected successfully.' });
   } catch (err) {
     res.status(500).json({ error: `Failed to disconnect Google Calendar: ${err.message}` });
+  }
+});
+
+
+/**
+ * Route: Lists upcoming Google Calendar events (next 60 days) and upserts them
+ * into the scheduled_meetings table. Returns the synced rows.
+ */
+calendarRouter.get('/events', async (req, res) => {
+  try {
+    const result = await syncCalendarEvents({ lookAheadDays: 60 });
+    return res.json({
+      success: true,
+      count: result.count,
+      meetings: result.events.map((e) => ({
+        id: e.id,
+        title: e.summary || 'Untitled meeting',
+        start: e.start?.dateTime || e.start?.date || null,
+        end: e.end?.dateTime || e.end?.date || null,
+        htmlLink: e.htmlLink || null,
+        meetingUrl: e.hangoutLink || null
+      }))
+    });
+  } catch (err) {
+    const normErr = handleGoogleApiError(err);
+    console.error('[Calendar Router] /events sync failed:', err.message);
+    return res.status(normErr.status || 500).json({ error: normErr.error });
+  }
+});
+
+/**
+ * Route: Triggers a manual sync of Google Calendar events into scheduled_meetings.
+ */
+calendarRouter.post('/sync', async (req, res) => {
+  try {
+    const result = await syncCalendarEvents({ lookAheadDays: 60 });
+    return res.json({ success: true, count: result.count });
+  } catch (err) {
+    const normErr = handleGoogleApiError(err);
+    console.error('[Calendar Router] /sync failed:', err.message);
+    return res.status(normErr.status || 500).json({ error: normErr.error });
+  }
+});
+
+/**
+ * Route: Lists scheduled meetings from the DB (defaults to upcoming only).
+ * Query params: ?includePast=true to include historical events.
+ */
+calendarRouter.get('/scheduled', async (req, res) => {
+  try {
+    const includePast = req.query.includePast === 'true';
+    const meetings = await listScheduledMeetings({ includePast });
+    return res.json({ success: true, meetings });
+  } catch (err) {
+    console.error('[Calendar Router] /scheduled failed:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Route: Assigns a scheduled meeting to a project owned by the current user.
+ */
+calendarRouter.post('/scheduled/:id/assign-project', async (req, res) => {
+  const { id } = req.params;
+  const { projectId } = req.body;
+
+  if (!projectId) {
+    return res.status(400).json({ error: 'Missing projectId' });
+  }
+
+  try {
+    const userId = req.user?.id;
+    const meeting = await assignScheduledMeeting(id, projectId, userId);
+    return res.json({ success: true, meeting });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * Route: Clears the project assignment on a scheduled meeting.
+ */
+calendarRouter.post('/scheduled/:id/unassign-project', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const { data, error } = await supabase
+      .from('scheduled_meetings')
+      .update({ project_id: null })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return res.json({ success: true, meeting: data });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
   }
 });
 

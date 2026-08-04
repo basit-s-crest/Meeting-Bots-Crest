@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Input } from "@/components/ui/Input";
+import { GoogleDriveStatusBadge } from "@/components/GoogleDriveStatusBadge";
 
 interface TranscriptLine {
   speaker: string;
@@ -196,8 +197,6 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     }
     fetchProjectDetails();
     fetchSessions();
-    checkGoogleDriveStatus();
-    checkGoogleCalendarStatus();
   }, [projectId]);
 
 
@@ -219,89 +218,6 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
 
 
   const [allProjects, setAllProjects] = useState<ProjectListItem[]>([]);
-  const [targetProjectId, setTargetProjectId] = useState<string>(projectId);
-  const [isDriveConnected, setIsDriveConnected] = useState(false);
-  const [driveConnecting, setDriveConnecting] = useState(true);
-  const [isCalendarConnected, setIsCalendarConnected] = useState(false);
-  const [calendarConnecting, setCalendarConnecting] = useState(true);
-  const [autoJoinEnabled, setAutoJoinEnabled] = useState(true);
-  const [leadTimeMinutes, setLeadTimeMinutes] = useState(2);
-
-  function checkGoogleDriveStatus() {
-    (async () => {
-      try {
-        const res = await fetch(`${BACKEND_URL}/api/auth/google/status`);
-        if (res.ok) {
-          const data = await res.json();
-          setIsDriveConnected(data.connected);
-        }
-      } catch {
-      } finally {
-        setDriveConnecting(false);
-      }
-    })();
-  }
-
-  function checkGoogleCalendarStatus() {
-    (async () => {
-      try {
-        const res = await fetch(`${BACKEND_URL}/api/calendar/auth/status`);
-        if (res.ok) {
-          const data = await res.json();
-          setIsCalendarConnected(data.connected);
-          if (data.autoJoinEnabled !== undefined) setAutoJoinEnabled(data.autoJoinEnabled);
-          if (data.leadTimeMinutes !== undefined) setLeadTimeMinutes(data.leadTimeMinutes);
-          if (data.projectId) setTargetProjectId(data.projectId);
-        }
-      } catch {
-      } finally {
-        setCalendarConnecting(false);
-      }
-    })();
-  }
-
-  async function handleToggleAutoJoin(newVal: boolean) {
-    setAutoJoinEnabled(newVal);
-    try {
-      await fetch(`${BACKEND_URL}/api/calendar/auto-join/settings`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: newVal, projectId })
-      });
-    } catch (err) {
-      console.error("Failed to toggle auto-join setting:", err);
-    }
-  }
-
-  async function handleChangeTargetProject(newProjId: string) {
-    setTargetProjectId(newProjId);
-    try {
-      await fetch(`${BACKEND_URL}/api/calendar/auto-join/settings`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: newProjId })
-      });
-    } catch (err) {
-      console.error("Failed to update target project for auto-join:", err);
-    }
-  }
-
-
-
-  async function handleDisconnectCalendar() {
-    if (!confirm("Are you sure you want to disconnect your Google Calendar account?")) return;
-    try {
-      const res = await fetch(`${BACKEND_URL}/api/calendar/auth/disconnect`, {
-        method: "POST",
-        credentials: "include"
-      });
-      if (res.ok) {
-        setIsCalendarConnected(false);
-      }
-    } catch (err) {
-      console.error("Failed to disconnect calendar:", err);
-    }
-  }
 
 
 
@@ -608,12 +524,15 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
             </p>
           </div>
         </div>
-        <Link href={`/projects/${projectId}/meeting`}>
-          <Button>
-            <Play className="h-4 w-4" />
-            Launch bot session
-          </Button>
-        </Link>
+        <div className="flex items-center gap-2.5">
+          <GoogleDriveStatusBadge variant="button" />
+          <Link href={`/projects/${projectId}/meeting`}>
+            <Button>
+              <Play className="h-4 w-4" />
+              Launch bot session
+            </Button>
+          </Link>
+        </div>
       </div>
 
       {/* Live Active Session Banner */}
@@ -643,93 +562,6 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
           </Link>
         </div>
       )}
-
-      {/* Cloud Integrations Section */}
-
-      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Card className="flex items-center justify-between p-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/10 text-xl text-blue-500">
-              📁
-            </div>
-            <div>
-              <h4 className="text-sm font-semibold text-ink">Google Drive Sync</h4>
-              <p className="text-xs text-ink-mute">Sync meeting docs & transcripts to cloud folder</p>
-            </div>
-          </div>
-          <div>
-            {driveConnecting ? (
-              <span className="text-xs text-ink-mute">Checking…</span>
-            ) : isDriveConnected ? (
-              <Badge tone="success">Connected</Badge>
-            ) : (
-              <a
-                href={`${BACKEND_URL}/api/auth/google`}
-                className="inline-flex items-center gap-1 rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-brand-700"
-              >
-                Connect Drive
-              </a>
-            )}
-          </div>
-        </Card>
-
-        <Card className="flex items-center justify-between p-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/10 text-xl text-emerald-500">
-              📅
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h4 className="text-sm font-semibold text-ink">Google Calendar & Auto-Join</h4>
-                {isCalendarConnected && (
-                  <span className="text-[10px] text-ink-mute">Auto-joins {leadTimeMinutes}m before</span>
-                )}
-              </div>
-              {isCalendarConnected ? (
-                <div className="space-y-1.5 mt-1">
-                  <label className="flex items-center gap-1.5 text-xs text-ink-soft cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={autoJoinEnabled}
-                      onChange={(e) => handleToggleAutoJoin(e.target.checked)}
-                      className="rounded border-gray-300 text-brand-600 focus:ring-brand-500 h-3.5 w-3.5"
-                    />
-                    <span>Auto-join Google Meet meetings</span>
-                  </label>
-                </div>
-              ) : (
-                <p className="text-xs text-ink-mute">Sync calendar events & enable automatic bot joins</p>
-              )}
-
-            </div>
-          </div>
-          <div>
-            {calendarConnecting ? (
-              <span className="text-xs text-ink-mute">Checking…</span>
-            ) : isCalendarConnected ? (
-              <div className="flex items-center gap-2">
-                <Badge tone="success">Connected</Badge>
-                <button
-                  type="button"
-                  onClick={handleDisconnectCalendar}
-                  className="text-xs font-semibold text-rose-500 hover:text-rose-600 hover:underline transition-colors"
-                >
-                  Disconnect
-                </button>
-              </div>
-            ) : (
-              <a
-                href={`${BACKEND_URL}/api/calendar/auth`}
-                className="inline-flex items-center gap-1 rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-brand-700"
-              >
-                Connect Calendar
-              </a>
-            )}
-          </div>
-
-        </Card>
-      </div>
-
 
       {/* Grid */}
       <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-3">

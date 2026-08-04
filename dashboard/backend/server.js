@@ -19,7 +19,7 @@ import { generateFirefliesReport, calculateSpeakerStats, saveSchedulingData } fr
 import { supabase } from './supabase-client.js';
 import { uploadReport, downloadStorageFile } from './supabase-helper.js';
 import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
-import { getOAuth2Client, saveRefreshToken, loadRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
+import { getOAuth2Client, saveRefreshToken, loadRefreshToken, deleteRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { calendarRouter } from './calendar/calendar-router.js';
 import { startCalendarPoller } from './calendar/calendar-poller.js';
 import { handleWebhookNotification } from './calendar/calendar-webhook.js';
@@ -696,6 +696,16 @@ app.get('/api/auth/google/status', (req, res) => {
   const token = loadRefreshToken();
   const configured = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
   res.json({ connected: !!token && configured });
+});
+
+// Google Drive Disconnect — clears the saved refresh token
+app.post('/api/auth/google/disconnect', (req, res) => {
+  try {
+    deleteRefreshToken();
+    res.json({ success: true, message: 'Google Drive disconnected successfully.' });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to disconnect Google Drive: ${err.message}` });
+  }
 });
 
 const server = createServer(app);
