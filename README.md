@@ -12,7 +12,7 @@ The project consists of three main services interacting with each other, externa
 
 ```mermaid
 graph TD
-    subgraph Frontend [Next.js App - Port 3001]
+    subgraph Frontend [Next.js App - Port 3000 / 3001]
         Dashboard[React Dashboard]
         Chatbot[Memory Chatbot]
     end
@@ -55,32 +55,51 @@ graph TD
 
 ---
 
+## Quick Start (PowerShell - 1-Step Setup & Launch)
+
+For Windows / PowerShell users, central installation and multi-service launching are fully automated via PowerShell scripts:
+
+### 1️⃣ One-Step Installation
+Run the central installation script to install all dependencies for Backend, Frontend, Playwright Bots, Chromium binaries, and Python Memory Service:
+
+```powershell
+.\install.ps1
+```
+
+### 2️⃣ One-Step Multi-Service Launch
+Launch all 3 central services (Backend API, Next.js Frontend, and Python Memory Service) simultaneously:
+
+```powershell
+# Launches Backend, Frontend, and Memory Service in separate terminal windows
+.\start.ps1
+
+# Optional: Run all services in background PowerShell jobs
+.\start.ps1 -Background
+```
+
+---
+
 ## Folder Structure
 
-* **`Microsoft Teams/`**: Playwright-based Teams bot that bypasses app landing pages, toggles off camera/microphone switches, and utilizes a robust DOM-based caption scraper with a `MutationObserver`.
-* **`Google Meet/`**: Playwright-based Google Meet bot that intercepts WebRTC `RTCPeerConnection` natively to mix and downsample meeting audio, mapping active speakers via DOM speaker indicators.
-* **`Zoom/`**: Playwright-based Zoom Web Client bot that streams audio buffers to the server.
+* **`Microsoft Teams/`**: Playwright-based Teams bot that bypasses app landing pages, toggles off camera/microphone switches, and utilizes a DOM-based caption scraper.
+* **`Google Meet/`**: Playwright-based Google Meet bot that intercepts WebRTC `RTCPeerConnection` natively to mix audio, mapping active speakers via DOM indicators.
+* **`Zoom/`**: Playwright-based Zoom Web Client bot that streams PCM audio chunks directly to the server proxy.
 * **`dashboard/`**:
-  * **`frontend/`**: A modern **Next.js** web application (runs on port **`3001`**) built with React, Tailwind CSS, and Lucide Icons. It hosts the dashboard interface, live caption feed, active session indicators, Google Calendar scheduler, and the memory chat assistant.
-  * **`backend/`**: An Express.js server (runs on port **`3000`**) that spawns the bots as child processes, exposes a WebSocket proxy, manages Deepgram transcription streams, generates Word Document summaries (`docx` library), and handles Google Drive OAuth2 flows.
-* **`memory-service/`**: A **Python FastAPI service** (runs on port **`8001`**) providing meeting memory rollup and retrieval. It embeds transcripts using a sentence-transformer (`bge-small-en-v1.5`), stores them in Supabase (PostgreSQL with `pgvector`), and uses Redis as a hot buffer for active meetings.
+  * **`frontend/`**: Modern **Next.js** web application (runs on port **`3000`** / **`3001`**) built with React and Tailwind CSS. Features live meeting modal, real-time transcripts, Google Drive integration, and AI Q&A assistant.
+  * **`backend/`**: Express.js server (runs on port **`3000`**) that manages child bot processes, WebSocket streaming, Supabase storage, Word Document export, and Google Calendar auto-join webhooks.
+* **`memory-service/`**: **Python FastAPI service** (runs on port **`8001`**) providing meeting memory rollup, sentence embeddings (`bge-small-en-v1.5`), and Groq LLM RAG context synthesis.
 
 ---
 
-## Prerequisites
+## Environment Configuration
 
-1. **Node.js**: Version 18 or higher is recommended.
-2. **Python**: Version 3.11 or higher (for the memory service).
-3. **Redis**: Running instance on localhost (port `6379`) for hot buffer storage during live meetings.
-4. **Google Chrome**: Real Google Chrome installation is required on the host system to run bots under the `--channel chrome` flag.
-5. **Playwright**: Browser dependencies must be installed.
-6. **Google Cloud Console Project**: Needed to configure client credentials for Google Drive and Google Calendar integrations.
+Copy the template configuration to `.env` in the project root folder:
 
----
+```powershell
+cp .env.example .env
+```
 
-## 1. Environment Configuration
-
-Create a `.env` file in the **root folder** of the project and populate the following variables:
+Populate the required credentials in `.env`:
 
 ```ini
 # Deepgram API Key (Required for Zoom & Google Meet audio transcription)
@@ -101,148 +120,76 @@ GOOGLE_CLIENT_ID="your_google_client_id.apps.googleusercontent.com"
 GOOGLE_CLIENT_SECRET="your_google_client_secret"
 GOOGLE_REDIRECT_URI="http://localhost:3000/api/auth/google/callback"
 
-# Memory Service Port Configuration (Optional, defaults to 8001)
-MEMORY_SERVICE_PORT=8001
-REDIS_URL="redis://localhost:6379"
+# Google Calendar OAuth2 Credentials (Required for Google Calendar Auto-Join)
+GOOGLE_CALENDAR_CLIENT_ID="your_google_calendar_client_id.apps.googleusercontent.com"
+GOOGLE_CALENDAR_CLIENT_SECRET="your_google_calendar_client_secret"
+GOOGLE_CALENDAR_REDIRECT_URI="http://localhost:3000/api/calendar/auth/callback"
+
+# Public Backend URL for Webhooks (e.g. Ngrok tunnel URL)
+PUBLIC_BACKEND_URL="https://your-ngrok-tunnel.ngrok-free.dev"
 ```
 
 ---
 
-## 2. Installation
+## First-Time Bot Authentication (Google Account Login)
 
-### Node.js Workspace Dependencies
-Install dependencies across all Node.js workspace directories (Bots and Backend) in a single command from the root folder:
+To save persistent browser credentials so Google Meet bots join without requiring manual sign-in each time:
 
+```powershell
+cd "Google Meet"
+node src/index.js --login
+```
+1. Sign in to your Google Account in the opened Chrome window.
+2. Return to the terminal and press **ENTER** to save your authenticated session profile.
+
+---
+
+## Manual Step-by-Step Installation & Launch (Alternative)
+
+If you prefer to install and run each service manually instead of using `install.ps1` and `start.ps1`:
+
+### Installation
 ```bash
-# Install dependencies for Node.js projects
+# 1. Install Node.js Dependencies
 npm install
-```
+cd dashboard/backend && npm install && cd ../..
+cd dashboard/frontend && npm install && cd ../..
+cd "Google Meet" && npm install && cd ..
+cd Zoom && npm install && cd ..
+cd "Microsoft Teams" && npm install && cd ..
 
-Make sure browser drivers are installed via Playwright:
-```bash
-npx playwright install chrome
-```
+# 2. Install Playwright Chromium
+npx playwright install chromium
 
-### Next.js Frontend Dependencies
-Install dependencies for the Next.js app:
-```bash
-cd dashboard/frontend
-npm install
-cd ../..
-```
-
-### Python Memory Service Dependencies
-Ensure you have `uv` installed, or use standard virtual environments to install Python packages:
-
-```bash
+# 3. Install Python Memory Service Dependencies
 cd memory-service
 uv sync
-# Or: python -m venv .venv && source .venv/bin/activate && pip install -r pyproject.toml
-cd ..
 ```
 
----
+### Manual Execution (3 Separate Terminals)
 
-## 3. First-Time Bot Authentication (First-time Login)
-
-To ensure the bots can access meetings under authenticated accounts, you must run the login setup once before running them in the background.
-
-* **Google Meet Bot:**
-  Run the following command to log in manually. This opens a headful browser and saves the persistent `auth.json` file:
+* **Terminal 1 (Dashboard Backend):**
   ```bash
-  cd "Google Meet"
-  node src/index.js --login
+  cd dashboard/backend
+  npm start
   ```
-  *(Log in in the browser, then return to the terminal and press ENTER to save the session).*
 
-* **Microsoft Teams Bot:**
-  Run the following command to log in manually. This creates the persistent `auth.json` file:
+* **Terminal 2 (Dashboard Frontend):**
   ```bash
-  cd "Microsoft Teams"
-  node src/index.js --login
+  cd dashboard/frontend
+  npm run dev
   ```
-  *(Log in in the browser, then return to the terminal and press ENTER to save the session).*
+
+* **Terminal 3 (Python Memory Service):**
+  ```bash
+  cd memory-service
+  uv run serve
+  ```
 
 ---
 
-## 4. Running the Project
+## Active Endpoints
 
-To run the entire system, you will need to run the following services concurrently:
-
-### A. Start Redis
-Make sure a local Redis server is running:
-```bash
-# macOS/Linux
-redis-server
-
-# Windows (via WSL or native installer)
-redis-server.exe
-```
-
-### B. Start the Python Memory Service
-Start the FastAPI server from the `memory-service/` directory:
-```bash
-cd memory-service
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
-```
-The memory service will run at `http://localhost:8001`.
-
-### C. Start the Centralized Backend Server
-Start the Express API/WebSockets server from the `dashboard/backend/` directory:
-```bash
-cd dashboard/backend
-npm start
-```
-The backend server will run at `http://localhost:3000`.
-
-### D. Start the Next.js Frontend
-Start the React dashboard in development mode from the `dashboard/frontend/` directory:
-```bash
-cd dashboard/frontend
-npm run dev
-```
-The Next.js application will run at **`http://localhost:3001`**. Open this URL in your web browser to access the control panel.
-
----
-
-## 5. Platform Bot Execution Details
-
-### A. Microsoft Teams Bot
-* **Mechanism**: Automates anonymous guest joining. Utilizes custom script injections to spoof `document.visibilityState` to `'visible'` (avoiding headless loader freezes), toggles FluentUI camera/microphone selectors, and observes `.fui-ChatMessageCompact` blocks for live caption strings.
-* **Requirements**: Captions **must** be enabled on the host side of the meeting for transcription to work. The bot will automatically trigger "Turn on live captions" inside the meeting.
-
-### B. Google Meet Bot
-* **Mechanism**: Intercepts the RTCPeerConnection to stream meeting audio to Node.js, downsamples PCM to 16kHz, and uploads it to the Deepgram API for transcription. 
-* **Speaker Detection**: Polls the DOM for `.KUNJSe` classes to detect active speaker boundaries.
-
-### C. Zoom Bot
-* **Mechanism**: Connects to the Zoom meeting via the web client, intercepts audio channels, and streams data over WebSockets for backend Deepgram transcription.
-
----
-
-## 6. Integrations & Integrations Setup
-
-### Google Drive & Calendar Sync
-To automatically schedule meetings and save raw transcripts (`.jsonl`), timestamped readable transcripts (`_readable.txt`), and summaries (`_report.md` & `_report.docx`) to your Google Drive folders:
-
-#### GCP Project Setup
-1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
-2. Enable the **Google Drive API** and **Google Calendar API** in your project:
-   * Navigate to **API & Services > Library**.
-   * Search for `Google Drive API` and click **Enable**.
-   * Search for `Google Calendar API` and click **Enable**.
-3. Configure the **OAuth Consent Screen**:
-   * Set user type and register your app.
-   * Add the scope: `https://www.googleapis.com/auth/drive.file` and `https://www.googleapis.com/auth/calendar.events` (for scheduling).
-4. Create **Credentials**:
-   * Create an OAuth 2.0 Client ID.
-   * Set Authorized Redirect URIs to: `http://localhost:3000/api/auth/google/callback`.
-   * Add the Client ID, Secret, and Redirect URI to your root `.env` file.
-
-#### Syncing in Dashboard
-1. Open the Next.js dashboard homepage (`http://localhost:3001/`).
-2. Click **Connect Google Drive** on the left panel.
-3. Authenticate and approve the scopes on Google's consent page.
-4. Once redirected back, the status badge will update to **Connected**.
-5. When starting a bot session, paste a folder link (e.g. `https://drive.google.com/drive/folders/FOLDER_ID`) in the **Google Drive Folder URL (optional)** text input.
-6. The transcripts and reports will automatically sync to that folder on session completion!
+* 🌐 **Frontend Dashboard**: `http://localhost:3000` (or `http://localhost:3001`)
+* ⚙️ **Backend Express Server**: `http://localhost:3000`
+* 🧠 **Python Memory Service**: `http://localhost:8001`
