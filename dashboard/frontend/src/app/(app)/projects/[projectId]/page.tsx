@@ -1,7 +1,7 @@
 "use client";
 
-import { use, useEffect, useState, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useState, useRef } from "react";
+import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 import {
   ArrowLeft, FileText, Calendar, MessageSquare, Play, Send, Sparkles, Download, Eye, Clock, CheckCircle2, AlertCircle, X,
@@ -68,18 +68,11 @@ interface SchedulingData {
   status?: string;
 }
 
-const BACKEND_URL = "http://localhost:3000";
+import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
-const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  if (typeof window === "undefined") return Promise.resolve(new Response());
-  return window.fetch(input, {
-    ...init,
-    credentials: "include"
-  });
-};
-
-export default function ProjectWorkspacePage({ params }: { params: Promise<{ projectId: string }> }) {
-  const { projectId } = use(params);
+export default function ProjectWorkspacePage() {
+  const routeParams = useParams();
+  const projectId = typeof routeParams?.projectId === "string" ? routeParams.projectId : Array.isArray(routeParams?.projectId) ? routeParams.projectId[0] : "";
 
   const [project, setProject] = useState<ProjectListItem | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -318,7 +311,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     setChatLoading(true);
 
     try {
-      const res = await fetch(`${BACKEND_URL}/api/memory/query`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/memory/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: userMsg, project_id: projectId }),
@@ -346,9 +339,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleViewTranscript = async (session: Session) => {
     setLoadingModal(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`, {
-        credentials: "include"
-      });
+      const res = await apiFetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`);
       if (!res.ok) throw new Error("Could not download transcript");
       const data = await res.json();
       setActiveTranscript({ sessionId: session.sessionId, lines: data.lines || [] });
@@ -363,16 +354,13 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     setLoadingModal(true);
     setSchedSuccess(false);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}/generate-report`, {
-        method: "POST",
-        credentials: "include"
+      const res = await apiFetch(`${BACKEND_URL}/api/transcripts/${session.fileName}/generate-report`, {
+        method: "POST"
       });
       if (!res.ok) throw new Error("Could not retrieve AI report");
       const data = await res.json();
 
-      const transRes = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`, {
-        credentials: "include"
-      });
+      const transRes = await apiFetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`);
       let speakerStats: Array<{ speaker: string; percentage: number; talkTime: string }> = [];
       if (transRes.ok) {
         const transData = await transRes.json();
@@ -414,10 +402,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleConfirmSchedule = async () => {
     if (!activeReport) return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/calendar/confirm-report-schedule`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/calendar/confirm-report-schedule`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({
           title: schedTitle,
           date: schedDate,
@@ -446,10 +433,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleDismissSchedule = async () => {
     if (!activeReport) return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/calendar/dismiss-report-schedule`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/calendar/dismiss-report-schedule`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({
           filename: activeReport.filename
         })

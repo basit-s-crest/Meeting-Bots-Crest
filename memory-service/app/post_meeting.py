@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from app.database import get_db
 from app.embeddings import embed
 from app.groq_client import get_groq
-from app.models.meetings import get_meeting, mark_meeting_completed
+from app.models.meetings import get_meeting, mark_meeting_completed, update_meeting
 from app.models.segments import get_segments
 from app.models.events import insert_event
 from app.models.projects import get_project_memory, upsert_project_memory

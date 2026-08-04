@@ -1,8 +1,8 @@
 "use client";
 
-import { use, useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useParams } from "next/navigation";
 import {
   ArrowLeft, Play, Square, Volume2, Layers, Wifi, WifiOff
 } from "lucide-react";
@@ -28,18 +28,11 @@ interface TranscriptLine {
   provisional?: boolean;
 }
 
-const BACKEND_URL = "http://localhost:3000";
+import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
-const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  if (typeof window === "undefined") return Promise.resolve(new Response());
-  return window.fetch(input, {
-    ...init,
-    credentials: "include"
-  });
-};
-
-export default function MeetingBotPage({ params }: { params: Promise<{ projectId: string }> }) {
-  const { projectId } = use(params);
+export default function MeetingBotPage() {
+  const routeParams = useParams();
+  const projectId = typeof routeParams?.projectId === "string" ? routeParams.projectId : Array.isArray(routeParams?.projectId) ? routeParams.projectId[0] : "";
   const router = useRouter();
 
   const [botType, setBotType] = useState("google-meet");
@@ -183,7 +176,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
     setActiveSpeaker("Connecting…");
 
     try {
-      const res = await fetch(`${BACKEND_URL}/api/sessions/start`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/sessions/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -357,7 +350,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
     setBotStatus("stopping");
 
     try {
-      const res = await fetch(`${BACKEND_URL}/api/sessions/stop`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/sessions/stop`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId: activeSessionId })

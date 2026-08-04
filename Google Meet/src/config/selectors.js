@@ -15,6 +15,10 @@ export const SELECTORS = {
     speakingIndicator: '[aria-label*="speaking" i], [data-speaking="true"], .speaking',
     participantName: '[data-participant-name], .participant-name, [aria-label*="name" i]',
     leaveBtn: 'button[aria-label*="leave" i], button:has-text("Leave call")',
+    chatButton: 'button[aria-label*="Chat with everyone" i], button[aria-label*="chat" i], button[data-tooltip*="Chat" i]',
+    chatInput: 'textarea[aria-label*="Send a message" i], textarea[name="chatTextInput"], div[contenteditable="true"][aria-label*="Send a message" i]',
+    chatSendBtn: 'button[aria-label*="Send a message" i], button[aria-label*="Send message" i]',
+    chatMessages: '[data-message-text], div[aria-live="polite"] [role="listitem"], [data-sender-name]',
   },
   preJoin: {
     previewVideo: 'video[autoplay][muted]',

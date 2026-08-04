@@ -448,6 +448,79 @@ export class MeetBot {
     console.log('[MeetBot] Session saved successfully.');
   }
 
+  async openChat() {
+    try {
+      const input = await this.page.$(SELECTORS.inCall.chatInput);
+      if (input && await input.isVisible()) {
+        console.log('[MeetBot] [CHAT LOG] Google Meet chat panel is ALREADY open.');
+        return true;
+      }
+
+      console.log('[MeetBot] [CHAT LOG] Searching for Google Meet Chat toggle button...');
+      const chatBtn = await this.page.$(SELECTORS.inCall.chatButton);
+      if (chatBtn && await chatBtn.isVisible()) {
+        const expanded = await chatBtn.getAttribute('aria-expanded');
+        if (expanded !== 'true') {
+          console.log('[MeetBot] [CHAT LOG] Clicking Google Meet Chat button to open panel...');
+          await chatBtn.click();
+          await this.page.waitForTimeout(1500);
+        }
+        return true;
+      } else {
+        console.warn('[MeetBot] [CHAT LOG] Google Meet Chat button not visible.');
+      }
+    } catch (err) {
+      console.warn('[MeetBot] [CHAT LOG] Failed to open chat panel:', err.message);
+    }
+    return false;
+  }
+
+  async sendChatMessage(text) {
+    try {
+      console.log('[MeetBot] [CHAT LOG] Preparing to send chat message...');
+      await this.openChat();
+
+      const input = await this.page.$(SELECTORS.inCall.chatInput);
+      if (input && await input.isVisible()) {
+        console.log(`[MeetBot] [CHAT LOG] Found chat input element. Typing: "${text.slice(0, 60).replace(/\n/g, ' ')}..."`);
+        await input.scrollIntoViewIfNeeded().catch(() => {});
+        await input.click({ force: true }).catch(() => {});
+        await input.focus().catch(() => {});
+        await this.page.keyboard.insertText(text);
+        await this.page.waitForTimeout(500);
+
+        const sendBtn = await this.page.$(SELECTORS.inCall.chatSendBtn);
+        if (sendBtn && await sendBtn.isVisible()) {
+          console.log('[MeetBot] [CHAT LOG] Clicking Send button...');
+          await sendBtn.click({ force: true }).catch(() => {});
+        } else {
+          console.log('[MeetBot] [CHAT LOG] Send button not visible, pressing Enter...');
+          await this.page.keyboard.press('Enter');
+        }
+        await this.page.waitForTimeout(1000);
+        console.log('[MeetBot] [CHAT LOG] Chat message dispatched successfully.');
+        return true;
+      } else {
+        console.warn('[MeetBot] [CHAT LOG] Chat input field not visible.');
+      }
+    } catch (err) {
+      console.warn('[MeetBot] [CHAT LOG] Error sending chat message:', err.message);
+    }
+    return false;
+  }
+
+  async readLatestChatMessages() {
+    try {
+      if (!this.page) return [];
+      const messages = await this.page.$$eval(SELECTORS.inCall.chatMessages, els => {
+        return els.map(el => el.textContent?.trim()).filter(Boolean);
+      });
+      return messages;
+    } catch {
+      return [];
+    }
+  }
+
   async leave() {
     try {
       const leaveBtn = await this.page.$('button[aria-label*="Leave" i], button:has-text("Leave call")');

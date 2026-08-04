@@ -16,11 +16,12 @@ interface Project {
   created_at: string;
 }
 
-const BACKEND_URL = "http://localhost:3000";
+import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -32,13 +33,15 @@ export default function ProjectsPage() {
 
   function fetchProjects() {
     (async () => {
+      setError("");
       try {
-        const res = await fetch(`${BACKEND_URL}/api/projects`, {
-          credentials: "include"
-        });
-        if (!res.ok) throw new Error("Failed to load projects");
+        const res = await apiFetch(`${BACKEND_URL}/api/projects`);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || "Failed to load projects");
+        }
         const data = await res.json();
-        setProjects(data);
+        setProjects(Array.isArray(data) ? data : []);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not load projects");
       } finally {
@@ -49,23 +52,34 @@ export default function ProjectsPage() {
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim() || creating) return;
 
+    setCreating(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/projects`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/projects`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, description }),
-        credentials: "include"
+        body: JSON.stringify({ name: name.trim(), description: description.trim() })
       });
-      if (!res.ok) throw new Error("Failed to create project");
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Failed to create project");
+      }
+
+      const createdProject = await res.json();
+      if (createdProject && createdProject.id) {
+        setProjects(prev => [createdProject, ...prev]);
+      } else {
+        fetchProjects();
+      }
 
       setName("");
       setDescription("");
       setShowCreate(false);
-      fetchProjects();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Error creating project");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -119,7 +133,7 @@ export default function ProjectsPage() {
               <Button type="button" variant="ghost" onClick={() => setShowCreate(false)}>
                 Cancel
               </Button>
-              <Button type="submit">Create project</Button>
+              <Button type="submit" disabled={creating}>{creating ? "Creating…" : "Create project"}</Button>
             </div>
           </form>
         </Card>

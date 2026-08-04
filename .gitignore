@@ -10,6 +10,7 @@ transcripts/
 google_refresh_token.json
 google_calendar_refresh_token.json
 Google Meet/auth.json
+Microsoft Teams/auth.json
 auth.json
 
 # Python memory service
@@ -34,3 +35,4 @@ skills-lock.json
 run.js
 start.bat
 
+codebase_technical_reference.md

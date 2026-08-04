@@ -20,7 +20,33 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const BACKEND_URL = "http://localhost:3000";
+export const BACKEND_URL = "http://localhost:3000";
+
+export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  if (typeof window === "undefined") return new Response();
+
+  const token = localStorage.getItem("auth_token");
+  const headers = new Headers(init?.headers || {});
+
+  if (token && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const res = await window.fetch(input, {
+    ...init,
+    headers,
+    credentials: "include",
+  });
+
+  if (res.status === 401) {
+    localStorage.removeItem("auth_token");
+    if (typeof window !== "undefined" && window.location.pathname !== "/login" && window.location.pathname !== "/signup") {
+      window.location.href = "/login";
+    }
+  }
+
+  return res;
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -30,11 +56,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const checkAuth = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/auth/me`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/auth/me`, {
         method: "GET",
         headers: { "Content-Type": "application/json" },
-        // Always include credentials to send/receive cookies across ports
-        credentials: "include",
       });
 
       if (res.ok) {
@@ -82,6 +106,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error(data.error || "Login failed");
     }
 
+    if (data.token) {
+      localStorage.setItem("auth_token", data.token);
+    }
+
     setUser(data.user);
     router.push("/projects");
   };
@@ -99,19 +127,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error(data.error || "Sign up failed");
     }
 
+    if (data.token) {
+      localStorage.setItem("auth_token", data.token);
+    }
+
     setUser(data.user);
     router.push("/projects");
   };
 
   const logout = async () => {
     try {
-      await fetch(`${BACKEND_URL}/api/auth/logout`, {
+      await apiFetch(`${BACKEND_URL}/api/auth/logout`, {
         method: "POST",
-        credentials: "include",
       });
     } catch (e) {
       console.error("[Auth] Logout request failed:", e);
     } finally {
+      localStorage.removeItem("auth_token");
       setUser(null);
       router.replace("/");
     }
