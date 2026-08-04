@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { Eye, Radio, X, Folder, ChevronRight } from "lucide-react";
+import { useRouter, usePathname } from "next/navigation";
+import { Eye, Radio, X, Folder, ChevronRight, Play } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
@@ -26,6 +26,7 @@ interface BotSessionData {
 
 export function LiveMeetingModal() {
   const router = useRouter();
+  const pathname = usePathname();
   const [activeSessionData, setActiveSessionData] = useState<BotSessionData | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [projects, setProjects] = useState<ProjectItem[]>([]);
@@ -40,10 +41,12 @@ export function LiveMeetingModal() {
         const data = await res.json();
         const sessions: BotSessionData[] = data.sessions || [];
         if (sessions.length > 0) {
-          const current = sessions[sessions.length - 1]; // take newest session
+          const current = sessions[sessions.length - 1]; // take newest active session
           setActiveSessionData(current);
           if (current.projectId) {
             setSelectedProjectId(current.projectId);
+          } else {
+            setIsModalOpen(true); // Automatically open modal for unassigned sessions
           }
         } else {
           setActiveSessionData(null);
@@ -71,7 +74,9 @@ export function LiveMeetingModal() {
         const data: BotSessionData = JSON.parse(e.data);
         console.log("[LiveMeetingModal] bot_started event received:", data);
         setActiveSessionData(data);
-        setIsModalOpen(true); // Automatically present project selection modal on new bot launch
+        if (!data.projectId) {
+          setIsModalOpen(true); // Automatically present project selection modal if unassigned
+        }
         if (data.projectId) {
           setSelectedProjectId(data.projectId);
         }
@@ -82,9 +87,7 @@ export function LiveMeetingModal() {
 
     eventSource.addEventListener("bot_stopped", (e: MessageEvent) => {
       try {
-        const data = JSON.parse(e.data);
-        console.log("[LiveMeetingModal] bot_stopped event received:", data);
-        // Refresh active sessions to confirm if all bots exited
+        console.log("[LiveMeetingModal] bot_stopped event received");
         checkActiveSessions();
       } catch (err) {
         console.error("[LiveMeetingModal] Error parsing bot_stopped event:", err);
@@ -96,7 +99,7 @@ export function LiveMeetingModal() {
     };
   }, []);
 
-  // Fetch user projects when active session exists or modal opens
+  // Fetch user projects when active session exists
   useEffect(() => {
     if (!activeSessionData) return;
 
@@ -107,9 +110,7 @@ export function LiveMeetingModal() {
           const list: ProjectItem[] = await res.json();
           setProjects(list);
           setSelectedProjectId(prev => {
-            // If previous selection is valid and in list, keep it
             if (prev && list.some(p => p.id === prev)) return prev;
-            // Otherwise reset to first project
             return list.length > 0 ? list[0].id : "";
           });
         }
@@ -141,11 +142,13 @@ export function LiveMeetingModal() {
 
       const targetId = selectedProjectId;
       const sessionId = activeSessionData?.sessionId;
+
+      // Update local session state to include assigned projectId
+      setActiveSessionData(prev => prev ? { ...prev, projectId: targetId } : null);
       setIsModalOpen(false);
-      setActiveSessionData(null);
       setJoining(false);
 
-      // Redirect to live transcript page for the chosen project with ?sessionId=
+      // Redirect to live transcript page
       if (sessionId) {
         router.push(`/projects/${targetId}/meeting?sessionId=${sessionId}`);
       } else {
@@ -156,7 +159,6 @@ export function LiveMeetingModal() {
       setJoining(false);
       const sessionId = activeSessionData?.sessionId;
       setIsModalOpen(false);
-      setActiveSessionData(null);
       if (sessionId) {
         router.push(`/projects/${selectedProjectId}/meeting?sessionId=${sessionId}`);
       } else {
@@ -165,41 +167,85 @@ export function LiveMeetingModal() {
     }
   }
 
+  // Handle direct click on floating widget
+  function handleWidgetClick() {
+    if (activeSessionData?.projectId) {
+      // Direct jump to live transcript page without project selection prompt
+      const sessionId = activeSessionData.sessionId;
+      const targetProject = activeSessionData.projectId;
+      router.push(`/projects/${targetProject}/meeting?sessionId=${sessionId}`);
+    } else {
+      // Open project selection modal
+      setIsModalOpen(true);
+    }
+  }
+
   if (!activeSessionData) return null;
+
+  // Hide bottom-right floating widget when user is already on the live transcript page
+  const isOnMeetingPage = pathname?.includes("/meeting");
+  const isAssigned = !!activeSessionData.projectId;
 
   return (
     <>
-      {/* Persistent Bottom-Right Corner Floating Indicator */}
-      <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-5 duration-300">
-        <div
-          onClick={() => setIsModalOpen(true)}
-          className="group flex items-center gap-3.5 rounded-2xl border border-emerald-500/40 bg-surface/95 p-3.5 pl-4 pr-5 shadow-2xl backdrop-blur-xl transition-all duration-200 hover:border-emerald-500 hover:bg-surface hover:shadow-emerald-500/10 cursor-pointer"
-        >
-          {/* Animated Pulsing Live Dot */}
-          <span className="relative flex h-3.5 w-3.5 shrink-0">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-            <span className="relative inline-flex h-3.5 w-3.5 rounded-full bg-emerald-500" />
-          </span>
+      {/* Persistent Bottom-Right Corner Floating Widget */}
+      {!isOnMeetingPage && (
+        <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-5 duration-300">
+          <div
+            onClick={handleWidgetClick}
+            className={`group flex items-center gap-3.5 rounded-2xl border p-3.5 pl-4 pr-5 shadow-2xl backdrop-blur-xl transition-all duration-200 cursor-pointer ${
+              isAssigned
+                ? "border-red-500/40 bg-surface/95 hover:border-red-500 hover:shadow-red-500/10"
+                : "border-emerald-500/40 bg-surface/95 hover:border-emerald-500 hover:shadow-emerald-500/10"
+            }`}
+          >
+            {/* Animated Pulsing Live Indicator */}
+            <span className="relative flex h-3.5 w-3.5 shrink-0">
+              <span
+                className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-75 ${
+                  isAssigned ? "bg-red-400" : "bg-emerald-400"
+                }`}
+              />
+              <span
+                className={`relative inline-flex h-3.5 w-3.5 rounded-full ${
+                  isAssigned ? "bg-red-500" : "bg-emerald-500"
+                }`}
+              />
+            </span>
 
-          <div className="flex flex-col pr-1">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold uppercase tracking-wider text-emerald-500 flex items-center gap-1">
-                Live Meeting Active
-              </span>
-              <Badge tone="success" className="text-[10px] py-0 px-1.5 font-semibold">
-                {activeSessionData.botType || "google-meet"}
-              </Badge>
+            <div className="flex flex-col pr-1">
+              <div className="flex items-center gap-2">
+                <span
+                  className={`text-xs font-bold uppercase tracking-wider flex items-center gap-1 ${
+                    isAssigned ? "text-red-500" : "text-emerald-500"
+                  }`}
+                >
+                  {isAssigned ? "Meeting is Going On" : "Select Project Workspace"}
+                </span>
+                <Badge
+                  tone={isAssigned ? "danger" : "success"}
+                  className="text-[10px] py-0 px-1.5 font-semibold"
+                >
+                  {activeSessionData.botType || "google-meet"}
+                </Badge>
+              </div>
+              <p className="max-w-[220px] truncate text-xs font-semibold text-ink">
+                {activeSessionData.title || activeSessionData.botName || "Calendar Meeting Room"}
+              </p>
             </div>
-            <p className="max-w-[220px] truncate text-xs font-semibold text-ink">
-              {activeSessionData.title || activeSessionData.botName || "Calendar Meeting Room"}
-            </p>
-          </div>
 
-          <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-500 transition-colors group-hover:bg-emerald-500 group-hover:text-white">
-            <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+            <div
+              className={`flex h-8 w-8 items-center justify-center rounded-xl transition-colors ${
+                isAssigned
+                  ? "bg-red-500/10 text-red-500 group-hover:bg-red-500 group-hover:text-white"
+                  : "bg-emerald-500/10 text-emerald-500 group-hover:bg-emerald-500 group-hover:text-white"
+              }`}
+            >
+              <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* Project Selection Modal Dialog */}
       <Modal

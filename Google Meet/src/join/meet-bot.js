@@ -168,7 +168,6 @@ export class MeetBot {
 
   async turnOffCamera() {
     try {
-      // Try multiple selectors for camera toggle, excluding device dropdown elements
       const selectors = [
         'button[aria-label*="camera" i]:not([aria-label*="device" i]):not([aria-label*="settings" i])',
         'button[aria-label*="video" i]:not([aria-label*="device" i]):not([aria-label*="settings" i])',
@@ -179,13 +178,24 @@ export class MeetBot {
       for (const sel of selectors) {
         const btn = await this.page.$(sel);
         if (btn && await btn.isVisible()) {
-          const pressed = await btn.getAttribute('aria-pressed');
+          const isMutedAttr = await btn.getAttribute('data-is-muted');
+          if (isMutedAttr === 'true') {
+            console.log('Camera is already muted (data-is-muted=true)');
+            return;
+          }
+          if (isMutedAttr === 'false') {
+            console.log(`Turning off camera via: ${sel} (data-is-muted=false)`);
+            await btn.click();
+            await this.page.waitForTimeout(500);
+            return;
+          }
+
           const ariaLabel = (await btn.getAttribute('aria-label') || '').toLowerCase();
-          
-          // Camera is ON if aria-pressed is true OR if the aria-label says "turn off camera/video" (which means clicking it will turn it off)
-          const isCurrentlyOn = pressed === 'true' || ariaLabel.includes('turn off') || ariaLabel.includes('mute') || ariaLabel.includes('disable');
-          
-          if (isCurrentlyOn) {
+          if (ariaLabel.includes('turn on camera') || ariaLabel.includes('turn on video')) {
+            console.log('Camera is already muted (aria-label indicates Turn on)');
+            return;
+          }
+          if (ariaLabel.includes('turn off camera') || ariaLabel.includes('turn off video')) {
             console.log(`Turning off camera via: ${sel}`);
             await btn.click();
             await this.page.waitForTimeout(500);
@@ -217,13 +227,24 @@ export class MeetBot {
       for (const sel of selectors) {
         const btn = await this.page.$(sel);
         if (btn && await btn.isVisible()) {
-          const pressed = await btn.getAttribute('aria-pressed');
+          const isMutedAttr = await btn.getAttribute('data-is-muted');
+          if (isMutedAttr === 'true') {
+            console.log('Mic is already muted (data-is-muted=true)');
+            return;
+          }
+          if (isMutedAttr === 'false') {
+            console.log(`Turning off mic via: ${sel} (data-is-muted=false)`);
+            await btn.click();
+            await this.page.waitForTimeout(500);
+            return;
+          }
+
           const ariaLabel = (await btn.getAttribute('aria-label') || '').toLowerCase();
-          
-          // Mic is ON if aria-pressed is true OR if the aria-label says "turn off microphone/audio" (which means clicking it will turn it off)
-          const isCurrentlyOn = pressed === 'true' || ariaLabel.includes('turn off') || ariaLabel.includes('mute') || ariaLabel.includes('disable');
-          
-          if (isCurrentlyOn) {
+          if (ariaLabel.includes('turn on microphone') || ariaLabel.includes('turn on mic') || ariaLabel.includes('unmute')) {
+            console.log('Mic is already muted (aria-label indicates Turn on / Unmute)');
+            return;
+          }
+          if (ariaLabel.includes('turn off microphone') || ariaLabel.includes('turn off mic')) {
             console.log(`Turning off mic via: ${sel}`);
             await btn.click();
             await this.page.waitForTimeout(500);
@@ -368,6 +389,11 @@ export class MeetBot {
       const combinedSelector = inCallSelectors.join(', ');
       await this.page.waitForSelector(combinedSelector, { state: 'visible', timeout: 30000 });
       console.log('Found in-call indicator');
+      
+      // Secondary in-call check: guarantee camera and microphone are turned off
+      await this.turnOffCamera();
+      await this.turnOffMic();
+
       // Hide Meet's native active-speaker "rotating green ring" indicator — it's
       // purely cosmetic and distracting when watching the bot's window. This only
       // removes the visual ring; KUNJSe-based speaker detection still works because

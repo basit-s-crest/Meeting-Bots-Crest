@@ -187,14 +187,6 @@ async function triggerBotJoin(eventId, meetingUrl, meetingTitle, botType) {
   console.log(`[Calendar Auto-Join] Launching ${botType} bot for: "${meetingTitle}" (Session: ${sessionId})`);
 
   let projectId = autoJoinStore.getProjectId() || process.env.DEFAULT_PROJECT_ID || null;
-  if (!projectId && supabase) {
-    try {
-      const { data: firstProj } = await supabase.from('projects').select('id').limit(1).single();
-      if (firstProj?.id) projectId = firstProj.id;
-    } catch (e) {
-      // Ignore if no default project found
-    }
-  }
 
 
   try {
