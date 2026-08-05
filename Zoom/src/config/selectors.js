@@ -2,7 +2,10 @@ export const SELECTORS = {
   join: {
     nameInput: 'input#input-for-name, input#input-displayname, input[name="input-displayname"], input#inputname, input[placeholder="Your Name"]',
     passcodeInput: 'input#input-passcode, input[name="input-passcode"], input#inputpasscode, input[placeholder="Meeting Passcode"]',
-    joinBtn: 'button.preview-join-button, button.button-join, button[type="submit"], button:has-text("Join")',
+    joinBtn: 'button.preview-join-button, button.button-join, button[type="submit"], button:has-text("Join"), button#joinBtn, .join-btn, button[aria-label*="join" i]',
+  },
+  lobby: {
+    waitingRoomText: 'text="meeting host will let you in", text="Please wait", .waiting-room, [class*="waiting-room"], div:has-text("host will let you in")',
   },
   audioDialog: {
     joinAudioBtn: 'button:has-text("Join Audio by Computer"), button:has-text("Computer Audio"), button:has-text("Join Audio"), .join-audio-by-computer',

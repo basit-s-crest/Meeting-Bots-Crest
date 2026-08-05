@@ -5,16 +5,22 @@ import {
   getOAuth2Client,
   saveRefreshToken,
   loadRefreshToken,
+  deleteRefreshToken,
   parseInstruction,
   createCalendarEvent,
   handleGoogleApiError,
-  getDefaultDurationMinutes,
-  listUpcomingEvents,
-  extractMeetingDetails
+  getDefaultDurationMinutes
 } from './calendar-service.js';
 
+
 import { supabase } from '../supabase-client.js';
-import { autoJoinScheduler } from './auto-join-scheduler.js';
+import { autoJoinStore } from './auto-join-store.js';
+import { handleWebhookNotification, setupWatchChannel, processUpcomingEvents } from './calendar-webhook.js';
+import { syncCalendarEvents } from './calendar-sync.js';
+import {
+  listScheduledMeetings,
+  assignScheduledMeeting
+} from './scheduled-meetings-db.js';
 
 /**
  * Downloads the scheduling companion JSON from Supabase Storage to local transcripts folder on demand.
@@ -93,7 +99,11 @@ calendarRouter.get('/auth', (req, res) => {
     const authUrl = oauth2Client.generateAuthUrl({
       access_type: 'offline',
       prompt: 'consent',
-      scope: ['https://www.googleapis.com/auth/calendar.events']
+      scope: [
+        'https://www.googleapis.com/auth/calendar.events',
+        'https://www.googleapis.com/auth/calendar.events.readonly',
+        'https://www.googleapis.com/auth/calendar.readonly'
+      ]
     });
     res.redirect(authUrl);
   } catch (err) {
@@ -118,16 +128,53 @@ calendarRouter.get('/auth/callback', async (req, res) => {
     
     if (tokens.refresh_token) {
       saveRefreshToken(tokens.refresh_token);
-      res.send('Successfully authenticated! The refresh token has been saved to google_calendar_refresh_token.json and loaded in memory. You can close this window now.');
+
+      // Trigger setup for Push Watch Channel & initial scan
+      setupWatchChannel().catch(err => {
+        console.warn('[Calendar Router Auth] Watch setup warning:', err.message);
+      });
+      processUpcomingEvents().catch(err => {
+        console.warn('[Calendar Router Auth] Initial scan warning:', err.message);
+      });
+
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Google Calendar Connected</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; background-color: #f8fafc; margin: 0; padding: 1rem;">
+          <div style="text-align: center; background: white; padding: 2.5rem; border-radius: 1.25rem; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.05); max-width: 420px; width: 100%;">
+            <div style="width: 56px; height: 56px; background-color: #d1fae5; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 1.25rem auto;">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+            </div>
+            <h2 style="color: #0f172a; margin: 0 0 0.5rem 0; font-size: 1.25rem; font-weight: 700;">Google Calendar Connected!</h2>
+            <p style="color: #64748b; font-size: 0.875rem; line-height: 1.5; margin: 0 0 1.5rem 0;">Your calendar has been authorized. Redirecting you back to your project workspace...</p>
+            <a href="${frontendUrl}" style="display: inline-block; background-color: #4f46e5; color: white; text-decoration: none; padding: 0.625rem 1.25rem; border-radius: 0.5rem; font-size: 0.875rem; font-weight: 600;">Return to Dashboard</a>
+          </div>
+          <script>
+            setTimeout(function() {
+              window.location.href = "${frontendUrl}";
+            }, 1200);
+          </script>
+        </body>
+        </html>
+      `);
     } else {
       console.warn('[Calendar Router Auth] Warning: No refresh token returned in callback.');
-      res.send('Authentication completed, but no refresh token was returned. If this is a re-authentication, you must revoke the app permission in your Google account settings first to force a new refresh token.');
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
+      return res.redirect(frontendUrl);
     }
   } catch (err) {
     console.error('[Calendar Router] OAuth callback exchange failed:', err.message);
     res.status(500).send(`Google authentication failed during code exchange: ${err.message}`);
   }
 });
+
 
 /**
  * Route: Checks OAuth config and connection status.
@@ -142,9 +189,169 @@ calendarRouter.get('/auth/status', (req, res) => {
   res.json({
     connected: hasToken && isConfigured,
     configured: isConfigured,
-    hasRefreshToken: hasToken
+    hasRefreshToken: hasToken,
+    autoJoinEnabled: autoJoinStore.isEnabled(),
+    leadTimeMinutes: autoJoinStore.getLeadTimeMinutes()
   });
 });
+
+/**
+ * Route: Disconnects Google Calendar account.
+ */
+calendarRouter.post('/auth/disconnect', (req, res) => {
+  try {
+    deleteRefreshToken();
+    res.json({ success: true, message: 'Google Calendar disconnected successfully.' });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to disconnect Google Calendar: ${err.message}` });
+  }
+});
+
+calendarRouter.post('/disconnect', (req, res) => {
+  try {
+    deleteRefreshToken();
+    res.json({ success: true, message: 'Google Calendar disconnected successfully.' });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to disconnect Google Calendar: ${err.message}` });
+  }
+});
+
+
+/**
+ * Route: Lists upcoming Google Calendar events (next 60 days) and upserts them
+ * into the scheduled_meetings table. Returns the synced rows.
+ */
+calendarRouter.get('/events', async (req, res) => {
+  try {
+    const result = await syncCalendarEvents({ lookAheadDays: 60 });
+    return res.json({
+      success: true,
+      count: result.count,
+      meetings: result.events.map((e) => ({
+        id: e.id,
+        title: e.summary || 'Untitled meeting',
+        start: e.start?.dateTime || e.start?.date || null,
+        end: e.end?.dateTime || e.end?.date || null,
+        htmlLink: e.htmlLink || null,
+        meetingUrl: e.hangoutLink || null
+      }))
+    });
+  } catch (err) {
+    const normErr = handleGoogleApiError(err);
+    console.error('[Calendar Router] /events sync failed:', err.message);
+    return res.status(normErr.status || 500).json({ error: normErr.error });
+  }
+});
+
+/**
+ * Route: Triggers a manual sync of Google Calendar events into scheduled_meetings.
+ */
+calendarRouter.post('/sync', async (req, res) => {
+  try {
+    const result = await syncCalendarEvents({ lookAheadDays: 60 });
+    return res.json({ success: true, count: result.count });
+  } catch (err) {
+    const normErr = handleGoogleApiError(err);
+    console.error('[Calendar Router] /sync failed:', err.message);
+    return res.status(normErr.status || 500).json({ error: normErr.error });
+  }
+});
+
+/**
+ * Route: Lists scheduled meetings from the DB (defaults to upcoming only).
+ * Query params: ?includePast=true to include historical events.
+ */
+calendarRouter.get('/scheduled', async (req, res) => {
+  try {
+    const includePast = req.query.includePast === 'true';
+    const meetings = await listScheduledMeetings({ includePast });
+    return res.json({ success: true, meetings });
+  } catch (err) {
+    console.error('[Calendar Router] /scheduled failed:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Route: Assigns a scheduled meeting to a project owned by the current user.
+ */
+calendarRouter.post('/scheduled/:id/assign-project', async (req, res) => {
+  const { id } = req.params;
+  const { projectId } = req.body;
+
+  if (!projectId) {
+    return res.status(400).json({ error: 'Missing projectId' });
+  }
+
+  try {
+    const userId = req.user?.id;
+    const meeting = await assignScheduledMeeting(id, projectId, userId);
+    return res.json({ success: true, meeting });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * Route: Clears the project assignment on a scheduled meeting.
+ */
+calendarRouter.post('/scheduled/:id/unassign-project', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const { data, error } = await supabase
+      .from('scheduled_meetings')
+      .update({ project_id: null })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return res.json({ success: true, meeting: data });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+
+/**
+ * Route: Google Calendar Push Notification Webhook Receiver.
+ */
+calendarRouter.post('/webhook', handleWebhookNotification);
+
+/**
+ * Route: Gets Auto-Join settings.
+ */
+calendarRouter.get('/auto-join/settings', (req, res) => {
+  res.json({
+    enabled: autoJoinStore.isEnabled(),
+    leadTimeMinutes: autoJoinStore.getLeadTimeMinutes()
+  });
+});
+
+/**
+ * Route: Updates Auto-Join settings.
+ */
+calendarRouter.post('/auto-join/settings', (req, res) => {
+  const { enabled, leadTimeMinutes, projectId } = req.body;
+  if (enabled !== undefined) {
+    autoJoinStore.setEnabled(enabled);
+  }
+  if (leadTimeMinutes !== undefined) {
+    autoJoinStore.setLeadTimeMinutes(leadTimeMinutes);
+  }
+  if (projectId) {
+    autoJoinStore.setProjectId(projectId);
+  }
+  res.json({
+    success: true,
+    enabled: autoJoinStore.isEnabled(),
+    leadTimeMinutes: autoJoinStore.getLeadTimeMinutes(),
+    projectId: autoJoinStore.getProjectId()
+  });
+});
+
+
 
 /**
  * Route: Natural language scheduling.
@@ -282,18 +489,7 @@ calendarRouter.post('/confirm-report-schedule', async (req, res) => {
   
   const endIsoStr = `${endYear}-${pad(endMonth)}-${pad(endDay)}T${pad(endHour)}:${pad(endMinute)}:${pad(endSecond)}`;
   
-  let description = null;
-  if (zoomLink) {
-    if (zoomLink.includes('teams.microsoft.com') || zoomLink.includes('teams.live.com')) {
-      description = `Microsoft Teams Meeting Link: ${zoomLink}`;
-    } else if (zoomLink.includes('meet.google.com')) {
-      description = `Google Meet Meeting Link: ${zoomLink}`;
-    } else if (zoomLink.includes('zoom.us')) {
-      description = `Zoom Meeting Link: ${zoomLink}`;
-    } else {
-      description = `Meeting Link: ${zoomLink}`;
-    }
-  }
+  const description = zoomLink ? `Zoom Meeting Link: ${zoomLink}` : null;
   const location = zoomLink || null;
   
   try {
@@ -401,55 +597,4 @@ calendarRouter.post('/dismiss-report-schedule', async (req, res) => {
     }
     return res.status(500).json({ error: `Failed to dismiss suggestion: ${err.message}` });
   }
-});
-
-/**
- * Route: Get upcoming calendar events in next 24 hours.
- */
-calendarRouter.get('/upcoming', async (req, res) => {
-  try {
-    const now = new Date();
-    const timeMin = now;
-    const timeMax = new Date(now.getTime() + 24 * 60 * 60 * 1000); // next 24 hours
-
-    const events = await listUpcomingEvents(timeMin, timeMax);
-    
-    // Parse events and format them for frontend
-    const formatted = events.map(e => {
-      const meeting = extractMeetingDetails(e);
-      return {
-        id: e.id,
-        summary: e.summary || 'No Title',
-        start: e.start.dateTime || e.start.date,
-        end: e.end.dateTime || e.end.date,
-        meetingUrl: meeting?.url || null,
-        botType: meeting?.type || null
-      };
-    });
-
-    res.json({ events: formatted });
-  } catch (err) {
-    const apiErr = handleGoogleApiError(err);
-    res.status(apiErr.status).json({ error: apiErr.error });
-  }
-});
-
-/**
- * Route: Get auto-join background scheduler status.
- */
-calendarRouter.get('/auto-join/status', (req, res) => {
-  res.json({ active: autoJoinScheduler.isActive });
-});
-
-/**
- * Route: Toggle auto-join background scheduler.
- */
-calendarRouter.post('/auto-join/toggle', (req, res) => {
-  const { enable, projectId } = req.body;
-  if (enable) {
-    autoJoinScheduler.start(projectId);
-  } else {
-    autoJoinScheduler.stop();
-  }
-  res.json({ active: autoJoinScheduler.isActive });
 });

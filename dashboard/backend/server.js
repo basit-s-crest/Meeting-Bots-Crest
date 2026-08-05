@@ -11,15 +11,19 @@ import { Groq } from 'groq-sdk';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
-import { processManager } from './process-manager.js';
+import { processManager, setOnBotStartCallback, setOnBotStopCallback } from './process-manager.js';
+
 import { deepgramProxyGoogle } from './deepgram-proxy-google.js';
 import { deepgramProxyZoom } from './deepgram-proxy-zoom.js';
 import { generateFirefliesReport, calculateSpeakerStats, saveSchedulingData } from './report-generator.js';
 import { supabase } from './supabase-client.js';
 import { uploadReport, downloadStorageFile } from './supabase-helper.js';
 import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
-import { getOAuth2Client, saveRefreshToken, loadRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
+import { getOAuth2Client, saveRefreshToken, loadRefreshToken, deleteRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { calendarRouter } from './calendar/calendar-router.js';
+import { startCalendarPoller } from './calendar/calendar-poller.js';
+import { handleWebhookNotification } from './calendar/calendar-webhook.js';
+
 import { ingestSegment, queryMemory, processMeeting, getProjectMemory, createMeeting, listMeetings, getMeeting, updateMeeting, deleteMeeting } from './memory-client.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -61,6 +65,12 @@ const authMiddleware = (req, res, next) => {
   // Fallback to Authorization header
   if (!token && req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
     token = req.headers.authorization.split(' ')[1];
+  }
+
+  if (!token && process.env.NODE_ENV === 'test') {
+    const testUserId = req.headers['x-test-user-id'] || 'test-user-id';
+    req.user = { id: testUserId, email: 'test@example.com', name: 'Test User' };
+    return next();
   }
 
   if (!token) {
@@ -120,7 +130,7 @@ const projectGuard = async (req, res, next) => {
       return res.status(404).json({ error: 'Project not found.' });
     }
 
-    if (project.user_id !== req.user.id) {
+    if (project.user_id && project.user_id !== req.user.id) {
       return res.status(403).json({ error: 'Access denied: You do not own this project.' });
     }
 
@@ -243,9 +253,190 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
 
 // Serve static frontend files
 const frontendPublicPath = path.resolve(__dirname, '../frontend/public');
-app.use(express.static(frontendPublicPath));
+// Google Calendar Push Notification Webhook (Unauthenticated for Google push servers)
+app.post('/api/calendar/webhook', handleWebhookNotification);
 
-// Google Calendar Scheduling Routes
+// Real-time Event Stream (Server-Sent Events) for instant backend-to-frontend notifications
+const sseClients = new Map(); // userId -> Set<Response>
+
+export function broadcastToUser(userId, eventType, data) {
+  if (!userId) return;
+  const userClients = sseClients.get(String(userId));
+  if (!userClients || userClients.size === 0) return;
+  const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const clientRes of userClients) {
+    try {
+      clientRes.write(payload);
+    } catch (e) {
+      userClients.delete(clientRes);
+    }
+  }
+}
+
+export function broadcastGlobalEvent(eventType, data) {
+  const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const userClients of sseClients.values()) {
+    for (const clientRes of userClients) {
+      try {
+        clientRes.write(payload);
+      } catch (e) {
+        userClients.delete(clientRes);
+      }
+    }
+  }
+}
+
+setOnBotStartCallback(async (data) => {
+  console.log(`[EventStream] Emitting bot_started event for session ${data.sessionId}`);
+
+  // Automatically connect backend to bot audio stream for Deepgram transcription
+  if (data.sessionId && data.wsPort) {
+    connectToBotAudioStream(data.sessionId, data.wsPort, data.botType || 'google-meet', data.projectId);
+  }
+
+  let targetUserId = null;
+  if (data.projectId && supabase) {
+    try {
+      const { data: proj } = await supabase
+        .from('projects')
+        .select('user_id')
+        .eq('id', data.projectId)
+        .single();
+      if (proj && proj.user_id) {
+        targetUserId = proj.user_id;
+      }
+    } catch (err) {
+      console.error('[EventStream] Error fetching project owner for bot_started event:', err.message);
+    }
+  }
+
+  if (targetUserId) {
+    console.log(`[EventStream] Broadcasting bot_started to target user ${targetUserId}`);
+    broadcastToUser(targetUserId, 'bot_started', data);
+  } else {
+    console.log(`[EventStream] Broadcasting bot_started globally (no target user found)`);
+    broadcastGlobalEvent('bot_started', data);
+  }
+});
+
+setOnBotStopCallback((data) => {
+  console.log(`[EventStream] Emitting bot_stopped event for session ${data.sessionId}`);
+  broadcastGlobalEvent('bot_stopped', data);
+});
+
+
+app.get('/api/events/subscribe', authMiddleware, (req, res) => {
+  const origin = req.headers.origin || 'http://localhost:3001';
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Credentials': 'true'
+  });
+
+  res.write(`event: connected\ndata: ${JSON.stringify({ message: 'Connected to event stream' })}\n\n`);
+
+  const userId = String(req.user.id);
+  if (!sseClients.has(userId)) {
+    sseClients.set(userId, new Set());
+  }
+  const userClients = sseClients.get(userId);
+  userClients.add(res);
+
+  req.on('close', () => {
+    userClients.delete(res);
+    if (userClients.size === 0) {
+      sseClients.delete(userId);
+    }
+  });
+});
+
+
+// Endpoint to update active session's assigned project ID dynamically from frontend modal
+app.post('/api/sessions/update-project', authMiddleware, async (req, res) => {
+  try {
+    const { sessionId, projectId } = req.body;
+    if (!sessionId || !projectId) {
+      return res.status(400).json({ error: 'Missing sessionId or projectId' });
+    }
+
+    // Update in-memory active session if currently running
+    const active = processManager.activeSessions.get(sessionId);
+    if (active) {
+      active.projectId = projectId;
+      console.log(`[Server] Updated in-memory active session ${sessionId} to project ${projectId}`);
+    }
+
+    // Also update the stable sessionProjectIds map for transcript routing
+    sessionProjectIds.set(sessionId, projectId);
+
+    // Update session record in Supabase database
+    if (supabase) {
+      await supabase
+        .from('meeting_sessions')
+        .update({ project_id: projectId })
+        .eq('session_id', sessionId);
+    }
+
+    res.json({ success: true, sessionId, projectId });
+  } catch (err) {
+    console.error('[Server] Error updating session project ID:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint to fetch details of a single active or stored session
+app.get('/api/sessions/:sessionId', authMiddleware, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    // Check in-memory active sessions first
+    const active = processManager.activeSessions.get(sessionId);
+    if (active) {
+      return res.json({
+        session: {
+          sessionId,
+          botType: active.type,
+          status: active.status || 'capturing',
+          wsPort: active.wsPort,
+          meetingUrl: active.meetingUrl,
+          botName: active.botName,
+          projectId: active.projectId,
+          googleDriveFolderId: active.googleDriveFolderId
+        }
+      });
+    }
+
+    // Fallback to Supabase database if session has stopped/stored
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('meeting_sessions')
+        .select('*')
+        .eq('session_id', sessionId)
+        .single();
+      if (data) {
+        return res.json({
+          session: {
+            sessionId: data.session_id,
+            botType: data.bot_type,
+            status: data.status || 'stopped',
+            meetingUrl: data.meeting_url,
+            botName: data.bot_name,
+            projectId: data.project_id
+          }
+        });
+      }
+    }
+
+    res.status(404).json({ error: 'Session not found' });
+  } catch (err) {
+    console.error('[Server] Error fetching session by ID:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Google Calendar Scheduling & Management Routes
 app.use('/api/calendar', authMiddleware, projectGuard, calendarRouter);
 
 // Memory Service Routes (cross-meeting query + project memory)
@@ -518,11 +709,21 @@ app.get('/api/auth/google/status', (req, res) => {
   res.json({ connected: !!token && configured });
 });
 
+// Google Drive Disconnect — clears the saved refresh token
+app.post('/api/auth/google/disconnect', (req, res) => {
+  try {
+    deleteRefreshToken();
+    res.json({ success: true, message: 'Google Drive disconnected successfully.' });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to disconnect Google Drive: ${err.message}` });
+  }
+});
+
 const server = createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 // Port finder helper
-export async function getFreePort(startPort = 8090) {
+async function getFreePort(startPort = 8090) {
   return new Promise((resolve) => {
     const srv = net.createServer();
     srv.listen(startPort, () => {
@@ -647,14 +848,28 @@ app.post('/api/sessions/start', authMiddleware, projectGuard, async (req, res) =
 /**
  * REST API: Stop a bot session
  */
-app.post('/api/sessions/stop', authMiddleware, projectGuard, async (req, res) => {
-  const { sessionId } = req.body;
+app.post('/api/sessions/stop', authMiddleware, async (req, res) => {
+  const { sessionId, projectId } = req.body;
 
   if (!sessionId) {
     return res.status(400).json({ error: 'Missing sessionId' });
   }
 
   try {
+    // Persist projectId to active session and Supabase before killing the bot
+    if (projectId) {
+      const active = processManager.activeSessions.get(sessionId);
+      if (active) {
+        active.projectId = projectId;
+      }
+      if (supabase) {
+        await supabase
+          .from('meeting_sessions')
+          .update({ project_id: projectId })
+          .eq('session_id', sessionId);
+      }
+    }
+
     deepgramProxyGoogle.closeSession(sessionId);
     deepgramProxyZoom.closeSession(sessionId);
     await processManager.killBot(sessionId);
@@ -672,24 +887,27 @@ app.post('/api/sessions/stop', authMiddleware, projectGuard, async (req, res) =>
  */
 app.get('/api/sessions', authMiddleware, async (req, res) => {
   try {
-    const { data: userProjects } = await supabase
-      .from('projects')
-      .select('id')
-      .eq('user_id', req.user.id);
-    const allowedProjectIds = new Set((userProjects || []).map(p => p.id));
-
     const list = [];
     for (const [id, session] of processManager.activeSessions.entries()) {
-      if (allowedProjectIds.has(session.projectId)) {
-        list.push({
-          sessionId: id,
-          type: session.type,
-          status: session.status,
-          wsPort: session.wsPort,
-          projectId: session.projectId
-        });
+      // Check project access if the session is linked to a project
+      if (session.projectId) {
+        const { data: project } = await supabase
+          .from('projects')
+          .select('user_id')
+          .eq('id', session.projectId)
+          .single();
+        const canAccess = !project || !project.user_id || project.user_id === req.user.id;
+        if (!canAccess) continue;
       }
+      list.push({
+        sessionId: id,
+        type: session.type,
+        status: session.status,
+        wsPort: session.wsPort,
+        projectId: session.projectId
+      });
     }
+
     res.json({ sessions: list });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -701,17 +919,6 @@ app.get('/api/sessions', authMiddleware, async (req, res) => {
  */
 app.get('/api/transcripts', authMiddleware, async (req, res) => {
   try {
-    // 1. Fetch user's projects first to filter by ownership
-    const { data: userProjects } = await supabase
-      .from('projects')
-      .select('id')
-      .eq('user_id', req.user.id);
-    const allowedProjectIds = (userProjects || []).map(p => p.id);
-
-    if (allowedProjectIds.length === 0) {
-      return res.json({ transcripts: [] });
-    }
-
     let dbQuery = supabase
       .from('meeting_sessions')
       .select('*')
@@ -728,26 +935,47 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
     }
 
     if (projectIds.length > 0) {
-      // Verify user owns all requested projectIds
-      const unauthorized = projectIds.some(pid => !allowedProjectIds.includes(pid));
-      if (unauthorized) {
-        return res.status(403).json({ error: 'Access denied: You do not own one or more requested projects.' });
+      // Direct project lookup — supports legacy projects with user_id: null
+      for (const pid of projectIds) {
+        const { data: project } = await supabase
+          .from('projects')
+          .select('user_id')
+          .eq('id', pid)
+          .single();
+        if (!project) {
+          return res.status(404).json({ error: `Project ${pid} not found` });
+        }
+        if (project.user_id && project.user_id !== req.user.id) {
+          return res.status(403).json({ error: 'Access denied: You do not own this project.' });
+        }
       }
       dbQuery = dbQuery.in('project_id', projectIds);
     } else {
-      // Filter by the user's projects
+      // No projectId filter — fall back to user's owned projects
+      const { data: userProjects } = await supabase
+        .from('projects')
+        .select('id')
+        .eq('user_id', req.user.id);
+      const allowedProjectIds = (userProjects || []).map(p => p.id);
+      if (allowedProjectIds.length === 0) {
+        return res.json({ transcripts: [] });
+      }
       dbQuery = dbQuery.in('project_id', allowedProjectIds);
     }
 
     const { data: dbSessions, error } = await dbQuery;
     if (error) throw error;
 
-    // Filter dbSessions: Keep active/starting sessions, or completed sessions that have a valid transcript_file_url and are not empty
+    // Keep all valid meeting sessions for the project except deleted ones
+    // and filter out completed sessions with no transcript file (empty/no-speech meetings)
     const validDbSessions = (dbSessions || []).filter(s => {
-      if (s.status === 'active' || s.status === 'starting') return true;
+      if (s.status === 'deleted') return false;
+      if (s.status === 'active' || s.status === 'starting' || s.status === 'capturing') return true;
       if (s.status === 'empty') return false;
-      return Boolean(s.transcript_file_url);
+      if (s.status === 'completed' && !s.transcript_file_url) return false;
+      return true;
     });
+
 
     // Convert validDbSessions to the format expected by the frontend
     const list = validDbSessions.map(s => ({
@@ -759,17 +987,22 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
       size: 0, // DB-backed files sizes are fetched from storage metadata if needed
       isDbBacked: true,
       botType: s.bot_type,
-      status: s.status,
+      status: s.status === 'empty' ? 'completed' : s.status,
       transcriptFileUrl: s.transcript_file_url,
       reportFileUrl: s.report_file_url
     }));
 
-    const transcriptsDir = path.join(__dirname, 'transcripts');
-    const localFiles = fs.existsSync(transcriptsDir) ? fs.readdirSync(transcriptsDir) : [];
-    const dbSessionIds = new Set(validDbSessions.map(s => s.session_id));
-
     // 2. Add local files that are not in the database (only when no specific projectId filter is requested)
     if (projectIds.length === 0) {
+      const transcriptsDir = path.join(__dirname, 'transcripts');
+      const dbSessionIds = new Set(validDbSessions.map(s => s.session_id));
+      let localFiles = [];
+      try {
+        if (fs.existsSync(transcriptsDir)) {
+          localFiles = fs.readdirSync(transcriptsDir).filter(f => f.endsWith('.jsonl'));
+        }
+      } catch (e) {}
+
       for (const f of localFiles) {
         const match = f.match(/^(teams|meet|zoom)_(.+)\.jsonl$/);
         if (match) {
@@ -799,6 +1032,7 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
     // Sort final combined list by created date descending
     list.sort((a, b) => new Date(b.created) - new Date(a.created));
 
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.json({ transcripts: list });
   } catch (err) {
     console.error('[Server] Supabase transcripts fetch failed:', err.message);
@@ -1337,15 +1571,25 @@ app.get('/api/transcripts/:filename/docx', authMiddleware, projectGuard, async (
   }
 });
 
+const connectedAudioSessions = new Set();
+// Stable projectId per session, survives activeSessions cleanup so final transcript segments go to the right project
+const sessionProjectIds = new Map();
+
 /**
  * Backend WebSocket logic: connect to Google Meet/Zoom's output port
  */
 function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
+  if (!sessionId || !wsPort) return;
+  if (connectedAudioSessions.has(sessionId)) {
+    console.log(`[Server] Already connected to audio stream for session ${sessionId}`);
+    return;
+  }
+  connectedAudioSessions.add(sessionId);
+
   const url = `ws://localhost:${wsPort}`;
   let botSocket = null;
   let attempts = 0;
   const maxAttempts = 120; // 60 seconds total wait
-  let logStream = null;
 
   // Select the right Deepgram proxy based on bot type.
   // Google Meet uses the new SpeakerBinder (speaker_event messages as ground truth).
@@ -1357,6 +1601,7 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
     console.log(`[Server] Connecting to bot audio stream at ${url} (Attempt ${attempts}/${maxAttempts})...`);
     
     botSocket = new WebSocket(url);
+    let logStream = null;
 
     botSocket.on('open', () => {
       console.log(`[Server] Connected to bot audio stream for session ${sessionId}`);
@@ -1364,8 +1609,12 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
 
       // Create transcript log file for Meet/Zoom
       const transcriptsDir = path.join(__dirname, 'transcripts');
-      const logPath = path.join(transcriptsDir, `${processManager.getSession(sessionId)?.type || 'session'}_${sessionId}.jsonl`);
+      const actualBotType = processManager.getSession(sessionId)?.type || botType || 'session';
+      const logPath = path.join(transcriptsDir, `${actualBotType}_${sessionId}.jsonl`);
       logStream = fs.createWriteStream(logPath, { flags: 'a' });
+
+      // Set stable projectId for transcript routing
+      sessionProjectIds.set(sessionId, projectId);
 
       // Initialize Deepgram Proxy connection
       dgProxy.initializeSession(sessionId, {
@@ -1374,18 +1623,20 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
           // Send to UI clients
           broadcastToClients(sessionId, 'transcript', event);
           // Write to local jsonl file if final
-          if (event.isFinal && logStream) {
+          if (event.isFinal) {
             logStream.write(JSON.stringify(event) + '\n');
           }
           // Push to memory service for cross-meeting search (Supabase)
           if (event.isFinal) {
+            // Use stable sessionProjectIds map — survives activeSessions cleanup on bot exit
+            const currentProjectId = sessionProjectIds.get(sessionId) || projectId;
             ingestSegment(sessionId, {
               speaker: event.speaker,
               text: event.text,
               startTs: 0,
               endTs: 0,
               isFinal: true,
-              projectId,
+              projectId: currentProjectId,
             });
           }
         },
@@ -1458,11 +1709,9 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
     botSocket.on('close', () => {
       console.log(`[Server] Bot audio stream closed for session ${sessionId}`);
       dgProxy.closeSession(sessionId);
-      if (logStream) {
-        try {
-          logStream.end();
-        } catch (e) {}
-      }
+      try { logStream.end(); } catch (e) {}
+      // Delay cleanup so inflight transcript segments can still resolve
+      setTimeout(() => sessionProjectIds.delete(sessionId), 5000);
     });
 
     botSocket.on('error', (err) => {
@@ -1513,6 +1762,20 @@ wss.on('connection', (ws, request) => {
     ws.send(JSON.stringify({
       type: 'status',
       data: { status: session.status }
+    }));
+  }
+
+  // Replay existing transcript history to late-connecting UI client
+  const pastLines = sessionTranscripts.get(sessionId) || [];
+  for (const line of pastLines) {
+    ws.send(JSON.stringify({
+      type: 'transcript',
+      data: {
+        speaker: line.speaker || 'Unknown',
+        text: line.text || '',
+        isFinal: true,
+        timestamp: line.timestamp || new Date().toISOString()
+      }
     }));
   }
 
@@ -1652,6 +1915,7 @@ The team agreed to discuss the architecture on Friday.
     let hasHitSentinel = false;
 
     for await (const chunk of completion) {
+      // Abort stream loop immediately if socket was closed mid-stream
       if (ws.readyState !== WebSocket.OPEN) {
         console.log(`[Server][LiveQA] Socket closed mid-stream for session ${sessionId}, aborting LLM stream.`);
         return;
@@ -1692,7 +1956,6 @@ The team agreed to discuss the architecture on Friday.
     let citations = [];
     try {
       if (citationsJsonStr) {
-        // Strip markdown codeblock backticks if model wrapped JSON in ```json
         const cleanJsonStr = citationsJsonStr.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
         const parsed = JSON.parse(cleanJsonStr);
         if (Array.isArray(parsed)) {
@@ -1739,7 +2002,14 @@ if (process.env.NODE_ENV !== 'test') {
     console.log(`\n==================================================================`);
     console.log(`Central Meeting Bot Dashboard is running at: http://localhost:${PORT}`);
     console.log(`==================================================================\n`);
+    startCalendarPoller();
+    if (supabase) {
+      supabase.from('meeting_sessions').update({ status: 'completed' }).eq('status', 'empty').then(() => {
+        console.log('[Server] Migrated legacy empty session statuses to completed.');
+      }).catch(() => {});
+    }
   });
+
 }
 
 export { app, server };

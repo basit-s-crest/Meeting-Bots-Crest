@@ -146,7 +146,7 @@ export async function saveSessionEnd(sessionId, botType) {
     }
 
     const updateData = { 
-      status: publicUrl ? 'completed' : 'empty',
+      status: 'completed',
       transcript_file_url: publicUrl || null
     };
 

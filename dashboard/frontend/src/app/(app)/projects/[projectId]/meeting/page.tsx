@@ -14,7 +14,7 @@ import { Input, Select } from "@/components/ui/Input";
 import { LiveQAOverlay, QAPair } from "@/components/LiveQAOverlay";
 
 interface TranscriptLine {
-  lineId: string;
+  lineId?: string;
   segmentId?: number;
   speaker: string;
   text: string;
@@ -30,9 +30,10 @@ interface TranscriptLine {
 
 const BACKEND_URL = "http://localhost:3000";
 
-const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  if (typeof window === "undefined") return Promise.resolve(new Response());
-  return window.fetch(input, {
+const originalFetch = typeof window !== "undefined" ? window.fetch : null;
+const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+  if (!originalFetch) return Promise.reject(new Error("fetch called on server"));
+  return originalFetch(input, {
     ...init,
     credentials: "include"
   });
@@ -51,56 +52,83 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [botStatus, setBotStatus] = useState<"idle" | "starting" | "joining" | "capturing" | "stopping" | "stopped">("idle");
   const [activeSpeaker, setActiveSpeaker] = useState("No active speaker");
-  const [isDriveConnected, setIsDriveConnected] = useState(false);
-  const [driveConnecting, setDriveConnecting] = useState(true);
-  const [isCalendarConnected, setIsCalendarConnected] = useState(false);
-  const [calendarConnecting, setCalendarConnecting] = useState(true);
-
   const [liveLines, setLiveLines] = useState<TranscriptLine[]>([]);
   const [qaHistory, setQaHistory] = useState<QAPair[]>([]);
   const [showJumpButton, setShowJumpButton] = useState(false);
   const [highlightedLineId, setHighlightedLineId] = useState<string | null>(null);
 
+  const handleJumpToLine = (lineId: string) => {
+    setHighlightedLineId(lineId);
+    const el = document.getElementById(`transcript-line-${lineId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    setTimeout(() => setHighlightedLineId(null), 3000);
+  };
+
   const socketRef = useRef<WebSocket | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
   const wasNearBottomRef = useRef(true);
-  const manualJumpAtRef = useRef<number | null>(null);
-  const highlightTimerRef = useRef<NodeJS.Timeout | null>(null);
   const visualizerTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const handleJumpToLine = (lineId: string) => {
-    if (!lineId) return;
-    wasNearBottomRef.current = false;
-    manualJumpAtRef.current = Date.now();
-    setShowJumpButton(true);
-
-    const targetEl = document.getElementById(`transcript-line-${lineId}`);
-    if (targetEl) {
-      targetEl.scrollIntoView({ behavior: "smooth", block: "center" });
-      setHighlightedLineId(lineId);
-      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
-      highlightTimerRef.current = setTimeout(() => {
-        setHighlightedLineId(null);
-      }, 2500);
-    }
-  };
-
   useEffect(() => {
-    checkGoogleDriveStatus();
-    checkGoogleCalendarStatus();
+    // Auto-detect and connect to active session running on backend
+    (async () => {
+      try {
+        const searchParams = new URLSearchParams(window.location.search);
+        const urlSessionId = searchParams.get("sessionId");
+
+        if (urlSessionId) {
+          // If sessionId is explicitly passed in URL query parameter
+          const res = await fetch(`${BACKEND_URL}/api/sessions/${urlSessionId}`);
+          if (res.ok) {
+            const data = await res.json();
+            const session = data.session;
+            if (session && session.sessionId) {
+              setActiveSessionId(session.sessionId);
+              setBotStatus(session.status || "capturing");
+              if (session.botType) setBotType(session.botType);
+              if (session.meetingUrl) setMeetingUrl(session.meetingUrl);
+              if (session.botName) setBotName(session.botName);
+              connectWebSocket(session.sessionId);
+              return;
+            }
+          }
+        }
+
+        // Fallback: check active sessions list
+        const res = await fetch(`${BACKEND_URL}/api/sessions`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.sessions && data.sessions.length > 0) {
+            const active = data.sessions.find((s: any) => s.projectId === projectId) || data.sessions[0];
+            if (active && active.sessionId) {
+              setActiveSessionId(active.sessionId);
+              setBotStatus(active.status || "capturing");
+              if (active.botType) setBotType(active.botType);
+              if (active.meetingUrl) setMeetingUrl(active.meetingUrl);
+              if (active.botName) setBotName(active.botName);
+              connectWebSocket(active.sessionId);
+            }
+          }
+        }
+      } catch (err) {
+        console.error("[Meeting Page] Error checking active session on mount:", err);
+      }
+    })();
+
     return () => {
       disconnectWebSocket();
     };
-  }, []);
+  }, [projectId]);
+
 
   useEffect(() => {
     const container = transcriptContainerRef.current;
     if (!container) return;
 
-    const recentlyJumped = Boolean(manualJumpAtRef.current && (Date.now() - manualJumpAtRef.current < 3000));
-
-    if (wasNearBottomRef.current && !recentlyJumped) {
+    if (wasNearBottomRef.current) {
       if (transcriptEndRef.current) {
         transcriptEndRef.current.scrollIntoView({ behavior: "smooth" });
       }
@@ -131,35 +159,6 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   };
 
 
-  function checkGoogleDriveStatus() {
-    (async () => {
-      try {
-        const res = await apiFetch(`${BACKEND_URL}/api/auth/google/status`);
-        if (res.ok) {
-          const data = await res.json();
-          setIsDriveConnected(data.connected);
-        }
-      } catch {
-      } finally {
-        setDriveConnecting(false);
-      }
-    })();
-  }
-
-  function checkGoogleCalendarStatus() {
-    (async () => {
-      try {
-        const res = await apiFetch(`${BACKEND_URL}/api/calendar/auth/status`);
-        if (res.ok) {
-          const data = await res.json();
-          setIsCalendarConnected(data.connected);
-        }
-      } catch {
-      } finally {
-        setCalendarConnecting(false);
-      }
-    })();
-  }
 
   function disconnectWebSocket() {
     if (socketRef.current) {
@@ -186,6 +185,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
       const res = await fetch(`${BACKEND_URL}/api/sessions/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           botType,
           meetingUrl,
@@ -276,12 +276,8 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
               return updated;
             }
 
-            // Assign a stable lineId (e.g. L0, L1...)
-            const lineId = msg.data.lineId || `L${segmentId ?? prev.length}`;
-
             // Different speaker (or first block) — start a new box.
             const newBlock: TranscriptLine = {
-              lineId,
               segmentId: segmentId ?? prev.length,
               speaker,
               committedText: isFinal ? text : "",
@@ -289,7 +285,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
               text,
               isFinal,
               provisional,
-              timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+              timestamp: new Date().toISOString()
             };
             return [...prev, newBlock];
           });
@@ -360,9 +356,13 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
       const res = await fetch(`${BACKEND_URL}/api/sessions/stop`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: activeSessionId })
+        credentials: "include",
+        body: JSON.stringify({ sessionId: activeSessionId, projectId })
       });
-      if (!res.ok) throw new Error("Stop request failed");
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Stop request failed");
+      }
 
       disconnectWebSocket();
       setActiveSessionId(null);
@@ -380,8 +380,8 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const isCapturing = botStatus === "capturing";
 
   return (
-    <Container className="flex h-[calc(100vh-5.5rem)] flex-col gap-4 overflow-hidden py-3 max-w-none px-4 sm:px-6 lg:px-8">
-      <div className="flex shrink-0 items-center justify-between gap-4">
+    <Container className="py-6 max-w-none px-4 sm:px-6 lg:px-8">
+      <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <Link
             href={`/projects/${projectId}`}
@@ -395,9 +395,18 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             </h1>
           </div>
         </div>
-        {botStatus !== "idle" ? (
-          <Badge tone="success">
-            <Wifi className="h-3.5 w-3.5 animate-pulse" /> Active connection
+        {botStatus !== "idle" && botStatus !== "stopped" ? (
+          <Badge tone={botStatus === "capturing" ? "success" : "warning"}>
+            <Wifi className="h-3.5 w-3.5 animate-pulse" />{" "}
+            {botStatus === "capturing"
+              ? "Capturing Live Audio"
+              : botStatus === "joining"
+              ? "Bot Joining..."
+              : botStatus === "starting"
+              ? "Bot Starting..."
+              : botStatus === "stopping"
+              ? "Stopping Bot..."
+              : "Active connection"}
           </Badge>
         ) : (
           <Badge tone="neutral">
@@ -406,16 +415,16 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
         )}
       </div>
 
-      <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden lg:grid-cols-12 min-h-0">
+      <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Config */}
-        <section className="flex flex-col gap-3 overflow-hidden lg:col-span-3 min-h-0">
-          <Card className="flex flex-1 flex-col overflow-hidden p-4 min-h-0">
-            <h2 className="mb-3 flex shrink-0 items-center gap-2 text-base font-semibold text-ink">
+        <section className="space-y-6 lg:col-span-3">
+          <Card className="p-6">
+            <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-ink">
               <Layers className="h-5 w-5 text-brand-600" />
               Bot settings
             </h2>
 
-            <form onSubmit={handleLaunchBot} className="flex flex-1 flex-col justify-between space-y-3 overflow-y-auto pr-1 min-h-0">
+            <form onSubmit={handleLaunchBot} className="space-y-4">
               <Select
                 id="bot-type"
                 label="Meeting platform"
@@ -490,48 +499,12 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             </form>
           </Card>
 
-          <div className="grid shrink-0 grid-cols-1 gap-2.5 sm:grid-cols-2">
-            <Card className="flex flex-col justify-between p-4">
-              <div className="flex items-center gap-2">
-                <span className="text-base shrink-0">📁</span>
-                <h4 className="text-xs font-semibold text-ink">Google Drive auth</h4>
-              </div>
-              <div className="mt-3">
-                {driveConnecting ? (
-                  <span className="text-xs text-ink-mute">Checking…</span>
-                ) : isDriveConnected ? (
-                  <Badge tone="success">Connected</Badge>
-                ) : (
-                  <a href={`${BACKEND_URL}/api/auth/google`} className="inline-block text-xs font-semibold text-brand-600 hover:text-brand-700">
-                    Connect
-                  </a>
-                )}
-              </div>
-            </Card>
 
-            <Card className="flex flex-col justify-between p-4">
-              <div className="flex items-center gap-2">
-                <span className="text-base shrink-0">📅</span>
-                <h4 className="text-xs font-semibold text-ink">Google Calendar auth</h4>
-              </div>
-              <div className="mt-3">
-                {calendarConnecting ? (
-                  <span className="text-xs text-ink-mute">Checking…</span>
-                ) : isCalendarConnected ? (
-                  <Badge tone="success">Connected</Badge>
-                ) : (
-                  <a href={`${BACKEND_URL}/api/calendar/auth`} className="inline-block text-xs font-semibold text-brand-600 hover:text-brand-700">
-                    Connect
-                  </a>
-                )}
-              </div>
-            </Card>
-          </div>
         </section>
 
         {/* Monitor */}
-        <section className="flex flex-col gap-3 overflow-hidden lg:col-span-9 min-h-0">
-          <Card className="flex shrink-0 items-center justify-between gap-4 p-3 sm:flex-row">
+        <section className="space-y-6 lg:col-span-9">
+          <Card className="flex flex-col items-center justify-between gap-6 p-6 sm:flex-row">
             <div className="flex items-center gap-4">
               <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-brand-50 font-display text-2xl font-bold text-brand-600">
                 {activeSpeaker === "Connecting…"
@@ -564,10 +537,10 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
           </Card>
 
           {/* Sub-grid for Live Transcript (Column A) and Live Q&A (Column B) */}
-          <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden lg:grid-cols-12 min-h-0">
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
             {/* Column A: Live Transcript Stream Card */}
-            <Card className="relative flex flex-col overflow-hidden p-4 lg:col-span-7 min-h-0">
-              <h3 className="mb-3 flex shrink-0 items-center gap-2 text-base font-semibold text-ink">
+            <Card className="relative flex flex-col p-6 min-h-[440px] max-h-[calc(100vh-280px)] lg:col-span-7">
+              <h3 className="mb-4 flex items-center gap-2 text-lg font-semibold text-ink">
                 <Volume2 className="h-5 w-5 text-brand-600" />
                 Live transcript stream
               </h3>
@@ -575,7 +548,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
               <div
                 ref={transcriptContainerRef}
                 onScroll={handleScroll}
-                className="mb-2 flex-1 space-y-3 overflow-y-auto pr-1 scroll-smooth min-h-0"
+                className="mb-4 flex-1 space-y-4 overflow-y-auto pr-1 scroll-smooth"
               >
                 {liveLines.length === 0 ? (
                   <div className="flex flex-col items-center justify-center gap-3 py-20 text-center">
@@ -628,7 +601,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
             <LiveQAOverlay
               qaHistory={qaHistory}
               onCitationClick={(lineId) => handleJumpToLine(lineId)}
-              className="flex flex-col overflow-hidden lg:col-span-5 h-full min-h-0"
+              className="min-h-[440px] max-h-[calc(100vh-280px)] lg:col-span-5"
               onSendQuestion={(questionText) => {
                 if (!questionText.trim()) return;
                 const id = `qa_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;

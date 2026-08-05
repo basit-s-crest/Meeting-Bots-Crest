@@ -11,6 +11,10 @@ google_refresh_token.json
 google_calendar_refresh_token.json
 Google Meet/auth.json
 auth.json
+auto_join_settings.json
+dashboard/backend/auto_join_settings.json
+
+
 
 # Python memory service
 memory-service/.venv/
