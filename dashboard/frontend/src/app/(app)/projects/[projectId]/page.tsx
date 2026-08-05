@@ -81,8 +81,9 @@ const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
   });
 };
 
-export default function ProjectWorkspacePage({ params }: { params: Promise<{ projectId: string }> }) {
-  const { projectId } = use(params);
+export default function ProjectWorkspacePage({ params }: { params: Promise<{ projectId: string }> | { projectId: string } }) {
+  const resolvedParams = params && typeof (params as any).then === 'function' ? use(params as Promise<{ projectId: string }>) : (params as { projectId: string });
+  const projectId = resolvedParams?.projectId;
   const router = useRouter();
 
 

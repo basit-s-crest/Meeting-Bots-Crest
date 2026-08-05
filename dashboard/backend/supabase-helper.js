@@ -14,19 +14,27 @@ const TRANSCRIPTS_DIR = path.resolve(__dirname, 'transcripts');
  * @param {string} botType 
  * @param {string} meetingUrl 
  * @param {string} botName 
+ * @param {string} projectId
+ * @param {Array<string>} [attendeeEmails]
  */
-export async function saveSessionStart(sessionId, botType, meetingUrl, botName, projectId) {
+export async function saveSessionStart(sessionId, botType, meetingUrl, botName, projectId, attendeeEmails = []) {
   try {
+    const insertData = {
+      session_id: sessionId,
+      bot_type: botType,
+      meeting_url: meetingUrl,
+      bot_name: botName || 'Meeting Bot',
+      status: 'capturing',
+      project_id: projectId
+    };
+
+    if (Array.isArray(attendeeEmails) && attendeeEmails.length > 0) {
+      insertData.attendee_emails = attendeeEmails;
+    }
+
     const { error } = await supabase
       .from('meeting_sessions')
-      .insert({
-        session_id: sessionId,
-        bot_type: botType,
-        meeting_url: meetingUrl,
-        bot_name: botName || 'Meeting Bot',
-        status: 'capturing',
-        project_id: projectId
-      });
+      .insert(insertData);
 
     if (error) throw error;
     console.log(`[Supabase] Logged session start: ${sessionId}`);
@@ -45,7 +53,7 @@ export async function saveSessionStart(sessionId, botType, meetingUrl, botName, 
 async function uploadToStorage(localPath, storageName) {
   try {
     const fileBuffer = await fs.readFile(localPath);
-    
+
     // Determine mime-type based on extension
     const ext = path.extname(localPath);
     let contentType = 'text/plain';
@@ -130,7 +138,7 @@ export async function saveSessionEnd(sessionId, botType) {
   try {
     const transcriptFilename = `${botType}_${sessionId}.jsonl`;
     const localTranscriptPath = path.join(TRANSCRIPTS_DIR, transcriptFilename);
-    
+
     let publicUrl = null;
     try {
       const stats = await fs.stat(localTranscriptPath);
@@ -145,7 +153,7 @@ export async function saveSessionEnd(sessionId, botType) {
       console.warn(`[Supabase] Local transcript file not found for upload: ${transcriptFilename}`);
     }
 
-    const updateData = { 
+    const updateData = {
       status: 'completed',
       transcript_file_url: publicUrl || null
     };
@@ -173,7 +181,7 @@ export async function uploadReport(sessionId, botType) {
   try {
     const reportFilename = `${botType}_${sessionId}_report.md`;
     const localReportPath = path.join(TRANSCRIPTS_DIR, reportFilename);
-    
+
     let publicUrl = null;
     try {
       const stats = await fs.stat(localReportPath);
@@ -219,3 +227,26 @@ export async function uploadReport(sessionId, botType) {
     return null;
   }
 }
+
+/**
+ * Fetches attendee emails stored for a given session.
+ * 
+ * @param {string} sessionId 
+ * @returns {Promise<Array<string>>}
+ */
+export async function getAttendeeEmailsForSession(sessionId) {
+  try {
+    const { data, error } = await supabase
+      .from('meeting_sessions')
+      .select('attendee_emails')
+      .eq('session_id', sessionId)
+      .single();
+
+    if (error || !data) return [];
+    return data.attendee_emails || [];
+  } catch (err) {
+    console.error(`[Supabase] Failed to fetch attendee emails for ${sessionId}:`, err.message);
+    return [];
+  }
+}
+

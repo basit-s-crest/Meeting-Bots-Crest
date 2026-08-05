@@ -30,10 +30,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const checkAuth = async () => {
     try {
+      const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+
       const res = await fetch(`${BACKEND_URL}/api/auth/me`, {
         method: "GET",
-        headers: { "Content-Type": "application/json" },
-        // Always include credentials to send/receive cookies across ports
+        headers,
         credentials: "include",
       });
 
@@ -82,6 +85,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error(data.error || "Login failed");
     }
 
+    if (data.token) {
+      localStorage.setItem("token", data.token);
+    }
     setUser(data.user);
     router.push("/projects");
   };
@@ -99,12 +105,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error(data.error || "Sign up failed");
     }
 
+    if (data.token) {
+      localStorage.setItem("token", data.token);
+    }
     setUser(data.user);
     router.push("/projects");
   };
 
   const logout = async () => {
     try {
+      localStorage.removeItem("token");
       await fetch(`${BACKEND_URL}/api/auth/logout`, {
         method: "POST",
         credentials: "include",

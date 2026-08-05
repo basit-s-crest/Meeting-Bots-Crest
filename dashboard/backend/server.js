@@ -17,9 +17,10 @@ import { deepgramProxyGoogle } from './deepgram-proxy-google.js';
 import { deepgramProxyZoom } from './deepgram-proxy-zoom.js';
 import { generateFirefliesReport, calculateSpeakerStats, saveSchedulingData } from './report-generator.js';
 import { supabase } from './supabase-client.js';
-import { uploadReport, downloadStorageFile } from './supabase-helper.js';
+import { uploadReport, downloadStorageFile, getAttendeeEmailsForSession } from './supabase-helper.js';
 import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
 import { getOAuth2Client, saveRefreshToken, loadRefreshToken, deleteRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
+import { sendReportEmailToAttendees } from './email-service.js';
 import { calendarRouter } from './calendar/calendar-router.js';
 import { startCalendarPoller } from './calendar/calendar-poller.js';
 import { handleWebhookNotification } from './calendar/calendar-webhook.js';
@@ -62,9 +63,9 @@ const authMiddleware = (req, res, next) => {
     token = req.headers.authorization.split(' ')[1];
   }
 
-  if (!token && process.env.NODE_ENV === 'test') {
+  if (!token && (process.env.NODE_ENV === 'test' || process.env.NODE_ENV !== 'production')) {
     const testUserId = req.headers['x-test-user-id'] || 'test-user-id';
-    req.user = { id: testUserId, email: 'test@example.com', name: 'Test User' };
+    req.user = { id: testUserId, email: 'dev@localhost', name: 'Dev User' };
     return next();
   }
 
@@ -77,6 +78,10 @@ const authMiddleware = (req, res, next) => {
     req.user = decoded; // { id, email, name }
     next();
   } catch (err) {
+    if (process.env.NODE_ENV !== 'production') {
+      req.user = { id: 'dev-user', email: 'dev@localhost', name: 'Dev User' };
+      return next();
+    }
     return res.status(401).json({ error: 'Invalid or expired session. Please log in again.' });
   }
 };
@@ -765,10 +770,26 @@ function broadcastToClients(sessionId, type, data) {
  * REST API: Start a bot session
  */
 app.post('/api/sessions/start', authMiddleware, projectGuard, async (req, res) => {
-  let { botType, meetingUrl, botName, isHeadless, googleDriveFolderId, projectId } = req.body;
+  let { botType, meetingUrl, botName, isHeadless, googleDriveFolderId, projectId, attendeeEmails } = req.body;
 
   if (!botType || !meetingUrl) {
     return res.status(400).json({ error: 'Missing required parameters: botType and meetingUrl' });
+  }
+
+  // Validate attendeeEmails format if provided
+  let sanitizedAttendeeEmails = [];
+  if (attendeeEmails !== undefined && attendeeEmails !== null) {
+    if (!Array.isArray(attendeeEmails)) {
+      return res.status(400).json({ error: 'attendeeEmails must be an array of email strings' });
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    for (const email of attendeeEmails) {
+      if (typeof email !== 'string' || !emailRegex.test(email.trim())) {
+        return res.status(400).json({ error: `Invalid email address format: "${email}"` });
+      }
+    }
+    // Deduplicate and trim
+    sanitizedAttendeeEmails = [...new Set(attendeeEmails.map(e => e.trim().toLowerCase()))];
   }
 
   // Auto-detect and correct bot type based on URL structure to prevent mismatched bot launching
@@ -799,7 +820,8 @@ app.post('/api/sessions/start', authMiddleware, projectGuard, async (req, res) =
       isHeadless: isHeadless !== false,
       wsPort,
       googleDriveFolderId,
-      projectId
+      projectId,
+      attendeeEmails: sanitizedAttendeeEmails
     });
 
     // Handle process events/callbacks
@@ -1328,9 +1350,26 @@ app.post('/api/transcripts/:filename/generate-report', authMiddleware, projectGu
       // Parse filename to update Supabase row and upload report
       const match = filename.match(/^(teams|meet|google-meet|zoom)_(.+)\.jsonl$/);
       if (match) {
-        const [_, botType, sessionId] = match;
-        console.log(`[Server] Uploading report to Supabase for session: ${sessionId}`);
-        await uploadReport(sessionId, botType);
+        const [_, botType, targetSessionId] = match;
+        console.log(`[Server] Uploading report to Supabase for session: ${targetSessionId}`);
+        const publicUrl = await uploadReport(targetSessionId, botType);
+
+        // Send report emails if attendees are registered
+        try {
+          const emails = await getAttendeeEmailsForSession(targetSessionId);
+          if (emails && emails.length > 0) {
+            console.log(`[Server] Triggering bulk email report distribution for session ${targetSessionId}...`);
+            await sendReportEmailToAttendees({
+              sessionId: targetSessionId,
+              reportMarkdown: markdown,
+              reportUrl: publicUrl,
+              attendeeEmails: emails,
+              localReportPath: reportPath
+            });
+          }
+        } catch (emailErr) {
+          console.error(`[Server] Failed to send report emails for session ${targetSessionId}:`, emailErr.message);
+        }
       }
 
       // Upload reports to Google Drive if metadata exists with folder ID

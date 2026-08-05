@@ -26,3 +26,7 @@ BEGIN
       ON DELETE CASCADE;
   END IF;
 END $$;
+
+-- Add attendee_emails column to meeting_sessions table if not already present
+ALTER TABLE public.meeting_sessions ADD COLUMN IF NOT EXISTS attendee_emails text[];
+
