@@ -94,8 +94,8 @@ const authMiddleware = (req, res, next) => {
     }
   }
 
-  // 3. Dev/Test fallback if non-production
-  if (process.env.NODE_ENV === 'test' || process.env.NODE_ENV !== 'production') {
+  // 3. Test fallback only for automated unit tests
+  if (process.env.NODE_ENV === 'test') {
     const testUserId = req.headers['x-test-user-id'] || 'test-user-id';
     req.user = { id: testUserId, email: 'dev@localhost', name: 'Dev User' };
     return next();

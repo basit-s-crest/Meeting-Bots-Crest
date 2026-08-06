@@ -589,13 +589,6 @@ export class MeetBot {
       return messages;
     } catch (err) {
       console.warn('[MeetBot] Error in readLatestChatMessages:', err.message);
-=======
-      const messages = await this.page.$$eval(SELECTORS.inCall.chatMessages, els => {
-        return els.map(el => el.textContent?.trim()).filter(Boolean);
-      });
-      return messages;
-    } catch {
->>>>>>> 6b1374b9aab5fa45b1962df27e5c09d6b7073df8
       return [];
     }
   }

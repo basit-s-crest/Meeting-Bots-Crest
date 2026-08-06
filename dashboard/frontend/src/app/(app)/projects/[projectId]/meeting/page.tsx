@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { use, useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import { useRouter, useParams } from "next/navigation";
 import {
@@ -32,8 +32,9 @@ import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
 export default function MeetingBotPage({ params }: { params?: Promise<{ projectId: string }> | { projectId: string } }) {
   const routeParams = useParams();
+  const rawProjectId = typeof routeParams?.projectId === "string" ? routeParams.projectId : Array.isArray(routeParams?.projectId) ? routeParams.projectId[0] : "";
   const resolvedParams = params && typeof (params as any).then === 'function' ? use(params as Promise<{ projectId: string }>) : (params as { projectId: string });
-  const projectId = resolvedParams?.projectId || (typeof routeParams?.projectId === "string" ? routeParams.projectId : Array.isArray(routeParams?.projectId) ? routeParams.projectId[0] : "");
+  const projectId = rawProjectId || resolvedParams?.projectId || "";
   const router = useRouter();
 
   const [botType, setBotType] = useState("google-meet");
@@ -122,7 +123,7 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
     eventSource.addEventListener("bot_stopped", (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data);
-        if (!activeSessionId || data.sessionId === activeSessionId) {
+        if (activeSessionId && data.sessionId === activeSessionId) {
           const msg = getMeetingEndMessage(data.reason);
           setExitReasonMessage(msg);
           setBotStatus("idle");
@@ -242,6 +243,7 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
     if (!meetingUrl.trim() || botStatus !== "idle") return;
 
     setBotStatus("starting");
+    setExitReasonMessage(null);
     setLiveLines([]);
     setQaHistory([]);
     wasNearBottomRef.current = true;
