@@ -14,7 +14,7 @@ import {
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 
-const BACKEND_URL = "http://localhost:3000";
+import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
 export interface ScheduledMeeting {
   id: string;
@@ -90,8 +90,8 @@ export function UpcomingMeetingsWidget({ showHeader = true }: UpcomingMeetingsWi
     setLoading(true);
     try {
       const [meetingsRes, statusRes] = await Promise.all([
-        fetch(`${BACKEND_URL}/api/calendar/scheduled`, { credentials: "include" }),
-        fetch(`${BACKEND_URL}/api/calendar/auth/status`, { credentials: "include" })
+        apiFetch(`${BACKEND_URL}/api/calendar/scheduled`),
+        apiFetch(`${BACKEND_URL}/api/calendar/auth/status`)
       ]);
 
       if (meetingsRes.ok) {
@@ -116,9 +116,8 @@ export function UpcomingMeetingsWidget({ showHeader = true }: UpcomingMeetingsWi
   const handleSync = async () => {
     setSyncing(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/calendar/sync`, {
-        method: "POST",
-        credentials: "include"
+      const res = await apiFetch(`${BACKEND_URL}/api/calendar/sync`, {
+        method: "POST"
       });
       if (res.ok) {
         await fetchData();

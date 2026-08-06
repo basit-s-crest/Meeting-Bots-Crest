@@ -6,22 +6,22 @@ import { Eye, Radio, X, Folder, ChevronRight, Play } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
+import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
-const BACKEND_URL = "http://localhost:3000";
-
-interface ProjectItem {
+export interface ProjectItem {
   id: string;
   name: string;
 }
 
-interface BotSessionData {
+export interface BotSessionData {
   sessionId: string;
   botType: string;
-  meetingUrl?: string;
-  botName?: string;
-  projectId?: string;
+  meetingUrl: string;
+  botName: string;
+  projectId?: string | null;
+  status: string;
+  wsPort?: number;
   title?: string;
-  status?: string;
 }
 
 export function LiveMeetingModal() {
@@ -36,7 +36,7 @@ export function LiveMeetingModal() {
   // Helper to check active sessions on backend
   const checkActiveSessions = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/sessions`, { credentials: "include" });
+      const res = await apiFetch(`${BACKEND_URL}/api/sessions`);
       if (res.ok) {
         const data = await res.json();
         const sessions: BotSessionData[] = data.sessions || [];
@@ -105,7 +105,7 @@ export function LiveMeetingModal() {
 
     (async () => {
       try {
-        const res = await fetch(`${BACKEND_URL}/api/projects`, { credentials: "include" });
+        const res = await apiFetch(`${BACKEND_URL}/api/projects`);
         if (res.ok) {
           const list: ProjectItem[] = await res.json();
           setProjects(list);
@@ -130,10 +130,9 @@ export function LiveMeetingModal() {
 
     try {
       // Update session's assigned project ID on backend & Supabase
-      await fetch(`${BACKEND_URL}/api/sessions/update-project`, {
+      await apiFetch(`${BACKEND_URL}/api/sessions/update-project`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({
           sessionId: activeSessionData?.sessionId,
           projectId: selectedProjectId

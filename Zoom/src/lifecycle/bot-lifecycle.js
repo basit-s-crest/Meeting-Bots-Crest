@@ -7,6 +7,7 @@ import { SpeakerDetector } from '../speaker/speaker-detector.js';
 import { AudioChunker } from '../chunker/audio-chunker.js';
 import { createOutput } from '../output/chunk-output.js';
 import { SELECTORS } from '../config/selectors.js';
+import { generateAnnouncementMessage, parseChatCommand } from '../config/chat-service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,6 +40,9 @@ export class BotLifecycle {
     this.output = null;
     this.state = 'idle';
     this.stateChangeCallback = null;
+    this.isPaused = false;
+    this._chatMonitorInterval = null;
+    this.processedChatMessages = new Set();
   }
 
   async start() {
@@ -94,6 +98,10 @@ export class BotLifecycle {
     await this.initializeCapture();
 
     this.transitionState('capturing');
+
+    // Auto-send chat announcement & start command listener immediately (non-blocking)
+    this.sendChatAnnouncement().catch(err => console.warn('[Lifecycle] sendChatAnnouncement error:', err.message));
+    this.startChatCommandMonitor();
   }
 
   async verifyInCall() {
@@ -146,7 +154,11 @@ export class BotLifecycle {
 
     // 2. Set callbacks on pre-initialized audio interceptor
     this.audioCapture.setCallbacks({
-      onFrame: (frame) => this.chunker.addAudioFrame(frame),
+      onFrame: (frame) => {
+        if (!this.isPaused) {
+          this.chunker.addAudioFrame(frame);
+        }
+      },
       onError: (err) => console.error('[Lifecycle] Audio capture error:', err),
       onRMSUpdate: (trackId, rms) => this.audioCapture.onRMSUpdate(trackId, rms),
     });
@@ -158,13 +170,15 @@ export class BotLifecycle {
 
     // 3. Set callback on pre-initialized speaker observer with audio diarization sync
     this.speakerDetector.setCallback((data) => {
-      // Add confidence and source to DOM-based speaker events
-      this.chunker.addSpeakerEvent({
-        speaker: data.speaker,
-        timestamp: data.timestamp,
-        confidence: data.confidence || 1.0,
-        source: 'dom'
-      });
+      if (!this.isPaused) {
+        // Add confidence and source to DOM-based speaker events
+        this.chunker.addSpeakerEvent({
+          speaker: data.speaker,
+          timestamp: data.timestamp,
+          confidence: data.confidence || 1.0,
+          source: 'dom'
+        });
+      }
     });
 
     // 4. Click the Audio Join button (satisfies autoplay permissions and connects stream)
@@ -201,8 +215,97 @@ export class BotLifecycle {
     }, 30000); // Every 30 seconds
   }
 
-  async stop() {
+  async sendChatAnnouncement() {
+    console.log('[Lifecycle] [CHAT LOG] sendChatAnnouncement() invoked');
+    if (process.env.ENABLE_CHAT_ANNOUNCEMENT === 'false') {
+      console.log('[Lifecycle] [CHAT LOG] ENABLE_CHAT_ANNOUNCEMENT is set to false. Skipping announcement.');
+      return;
+    }
+    const msg = generateAnnouncementMessage({
+      botName: this.botName,
+    });
+    console.log(`[Lifecycle] [CHAT LOG] Sending draft announcement message:\n---\n${msg}\n---`);
+    const result = await this.bot?.sendChatMessage(msg);
+    if (result) {
+      console.log('[Lifecycle] [CHAT LOG] Announcement draft message sent successfully!');
+    } else {
+      console.warn('[Lifecycle] [CHAT LOG] Failed to send announcement draft message.');
+    }
+  }
+
+  startChatCommandMonitor() {
+    if (this._chatMonitorInterval) return;
+    this.processedChatMessages = new Set();
+    console.log('[Lifecycle] [CHAT LOG] In-call chat command monitor started (polling every 3s).');
+
+    this._chatMonitorInterval = setInterval(async () => {
+      if (this.state !== 'capturing' && this.state !== 'in_call') return;
+      try {
+        const messages = await this.bot?.readLatestChatMessages();
+        if (messages && messages.length > 0) {
+          for (const text of messages) {
+            if (this.processedChatMessages.has(text)) continue;
+            this.processedChatMessages.add(text);
+            console.log(`[Lifecycle] [CHAT LOG] New chat message detected: "${text}"`);
+
+            const action = parseChatCommand(text);
+            if (action) {
+              console.log(`[Lifecycle] [CHAT LOG] Matched slash command action: "${action}"`);
+              await this.handleChatCommand(action);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[Lifecycle] [CHAT LOG] Chat monitor error:', err.message);
+      }
+    }, 3000);
+  }
+
+  emitReason(reason) {
+    if (this._reasonEmitted) return;
+    this._reasonEmitted = true;
+    console.log(`REASON: ${reason}`);
+    if (typeof process !== 'undefined' && process.send) {
+      try {
+        process.send({ type: 'SESSION_REASON', reason });
+      } catch (err) {
+        console.warn('[Lifecycle] Failed to send IPC reason:', err.message);
+      }
+    }
+  }
+
+  async handleChatCommand(action) {
+    if (action === 'pause') {
+      if (!this.isPaused) {
+        this.isPaused = true;
+        console.log('[Lifecycle] Recording PAUSED via chat command.');
+        await this.bot?.sendChatMessage(`[${this.botName}] Recording paused.`);
+      }
+    } else if (action === 'resume') {
+      if (this.isPaused) {
+        this.isPaused = false;
+        console.log('[Lifecycle] Recording RESUMED via chat command.');
+        await this.bot?.sendChatMessage(`[${this.botName}] Recording resumed.`);
+      }
+    } else if (action === 'leave') {
+      console.log('[Lifecycle] LEAVE requested via chat command.');
+      this.emitReason('chat_command_leave');
+      await this.bot?.sendChatMessage(`[${this.botName}] Leaving meeting...`);
+      await new Promise(r => setTimeout(r, 1000));
+      await this.stop('chat_command_leave');
+    }
+  }
+
+  async stop(explicitReason) {
+    if (explicitReason) {
+      this.emitReason(explicitReason);
+    }
     this.transitionState('ended');
+
+    if (this._chatMonitorInterval) {
+      clearInterval(this._chatMonitorInterval);
+      this._chatMonitorInterval = null;
+    }
     
     try {
       await this.audioCapture?.stop();

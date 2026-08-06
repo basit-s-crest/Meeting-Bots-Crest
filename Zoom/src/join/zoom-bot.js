@@ -401,6 +401,70 @@ export class ZoomBot {
     }
   }
 
+  async openChat() {
+    try {
+      const existingInput = await this.page.$('div.chat-box__chat-textarea, textarea.chat-box__chat-textarea');
+      if (existingInput && await existingInput.isVisible()) {
+        console.log('[Zoom Bot] [CHAT LOG] Zoom chat panel is ALREADY open.');
+        return true;
+      }
+
+      await this.showControls();
+      console.log('[Zoom Bot] [CHAT LOG] Searching for Zoom Chat button...');
+      const chatBtn = await this.findLocator('button[aria-label*="chat" i], button.footer-button-element[aria-label*="chat" i], .footer-button__chat-icon');
+      if (chatBtn) {
+        console.log('[Zoom Bot] [CHAT LOG] Clicking Zoom Chat button to open panel...');
+        await chatBtn.click({ force: true }).catch(() => {});
+        await this.page.waitForTimeout(1500);
+        return true;
+      } else {
+        console.warn('[Zoom Bot] [CHAT LOG] Zoom Chat button not found.');
+      }
+    } catch (err) {
+      console.warn('[Zoom Bot] [CHAT LOG] Failed to open chat panel:', err.message);
+    }
+    return false;
+  }
+
+  async sendChatMessage(text) {
+    try {
+      console.log('[Zoom Bot] [CHAT LOG] Preparing to send chat message...');
+      await this.openChat();
+
+      const chatInput = await this.findLocator('div.chat-box__chat-textarea, textarea.chat-box__chat-textarea, div[contenteditable="true"], textarea[aria-label*="Chat" i]');
+      if (chatInput) {
+        console.log(`[Zoom Bot] [CHAT LOG] Found chat input element. Typing: "${text.slice(0, 60).replace(/\n/g, ' ')}..."`);
+        await chatInput.scrollIntoViewIfNeeded().catch(() => {});
+        await chatInput.click({ force: true }).catch(() => {});
+        await chatInput.focus().catch(() => {});
+        await this.page.keyboard.insertText(text);
+        await this.page.waitForTimeout(500);
+        await this.page.keyboard.press('Enter');
+        await this.page.waitForTimeout(1000);
+        console.log('[Zoom Bot] [CHAT LOG] Chat message dispatched successfully.');
+        return true;
+      } else {
+        console.warn('[Zoom Bot] [CHAT LOG] Zoom chat input field not found or not visible.');
+      }
+    } catch (err) {
+      console.warn('[Zoom Bot] [CHAT LOG] Error sending chat message:', err.message);
+    }
+    return false;
+  }
+
+  async readLatestChatMessages() {
+    try {
+      if (!this.page) return [];
+      const selectors = 'div.chat-message__text, .chat-item__chat-info-msg, .chat-box__chat-message';
+      const messages = await this.page.$$eval(selectors, els => {
+        return els.map(el => el.textContent?.trim()).filter(Boolean);
+      });
+      return messages;
+    } catch {
+      return [];
+    }
+  }
+
   async leave() {
     try {
       await this.showControls();

@@ -25,4 +25,7 @@ BEGIN
       REFERENCES public.users(id)
       ON DELETE CASCADE;
   END IF;
-END $$;
+
+-- Add exit_reason column to meeting_sessions table
+ALTER TABLE public.meeting_sessions ADD COLUMN IF NOT EXISTS exit_reason text;
+

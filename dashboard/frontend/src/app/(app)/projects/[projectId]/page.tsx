@@ -2,7 +2,7 @@
 
 import { use, useEffect, useState, useRef } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useParams } from "next/navigation";
 
 import {
   ArrowLeft, FileText, Calendar, MessageSquare, Play, Send, Sparkles, Download, Eye, Clock, CheckCircle2, AlertCircle, X,
@@ -70,21 +70,11 @@ interface SchedulingData {
   status?: string;
 }
 
-const BACKEND_URL = "http://localhost:3000";
-
-const originalFetch = typeof window !== "undefined" ? window.fetch : null;
-const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  if (!originalFetch) return Promise.reject(new Error("fetch called on server"));
-  return originalFetch(input, {
-    ...init,
-    credentials: "include"
-  });
-};
+import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
 export default function ProjectWorkspacePage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = use(params);
   const router = useRouter();
-
 
   const [project, setProject] = useState<ProjectListItem | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -135,8 +125,8 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const fetchSessions = async () => {
     try {
       const [transcriptsRes, activeSessionsRes] = await Promise.all([
-        fetch(`${BACKEND_URL}/api/transcripts?projectId=${projectId}`, { credentials: "include" }),
-        fetch(`${BACKEND_URL}/api/sessions`, { credentials: "include" })
+        apiFetch(`${BACKEND_URL}/api/transcripts?projectId=${projectId}`),
+        apiFetch(`${BACKEND_URL}/api/sessions`)
       ]);
 
       let transcriptList: Session[] = [];
@@ -181,9 +171,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     function fetchProjectDetails() {
       (async () => {
         try {
-          const res = await fetch(`${BACKEND_URL}/api/projects`, {
-            credentials: "include"
-          });
+          const res = await apiFetch(`${BACKEND_URL}/api/projects`);
           if (res.ok) {
             const list: ProjectListItem[] = await res.json();
             setAllProjects(list);
@@ -199,27 +187,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     fetchSessions();
   }, [projectId]);
 
-
-
-
-
-
-  const capturingSession = sessions.find(s => s.status !== "completed" && s.status !== "archived" && s.status !== "empty");
-
-  // Auto-redirect to live meeting transcript page when active capturing session starts
-  useEffect(() => {
-    if (capturingSession && !hasAutoRedirected) {
-      setHasAutoRedirected(true);
-      router.push(`/projects/${projectId}/meeting`);
-    }
-  }, [capturingSession, hasAutoRedirected, projectId, router]);
-
-
-
-
   const [allProjects, setAllProjects] = useState<ProjectListItem[]>([]);
-
-
 
   // Rename action handler
   const handleOpenRenameModal = (session: Session) => {
@@ -232,10 +200,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     if (!renameSession || !renameTitleInput.trim()) return;
     setRenameLoading(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/meetings/${renameSession.sessionId}`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/meetings/${renameSession.sessionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({ title: renameTitleInput.trim() }),
       });
       if (!res.ok) throw new Error("Failed to rename meeting");
@@ -256,10 +223,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     const newStatus = isArchived ? "completed" : "archived";
     setOpenMenuSessionId(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/meetings/${session.sessionId}`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/meetings/${session.sessionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({ status: newStatus }),
       });
       if (!res.ok) throw new Error(`Failed to ${isArchived ? "unarchive" : "archive"} meeting`);
@@ -277,23 +243,21 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     setDeleteLoading(true);
     try {
       // Try primary DELETE /api/meetings/:sessionId
-      let res = await fetch(`${BACKEND_URL}/api/meetings/${deleteSession.sessionId}`, {
+      let res = await apiFetch(`${BACKEND_URL}/api/meetings/${deleteSession.sessionId}`, {
         method: "DELETE",
       });
 
       // Fallback: try DELETE /api/transcripts/:fileName if primary route returned 404
       if (res.status === 404 && deleteSession.fileName) {
-        res = await fetch(`${BACKEND_URL}/api/transcripts/${deleteSession.fileName}`, {
+        res = await apiFetch(`${BACKEND_URL}/api/transcripts/${deleteSession.fileName}`, {
           method: "DELETE",
         });
       }
 
       if (!res.ok) {
-        // If server is running old code in memory (404), remove from local state cleanly
         if (res.status === 404) {
           setSessions(prev => prev.filter(s => s.sessionId !== deleteSession.sessionId));
           setDeleteSession(null);
-          alert("Meeting session deleted. Note: Please restart your Node backend process on port 3000 to apply hot-reloaded API routes.");
           return;
         }
         const errData = await res.json().catch(() => ({}));
@@ -303,7 +267,10 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
       setSessions(prev => prev.filter(s => s.sessionId !== deleteSession.sessionId));
       setDeleteSession(null);
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Error deleting meeting");
+      const msg = err instanceof Error ? err.message : "Error deleting meeting";
+      if (!msg.includes("Authentication required") && !msg.includes("log in") && !msg.includes("token")) {
+        alert(msg);
+      }
     } finally {
       setDeleteLoading(false);
     }
@@ -319,7 +286,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     setChatLoading(true);
 
     try {
-      const res = await fetch(`${BACKEND_URL}/api/memory/query`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/memory/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: userMsg, project_id: projectId }),
@@ -347,9 +314,7 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleViewTranscript = async (session: Session) => {
     setLoadingModal(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`, {
-        credentials: "include"
-      });
+      const res = await apiFetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`);
       if (!res.ok) throw new Error("Could not download transcript");
       const data = await res.json();
       setActiveTranscript({ sessionId: session.sessionId, lines: data.lines || [] });
@@ -364,16 +329,13 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
     setLoadingModal(true);
     setSchedSuccess(false);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}/generate-report`, {
-        method: "POST",
-        credentials: "include"
+      const res = await apiFetch(`${BACKEND_URL}/api/transcripts/${session.fileName}/generate-report`, {
+        method: "POST"
       });
       if (!res.ok) throw new Error("Could not retrieve AI report");
       const data = await res.json();
 
-      const transRes = await fetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`, {
-        credentials: "include"
-      });
+      const transRes = await apiFetch(`${BACKEND_URL}/api/transcripts/${session.fileName}`);
       let speakerStats: Array<{ speaker: string; percentage: number; talkTime: string }> = [];
       if (transRes.ok) {
         const transData = await transRes.json();
@@ -415,10 +377,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleConfirmSchedule = async () => {
     if (!activeReport) return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/calendar/confirm-report-schedule`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/calendar/confirm-report-schedule`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({
           title: schedTitle,
           date: schedDate,
@@ -447,10 +408,9 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
   const handleDismissSchedule = async () => {
     if (!activeReport) return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/calendar/dismiss-report-schedule`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/calendar/dismiss-report-schedule`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({
           filename: activeReport.filename
         })
@@ -536,32 +496,35 @@ export default function ProjectWorkspacePage({ params }: { params: Promise<{ pro
       </div>
 
       {/* Live Active Session Banner */}
-
-      {capturingSession && (
-        <div className="mt-6 flex flex-col items-center justify-between gap-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 sm:flex-row shadow-sm">
-          <div className="flex items-center gap-3">
-            <span className="relative flex h-3.5 w-3.5 shrink-0">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-              <span className="relative inline-flex h-3.5 w-3.5 rounded-full bg-emerald-500" />
-            </span>
-            <div>
-              <h4 className="text-sm font-bold text-ink flex items-center gap-2">
-                Live Bot Capturing: {capturingSession.title || capturingSession.botName || "Meeting Bot"}
-                <Badge tone="success">{capturingSession.botType}</Badge>
-              </h4>
-              <p className="text-xs text-ink-soft mt-0.5">
-                Auto-joined meeting. Capturing live audio, transcript, and AI Q&A assistant.
-              </p>
+      {(() => {
+        const activeLiveSession = sessions.find(s => !s.isDbBacked && (s.status === "capturing" || s.status === "joining" || s.status === "starting" || s.status === "in_progress"));
+        if (!activeLiveSession) return null;
+        return (
+          <div className="mt-6 flex flex-col items-center justify-between gap-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 sm:flex-row shadow-sm">
+            <div className="flex items-center gap-3">
+              <span className="relative flex h-3.5 w-3.5 shrink-0">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex h-3.5 w-3.5 rounded-full bg-emerald-500" />
+              </span>
+              <div>
+                <h4 className="text-sm font-bold text-ink flex items-center gap-2">
+                  Live Bot Capturing: {activeLiveSession.title || activeLiveSession.botName || "Meeting Bot"}
+                  <Badge tone="success">{activeLiveSession.botType}</Badge>
+                </h4>
+                <p className="text-xs text-ink-soft mt-0.5">
+                  Auto-joined meeting. Capturing live audio, transcript, and AI Q&A assistant.
+                </p>
+              </div>
             </div>
+            <Link href={`/projects/${projectId}/meeting`}>
+              <Button size="sm" className="whitespace-nowrap bg-emerald-600 hover:bg-emerald-700 text-white">
+                <Eye className="h-4 w-4" />
+                Open Live Transcript & Q&A
+              </Button>
+            </Link>
           </div>
-          <Link href={`/projects/${projectId}/meeting`}>
-            <Button size="sm" className="whitespace-nowrap bg-emerald-600 hover:bg-emerald-700 text-white">
-              <Eye className="h-4 w-4" />
-              Open Live Transcript & Q&A
-            </Button>
-          </Link>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Grid */}
       <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-3">

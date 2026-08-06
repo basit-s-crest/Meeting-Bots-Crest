@@ -474,11 +474,140 @@ export class MeetBot {
     console.log('[MeetBot] Session saved successfully.');
   }
 
+  async openChat() {
+    try {
+      if (!this.page) return false;
+
+      // 1. Check if chat input is ALREADY visible (panel open)
+      const inputLoc = this.page.locator(
+        'textarea[aria-label*="Send a message" i], textarea[placeholder*="Send a message" i], div[contenteditable="true"][aria-label*="Send a message" i], [placeholder*="Send a message" i], [aria-label*="Send a message" i]'
+      ).first();
+
+      if (await inputLoc.isVisible().catch(() => false)) {
+        console.log('[MeetBot] [CHAT LOG] Google Meet chat panel is ALREADY open.');
+        return true;
+      }
+
+      console.log('[MeetBot] [CHAT LOG] Searching for Google Meet Chat toggle button...');
+      const chatBtnLoc = this.page.locator(
+        'button[aria-label*="Chat with everyone" i], button[aria-label*="In-call messages" i], button[aria-label*="chat" i], button[data-tooltip*="Chat" i], [aria-label*="Chat" i]'
+      ).first();
+
+      if (await chatBtnLoc.isVisible({ timeout: 5000 }).catch(() => false)) {
+        const expanded = await chatBtnLoc.getAttribute('aria-expanded').catch(() => null);
+        if (expanded !== 'true') {
+          console.log('[MeetBot] [CHAT LOG] Clicking Google Meet Chat button to open panel...');
+          await chatBtnLoc.click({ force: true }).catch(() => {});
+          await this.page.waitForTimeout(1500);
+        }
+        return true;
+      } else {
+        console.warn('[MeetBot] [CHAT LOG] Google Meet Chat button not visible after waiting.');
+      }
+    } catch (err) {
+      console.warn('[MeetBot] [CHAT LOG] Failed to open chat panel:', err.message);
+    }
+    return false;
+  }
+
+  async sendChatMessage(text) {
+    try {
+      console.log('[MeetBot] [CHAT LOG] Preparing to send chat message...');
+      await this.openChat();
+
+      const inputLoc = this.page.locator(
+        'textarea[aria-label*="Send a message" i], textarea[placeholder*="Send a message" i], div[contenteditable="true"][aria-label*="Send a message" i], [placeholder*="Send a message" i], [aria-label*="Send a message" i]'
+      ).first();
+
+      if (await inputLoc.isVisible({ timeout: 5000 }).catch(() => false)) {
+        console.log(`[MeetBot] [CHAT LOG] Found chat input element. Typing: "${text.slice(0, 60).replace(/\n/g, ' ')}..."`);
+        await inputLoc.scrollIntoViewIfNeeded().catch(() => {});
+        await inputLoc.click({ force: true }).catch(() => {});
+        await inputLoc.focus().catch(() => {});
+        await this.page.keyboard.insertText(text);
+        await this.page.waitForTimeout(500);
+
+        const sendBtnLoc = this.page.locator(
+          'button[aria-label*="Send a message" i], button[aria-label*="Send message" i], button[aria-label*="Send" i]'
+        ).first();
+
+        if (await sendBtnLoc.isVisible({ timeout: 2000 }).catch(() => false)) {
+          console.log('[MeetBot] [CHAT LOG] Clicking Send button...');
+          await sendBtnLoc.click({ force: true }).catch(() => {});
+        } else {
+          console.log('[MeetBot] [CHAT LOG] Send button not visible, pressing Enter...');
+          await this.page.keyboard.press('Enter');
+        }
+        await this.page.waitForTimeout(1000);
+        console.log('[MeetBot] [CHAT LOG] Chat message dispatched successfully.');
+        return true;
+      } else {
+        console.warn('[MeetBot] [CHAT LOG] Chat input field not visible or disabled by host.');
+      }
+    } catch (err) {
+      console.warn('[MeetBot] [CHAT LOG] Error sending chat message:', err.message);
+    }
+    return false;
+  }
+
+  async readLatestChatMessages() {
+    try {
+      if (!this.page) return [];
+      
+      // Ensure chat side panel is open on bot page
+      await this.openChat();
+
+      const messages = await this.page.evaluate(() => {
+        const list = [];
+        
+        // 1. Target chat panel container if present
+        const chatPanel = document.querySelector('[aria-label*="In-call messages" i], [aria-label*="Chat" i], div[role="region"]');
+        if (chatPanel) {
+          const nodes = chatPanel.querySelectorAll('div[data-message-text], div[jsname], div[role="listitem"], p, span');
+          for (const el of nodes) {
+            const txt = el.textContent?.trim();
+            if (txt && txt.length > 0 && txt.length < 500) {
+              list.push(txt);
+            }
+          }
+        }
+
+        // 2. Fallback scan all leaf elements in document for slash commands
+        const allElements = document.querySelectorAll('div, span, p');
+        for (const el of allElements) {
+          if (el.children.length === 0) { // Leaf node
+            const txt = el.textContent?.trim();
+            if (txt && (txt.includes('/bot') || txt.includes('bot leave') || txt.includes('bot pause') || txt.includes('bot resume') || txt.includes('/leave') || txt.includes('/pause') || txt.includes('/resume'))) {
+              list.push(txt);
+            }
+          }
+        }
+
+        return list;
+      });
+
+      return messages;
+    } catch (err) {
+      console.warn('[MeetBot] Error in readLatestChatMessages:', err.message);
+      return [];
+    }
+  }
+
   async leave() {
     try {
-      const leaveBtn = await this.page.$('button[aria-label*="Leave" i], button:has-text("Leave call")');
-      if (leaveBtn) await leaveBtn.click();
-    } catch { /* ignore */ }
+      if (this.page) {
+        const leaveBtnLoc = this.page.locator(
+          'button[aria-label*="Leave" i], button[aria-label*="End call" i], button[aria-label*="hangup" i], button[data-tooltip*="Leave" i], button:has-text("Leave call")'
+        ).first();
+        if (await leaveBtnLoc.isVisible({ timeout: 2000 }).catch(() => false)) {
+          console.log('[MeetBot] Clicking Leave call button...');
+          await leaveBtnLoc.click({ force: true }).catch(() => {});
+          await this.page.waitForTimeout(500);
+        }
+      }
+    } catch (err) {
+      console.warn('[MeetBot] Leave call warning:', err.message);
+    }
     await this.close();
   }
 

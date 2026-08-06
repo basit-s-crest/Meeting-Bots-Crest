@@ -6,7 +6,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 
-const BACKEND_URL = "http://localhost:3000";
+import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
 interface DriveStatus {
   connected: boolean;
@@ -29,9 +29,7 @@ export function GoogleDriveModal({ open, onClose, onStatusChange }: GoogleDriveM
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`${BACKEND_URL}/api/auth/google/status`, {
-        credentials: "include"
-      });
+      const res = await apiFetch(`${BACKEND_URL}/api/auth/google/status`);
       if (!res.ok) throw new Error("Failed to load Google Drive status");
       const data: DriveStatus = await res.json();
       setStatus(data);
@@ -53,9 +51,8 @@ export function GoogleDriveModal({ open, onClose, onStatusChange }: GoogleDriveM
     if (!confirm("Are you sure you want to disconnect Google Drive? Syncing will pause.")) return;
     setDisconnecting(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/auth/google/disconnect`, {
-        method: "POST",
-        credentials: "include"
+      const res = await apiFetch(`${BACKEND_URL}/api/auth/google/disconnect`, {
+        method: "POST"
       });
       if (!res.ok) throw new Error("Failed to disconnect Google Drive");
       const newStatus = { connected: false, configured: status?.configured ?? true };

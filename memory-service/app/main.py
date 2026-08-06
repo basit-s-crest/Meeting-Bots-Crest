@@ -4,7 +4,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from app.config import MEMORY_SERVICE_PORT
-from app.database import init_supabase
+from app.database import init_supabase, is_db_connected
 from app.embeddings import init_embedder
 from app.ingestion import router as ingestion_router
 from app.query_router import router as query_router

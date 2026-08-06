@@ -2,7 +2,7 @@
 
 import { use, useEffect, useState, useRef } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useParams } from "next/navigation";
 import {
   ArrowLeft, Play, Square, Volume2, Layers, Wifi, WifiOff
 } from "lucide-react";
@@ -28,16 +28,7 @@ interface TranscriptLine {
   provisional?: boolean;
 }
 
-const BACKEND_URL = "http://localhost:3000";
-
-const originalFetch = typeof window !== "undefined" ? window.fetch : null;
-const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  if (!originalFetch) return Promise.reject(new Error("fetch called on server"));
-  return originalFetch(input, {
-    ...init,
-    credentials: "include"
-  });
-};
+import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
 export default function MeetingBotPage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = use(params);
@@ -56,6 +47,21 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const [qaHistory, setQaHistory] = useState<QAPair[]>([]);
   const [showJumpButton, setShowJumpButton] = useState(false);
   const [highlightedLineId, setHighlightedLineId] = useState<string | null>(null);
+  const [exitReasonMessage, setExitReasonMessage] = useState<string | null>(null);
+
+  const getMeetingEndMessage = (reason?: string) => {
+    switch (reason) {
+      case 'host_ended':
+        return "Meeting ended by host.";
+      case 'dashboard_leave':
+        return "Dashboard-initiated leave.";
+      case 'chat_command_leave':
+        return "Chat-command-initiated leave.";
+      case 'unknown':
+      default:
+        return "Session ended unexpectedly.";
+    }
+  };
 
   const handleJumpToLine = (lineId: string) => {
     setHighlightedLineId(lineId);
@@ -73,18 +79,42 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const visualizerTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
+    const eventSource = new EventSource(`${BACKEND_URL}/api/events/subscribe`, {
+      withCredentials: true,
+    });
+
+    eventSource.addEventListener("bot_stopped", (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (!activeSessionId || data.sessionId === activeSessionId) {
+          const msg = getMeetingEndMessage(data.reason);
+          setExitReasonMessage(msg);
+          setBotStatus("idle");
+          disconnectWebSocket();
+        }
+      } catch (err) {
+        console.error("Failed to parse bot_stopped SSE event:", err);
+      }
+    });
+
+    return () => {
+      eventSource.close();
+    };
+  }, [activeSessionId]);
+
+  useEffect(() => {
     // Auto-detect and connect to active session running on backend
+    // Session check on mount
     (async () => {
       try {
         const searchParams = new URLSearchParams(window.location.search);
         const urlSessionId = searchParams.get("sessionId");
 
         if (urlSessionId) {
-          // If sessionId is explicitly passed in URL query parameter
-          const res = await fetch(`${BACKEND_URL}/api/sessions/${urlSessionId}`);
+          const res = await apiFetch(`${BACKEND_URL}/api/sessions/${urlSessionId}`);
           if (res.ok) {
             const data = await res.json();
-            const session = data.session;
+            const session = data.session || data;
             if (session && session.sessionId) {
               setActiveSessionId(session.sessionId);
               setBotStatus(session.status || "capturing");
@@ -98,7 +128,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
         }
 
         // Fallback: check active sessions list
-        const res = await fetch(`${BACKEND_URL}/api/sessions`);
+        const res = await apiFetch(`${BACKEND_URL}/api/sessions`);
         if (res.ok) {
           const data = await res.json();
           if (data.sessions && data.sessions.length > 0) {
@@ -182,7 +212,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
     setActiveSpeaker("Connecting…");
 
     try {
-      const res = await fetch(`${BACKEND_URL}/api/sessions/start`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/sessions/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -353,7 +383,7 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
     setBotStatus("stopping");
 
     try {
-      const res = await fetch(`${BACKEND_URL}/api/sessions/stop`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/sessions/stop`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -414,6 +444,15 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
           </Badge>
         )}
       </div>
+
+      {exitReasonMessage && (
+        <div className="mt-4 flex items-center justify-between rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 font-medium text-amber-600 dark:text-amber-400">
+          <span>{exitReasonMessage}</span>
+          <button onClick={() => setExitReasonMessage(null)} className="cursor-pointer text-xs underline">
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Config */}

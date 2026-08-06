@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { HardDrive, CheckCircle2 } from "lucide-react";
 import { GoogleDriveModal } from "@/components/GoogleDriveModal";
 
-const BACKEND_URL = "http://localhost:3000";
+import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
 interface GoogleDriveStatusBadgeProps {
   className?: string;
@@ -19,9 +19,7 @@ export function GoogleDriveStatusBadge({ className = "", variant = "badge" }: Go
     let isMounted = true;
     async function checkStatus() {
       try {
-        const res = await fetch(`${BACKEND_URL}/api/auth/google/status`, {
-          credentials: "include"
-        });
+        const res = await apiFetch(`${BACKEND_URL}/api/auth/google/status`);
         if (res.ok && isMounted) {
           const data = await res.json();
           setConnected(data.connected);
