@@ -133,7 +133,7 @@ async function main() {
     checkParentInterval.unref();
   }
 
-  // Listen for graceful stop command on stdin
+  // Listen for graceful stop command and chat-message commands on stdin
   if (!config.login) {
     process.stdin.on('data', async (data) => {
       const text = data.toString().trim();
@@ -143,6 +143,32 @@ async function main() {
           await lifecycle.stop().catch(() => {});
         }
         process.exit(0);
+      } else if (text.startsWith('chat:')) {
+        const payload = text.slice('chat:'.length);
+        let message;
+        try {
+          message = JSON.parse(payload);
+        } catch {
+          console.warn('[Bot] Received malformed chat command on stdin.');
+          return;
+        }
+
+        // Build a human-readable proposal message for the central Meet chat.
+        const title = message.title || 'Follow-up Meeting';
+        const when = [message.date, message.time].filter(Boolean).join(' at ');
+        const tz = message.timezone || '';
+        const url = message.approvalUrl || '';
+
+        let chatText = `📅 Scheduling request: "${title}"`;
+        if (when) chatText += `\n🗓 When: ${when}${tz ? ` (${tz})` : ''}`;
+        if (url) chatText += `\n👉 Approve here: ${url}`;
+        if (message.rawMention) chatText += `\n💬 "${message.rawMention}"`;
+
+        if (lifecycle && lifecycle.bot) {
+          await lifecycle.bot.sendChatMessage(chatText);
+        } else {
+          console.warn('[Bot] No live bot to post chat message.');
+        }
       }
     });
   }

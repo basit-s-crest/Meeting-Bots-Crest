@@ -212,3 +212,107 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 }
+
+/**
+ * Sends a "meeting scheduled" notification email to attendees after the
+ * two-stage approval flow completes and the calendar event is created.
+ *
+ * @param {Object} params
+ * @param {string} params.sessionId - The meeting session ID
+ * @param {string} params.meetingTitle - Title of the scheduled meeting
+ * @param {string} params.startDate - YYYY-MM-DD
+ * @param {string} params.startTime - HH:MM
+ * @param {string} params.timezone - IANA timezone string
+ * @param {Array<string>} params.attendeeEmails - Recipients (the people who approved)
+ * @param {string} [params.eventHtmlLink] - Google Calendar event link
+ */
+export async function sendSchedulingNotification({
+  sessionId,
+  meetingTitle,
+  startDate,
+  startTime,
+  timezone,
+  attendeeEmails = [],
+  eventHtmlLink = null
+}) {
+  if (!Array.isArray(attendeeEmails) || attendeeEmails.length === 0) {
+    console.log(`[EmailService] No attendee emails for scheduling notification (session ${sessionId}). Skipping.`);
+    return { success: true, count: 0, results: [] };
+  }
+
+  const transporter = createTransporter();
+  if (!transporter) {
+    console.warn(`[EmailService] Transporter unavailable. Cannot send scheduling notification for session ${sessionId}.`);
+    return { success: false, error: 'Gmail credentials not configured' };
+  }
+
+  const senderEmail = process.env.GMAIL_USER;
+  const fromName = 'Meeting Bot Reports';
+  const fromAddress = `"${fromName}" <${senderEmail}>`;
+
+  const displayTitle = meetingTitle || 'Scheduled Meeting';
+  const whenText = `${startDate || ''} at ${startTime || ''} ${timezone || ''}`.trim();
+
+  const htmlBody = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; background-color: #f8fafc; padding: 20px; line-height: 1.5; }
+        .card { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 32px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
+        .header { border-bottom: 1px solid #e2e8f0; padding-bottom: 16px; margin-bottom: 24px; }
+        .title { font-size: 20px; font-weight: 700; color: #0f172a; margin: 0 0 4px 0; }
+        .badge { display: inline-block; background-color: #d1fae5; color: #047857; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 9999px; margin-bottom: 16px; }
+        .btn { display: inline-block; background-color: #4f46e5; color: #ffffff !important; text-decoration: none; font-weight: 600; font-size: 14px; padding: 10px 20px; border-radius: 8px; margin-top: 8px; }
+        .footer { margin-top: 32px; font-size: 12px; color: #94a3b8; text-align: center; border-top: 1px solid #f1f5f9; padding-top: 16px; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <div class="header">
+          <span class="badge">Meeting Scheduled</span>
+          <h1 class="title">${escapeHtml(displayTitle)}</h1>
+        </div>
+        <p style="font-size: 14px; color: #334155;">Your meeting has been confirmed and added to the calendar.</p>
+        <p style="font-size: 14px; color: #334155;"><strong>When:</strong> ${escapeHtml(whenText)}</p>
+        ${eventHtmlLink ? `<p style="margin-top: 16px;"><a href="${escapeHtml(eventHtmlLink)}" class="btn" target="_blank">View in Google Calendar &rarr;</a></p>` : ''}
+        <div class="footer">Sent automatically by Meeting Bot Orchestrator &bull; Confidential</div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  const textBody = `${displayTitle}\n\nYour meeting has been confirmed and added to the calendar.\n\nWhen: ${whenText}\n${eventHtmlLink ? `View in Google Calendar: ${eventHtmlLink}\n` : ''}`;
+
+  const sendPromises = attendeeEmails.map(async (rawEmail) => {
+    const target = String(rawEmail || '').trim();
+    if (!target) return { recipient: target, success: false, error: 'Empty email address' };
+    try {
+      const info = await transporter.sendMail({
+        from: fromAddress,
+        to: target,
+        subject: `[Meeting Scheduled] ${displayTitle}`,
+        text: textBody,
+        html: htmlBody
+      });
+      console.log(`[EmailService] Scheduling notification sent to ${target} (MessageID: ${info.messageId})`);
+      return { recipient: target, success: true, messageId: info.messageId };
+    } catch (err) {
+      console.error(`[EmailService] Failed to send scheduling notification to ${target}:`, err.message);
+      return { recipient: target, success: false, error: err.message };
+    }
+  });
+
+  const results = await Promise.allSettled(sendPromises);
+  const detailedResults = results.map(r => r.status === 'fulfilled' ? r.value : { success: false, error: r.reason });
+  const successCount = detailedResults.filter(r => r.success).length;
+
+  return {
+    success: successCount > 0 || detailedResults.length === 0,
+    total: detailedResults.length,
+    successCount,
+    failureCount: detailedResults.length - successCount,
+    results: detailedResults
+  };
+}

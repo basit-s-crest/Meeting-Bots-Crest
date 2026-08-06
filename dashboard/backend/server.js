@@ -21,6 +21,8 @@ import { uploadReport, downloadStorageFile, getAttendeeEmailsForSession } from '
 import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
 import { getOAuth2Client, saveRefreshToken, loadRefreshToken, deleteRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { sendReportEmailToAttendees } from './email-service.js';
+import { liveSchedulingDetector } from './live-scheduling.js';
+import { approvalRouter } from './approval/approval-router.js';
 import { calendarRouter } from './calendar/calendar-router.js';
 import { startCalendarPoller } from './calendar/calendar-poller.js';
 import { handleWebhookNotification } from './calendar/calendar-webhook.js';
@@ -438,6 +440,7 @@ app.get('/api/sessions/:sessionId', authMiddleware, async (req, res) => {
 
 // Google Calendar Scheduling & Management Routes
 app.use('/api/calendar', authMiddleware, projectGuard, calendarRouter);
+app.use('/api/approvals', approvalRouter);
 
 // Memory Service Routes (cross-meeting query + project memory)
 app.post('/api/memory/query', authMiddleware, projectGuard, async (req, res) => {
@@ -841,6 +844,8 @@ app.post('/api/sessions/start', authMiddleware, projectGuard, async (req, res) =
           isFinal: true,
           projectId,
         });
+        // Feed the live scheduling-intent detector.
+        liveSchedulingDetector.ingest(sessionId, transcriptEvent);
       }
     };
 
@@ -891,6 +896,7 @@ app.post('/api/sessions/stop', authMiddleware, async (req, res) => {
     deepgramProxyZoom.closeSession(sessionId);
     await processManager.killBot(sessionId);
     sessionTranscripts.delete(sessionId);
+    liveSchedulingDetector.clear(sessionId);
     // Trigger post-meeting extraction (fire-and-forget)
     processMeeting(sessionId);
     res.json({ success: true, sessionId });

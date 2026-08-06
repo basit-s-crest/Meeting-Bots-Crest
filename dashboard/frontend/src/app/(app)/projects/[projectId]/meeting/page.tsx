@@ -4,7 +4,8 @@ import { use, useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  ArrowLeft, Play, Square, Volume2, Layers, Wifi, WifiOff, X, Plus, Mail
+  ArrowLeft, Play, Square, Volume2, Layers, Wifi, WifiOff, X, Plus, Mail,
+  Calendar, Check, AlertTriangle, Loader2, FlaskConical
 } from "lucide-react";
 import { Container } from "@/components/ui/Container";
 import { Card } from "@/components/ui/Card";
@@ -66,6 +67,124 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const [qaHistory, setQaHistory] = useState<QAPair[]>([]);
   const [showJumpButton, setShowJumpButton] = useState(false);
   const [highlightedLineId, setHighlightedLineId] = useState<string | null>(null);
+
+  // Live scheduling-approval state
+  const [pendingProposal, setPendingProposal] = useState<{
+    id: string;
+    title: string;
+    date?: string;
+    time?: string;
+    timezone?: string;
+    raw_mention?: string;
+    token: string;
+    status: string;
+  } | null>(null);
+  const [approvalLoading, setApprovalLoading] = useState(false);
+
+  // Poll for pending scheduling proposals while a session is live.
+  useEffect(() => {
+    if (!activeSessionId || botStatus === "idle" || botStatus === "stopped") return;
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/approvals/live?sessionId=${activeSessionId}`, {
+          credentials: "include"
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        if (data.proposal && data.proposal.status === "pending_organizer") {
+          setPendingProposal(data.proposal);
+        } else if (data.proposal && data.proposal.status !== "pending_organizer") {
+          // Already handled; hide the banner.
+          setPendingProposal(null);
+        }
+      } catch {
+        // ignore transient polling errors
+      }
+    };
+
+    poll();
+    const interval = setInterval(poll, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [activeSessionId, botStatus]);
+
+  const handleOrganizerApprove = async () => {
+    if (!pendingProposal) return;
+    setApprovalLoading(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/approvals/organizer/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ sessionId: activeSessionId })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to approve proposal");
+      }
+      setPendingProposal(null);
+      alert("Approval sent to the Google Meet chat. Attendees can now approve via the link.");
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to approve proposal");
+    } finally {
+      setApprovalLoading(false);
+    }
+  };
+
+  const handleOrganizerReject = async () => {
+    if (!pendingProposal) return;
+    setApprovalLoading(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/approvals/organizer/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ sessionId: activeSessionId })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to reject proposal");
+      }
+      setPendingProposal(null);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to reject proposal");
+    } finally {
+      setApprovalLoading(false);
+    }
+  };
+
+  // TEMPORARY: manual test trigger — posts an approval link into the Meet chat
+  // without needing to speak a scheduling phrase. Will be removed later.
+  const [manualTriggerLoading, setManualTriggerLoading] = useState(false);
+  const handleManualTrigger = async () => {
+    if (!activeSessionId || manualTriggerLoading) return;
+    setManualTriggerLoading(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/approvals/manual/trigger`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          sessionId: activeSessionId,
+          title: "Test Follow-up Meeting"
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || "Manual trigger failed");
+      }
+      alert(`Approval link posted to the Meet chat${data.approvalUrl ? `:\n${data.approvalUrl}` : ""}`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Manual trigger failed");
+    } finally {
+      setManualTriggerLoading(false);
+    }
+  };
 
   const handleAddEmail = (rawEmail?: string) => {
     const target = (rawEmail !== undefined ? rawEmail : emailInput).trim().toLowerCase();
@@ -438,24 +557,98 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
           </div>
         </div>
         {botStatus !== "idle" && botStatus !== "stopped" ? (
-          <Badge tone={botStatus === "capturing" ? "success" : "warning"}>
-            <Wifi className="h-3.5 w-3.5 animate-pulse" />{" "}
-            {botStatus === "capturing"
-              ? "Capturing Live Audio"
-              : botStatus === "joining"
-              ? "Bot Joining..."
-              : botStatus === "starting"
-              ? "Bot Starting..."
-              : botStatus === "stopping"
-              ? "Stopping Bot..."
-              : "Active connection"}
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={handleManualTrigger}
+              disabled={manualTriggerLoading || !activeSessionId}
+              className="border-amber-300 text-amber-700 hover:bg-amber-50"
+              title="Temporary: post an approval link into the Meet chat without speaking"
+            >
+              {manualTriggerLoading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <FlaskConical className="h-3.5 w-3.5" />
+              )}
+              Send test approval link
+            </Button>
+            <Badge tone={botStatus === "capturing" ? "success" : "warning"}>
+              <Wifi className="h-3.5 w-3.5 animate-pulse" />{" "}
+              {botStatus === "capturing"
+                ? "Capturing Live Audio"
+                : botStatus === "joining"
+                ? "Bot Joining..."
+                : botStatus === "starting"
+                ? "Bot Starting..."
+                : botStatus === "stopping"
+                ? "Stopping Bot..."
+                : "Active connection"}
+            </Badge>
+          </div>
         ) : (
           <Badge tone="neutral">
             <WifiOff className="h-3.5 w-3.5" /> Disconnected
           </Badge>
         )}
       </div>
+
+      {pendingProposal && (
+        <div className="mt-6 rounded-2xl border border-brand-200 bg-brand-50 p-5 shadow-sm">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-600 text-white">
+                <Calendar className="h-5 w-5" />
+              </span>
+              <div>
+                <h3 className="font-display text-base font-bold text-ink">
+                  Scheduling request detected
+                </h3>
+                <p className="mt-0.5 text-sm font-semibold text-brand-700">
+                  {pendingProposal.title || "Follow-up Meeting"}
+                </p>
+                {(pendingProposal.date || pendingProposal.time) && (
+                  <p className="mt-0.5 text-xs text-ink-soft">
+                    {[pendingProposal.date, pendingProposal.time].filter(Boolean).join(" at ")}
+                    {pendingProposal.timezone ? ` (${pendingProposal.timezone})` : ""}
+                  </p>
+                )}
+                {pendingProposal.raw_mention && (
+                  <p className="mt-2 rounded border-l-4 border-brand-500 bg-surface p-2 text-xs italic text-ink-soft">
+                    &ldquo;{pendingProposal.raw_mention}&rdquo;
+                  </p>
+                )}
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleOrganizerReject}
+                disabled={approvalLoading}
+              >
+                Reject
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleOrganizerApprove}
+                disabled={approvalLoading}
+              >
+                {approvalLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Check className="h-4 w-4" />
+                )}
+                Approve & send to chat
+              </Button>
+            </div>
+          </div>
+          <p className="mt-3 text-[11px] text-ink-mute">
+            Approving will post the proposal into the Google Meet central chat so attendees can approve via the link.
+          </p>
+        </div>
+      )}
 
       <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Config */}

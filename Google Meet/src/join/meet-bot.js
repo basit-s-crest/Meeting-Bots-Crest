@@ -458,6 +458,95 @@ export class MeetBot {
     }
   }
 
+  /**
+   * Opens the in-call chat panel, types the given text into the message input,
+   * and presses Enter to send it to the central Meet chat.
+   * Returns the page element used, or null if chat could not be opened.
+   */
+  async sendChatMessage(text) {
+    if (!this.page) {
+      console.warn('[MeetBot] sendChatMessage called before launch');
+      return null;
+    }
+    const message = String(text || '');
+    if (!message.trim()) {
+      console.warn('[MeetBot] sendChatMessage called with empty text');
+      return null;
+    }
+
+    console.log(`[MeetBot] Sending message to Meet chat: "${message.slice(0, 80)}${message.length > 80 ? '…' : ''}"`);
+
+    try {
+      // 1. Open the chat panel if not already open.
+      const chatToggleSelectors = [
+        'button[aria-label*="Chat with everyone" i]',
+        'button[aria-label*="Open chat" i]',
+        'button[aria-label*="Chat" i]',
+        'button[jsname*="chat"]'
+      ];
+      let chatOpen = false;
+      for (const sel of chatToggleSelectors) {
+        try {
+          const btn = await this.page.$(sel);
+          if (btn && await btn.isVisible()) {
+            await btn.click();
+            await this.page.waitForTimeout(800);
+            chatOpen = true;
+            console.log(`[MeetBot] Opened chat panel via: ${sel}`);
+            break;
+          }
+        } catch { /* try next */ }
+      }
+
+      if (!chatOpen) {
+        console.warn('[MeetBot] Chat panel toggle not found. Trying keyboard shortcut...');
+        try {
+          await this.page.keyboard.press('Control+Alt+Shift+c');
+          await this.page.waitForTimeout(800);
+          chatOpen = true;
+        } catch {
+          return null;
+        }
+      }
+
+      // 2. Find the chat message input.
+      const inputSelectors = [
+        'textarea[aria-label*="Send a message" i]',
+        'textarea[aria-label*="message" i]',
+        'textarea[data-placeholder]',
+        'div[contenteditable="true"][role="textbox"]',
+        'div[role="textbox"][contenteditable="true"]'
+      ];
+      let input = null;
+      for (const sel of inputSelectors) {
+        try {
+          const el = await this.page.$(sel);
+          if (el && await el.isVisible()) {
+            input = el;
+            break;
+          }
+        } catch { /* try next */ }
+      }
+
+      if (!input) {
+        console.warn('[MeetBot] Chat message input not found');
+        return null;
+      }
+
+      // 3. Type the message and send it.
+      await input.click();
+      await input.fill(message);
+      await this.page.waitForTimeout(300);
+      await this.page.keyboard.press('Enter');
+
+      console.log('[MeetBot] Chat message sent');
+      return input;
+    } catch (err) {
+      console.warn('[MeetBot] Failed to send chat message:', err.message);
+      return null;
+    }
+  }
+
   async saveSession() {
     if (!this.context) {
       throw new Error('No browser context active to save session.');
