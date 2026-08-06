@@ -27,6 +27,9 @@ BEGIN
   END IF;
 END $$;
 
+-- Add exit_reason column to meeting_sessions table
+ALTER TABLE public.meeting_sessions ADD COLUMN IF NOT EXISTS exit_reason text;
+
 -- Add attendee_emails column to meeting_sessions table if not already present
 ALTER TABLE public.meeting_sessions ADD COLUMN IF NOT EXISTS attendee_emails text[];
 

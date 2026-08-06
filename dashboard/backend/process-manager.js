@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import net from 'net';
+import readline from 'readline';
 import { saveSessionStart, saveSessionEnd, uploadReport, getAttendeeEmailsForSession } from './supabase-helper.js';
 import { uploadTranscriptToGoogleDrive, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { generateReportWithFallback, saveSchedulingData } from './report-generator.js';
@@ -97,6 +98,16 @@ class ProcessManager {
   }
 
   /**
+   * Cleans up all timers and intervals attached to a session object.
+   */
+  cleanupSessionTimers(sessionInfo) {
+    if (sessionInfo && sessionInfo.tailInterval) {
+      clearInterval(sessionInfo.tailInterval);
+      sessionInfo.tailInterval = null;
+    }
+  }
+
+  /**
    * Spawns the requested meeting bot process.
    */
   spawnBot(sessionId, { botType, meetingUrl, botName, isHeadless, wsPort, googleDriveFolderId, projectId, attendeeEmails = [] }) {
@@ -180,7 +191,8 @@ class ProcessManager {
     const child = spawn(nodeCmd, args, {
       cwd,
       env,
-      shell: false
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc']
     });
 
     // Log active session startup to Supabase asynchronously
@@ -210,7 +222,8 @@ class ProcessManager {
       tailInterval: null,
       onTranscriptCallback: null,
       onStatusCallback: null,
-      googleDriveFolderId
+      googleDriveFolderId,
+      exitReason: null
     };
 
     this.activeSessions.set(sessionId, sessionInfo);
@@ -227,34 +240,62 @@ class ProcessManager {
       }
     }
 
-    // Capture logs
-    child.stdout.on('data', (data) => {
-      const log = data.toString().trim();
-      console.log(`[BotStdout][${botType}][${sessionId}] ${log}`);
+    // Listen for structured IPC messages from bot child process
+    child.on('message', (msg) => {
+      if (msg && msg.type === 'SESSION_REASON' && msg.reason) {
+        console.log(`[ProcessManager] Structured IPC exit reason for ${sessionId}: ${msg.reason}`);
+        sessionInfo.exitReason = msg.reason;
+      }
+    });
 
-      // Parse state updates if printed
-      if (log.includes('State:') || log.includes('[Lifecycle] State transition:')) {
-        const stateMatch = log.match(/State:\s*(\w+)/) || log.match(/State transition:\s*(\w+)/);
+    // Capture logs via line-buffered interface to prevent chunk splitting
+    const rl = readline.createInterface({ input: child.stdout });
+    rl.on('line', (line) => {
+      const trimmed = line.trim();
+      console.log(`[BotStdout][${botType}][${sessionId}] ${trimmed}`);
+
+      if (trimmed.includes('REASON:')) {
+        const match = trimmed.match(/REASON:\s*(\w+)/);
+        if (match && !sessionInfo.exitReason) {
+          sessionInfo.exitReason = match[1];
+        }
+      }
+
+      if (trimmed.includes('State:') || trimmed.includes('[Lifecycle] State transition:')) {
+        const stateMatch = trimmed.match(/State:\s*(\w+)/) || trimmed.match(/State transition:\s*(\w+)/);
         if (stateMatch && sessionInfo.onStatusCallback) {
           sessionInfo.status = stateMatch[1];
           sessionInfo.onStatusCallback(sessionInfo.status);
         }
       }
-
-      // NOTE: Replaced stdout transcript parsing for Teams to prevent duplication.
-      // The file tail watcher (startTeamsFileTail) acts as the single source of truth.
     });
 
     child.stderr.on('data', (data) => {
       console.error(`[BotStderr][${botType}][${sessionId}] ${data.toString().trim()}`);
     });
 
+    child.on('error', (err) => {
+      console.error(`[ProcessManager] Session ${sessionId} process error:`, err.message);
+      this.cleanupSessionTimers(sessionInfo);
+      sessionInfo.status = 'stopped';
+      if (sessionInfo.onStatusCallback) {
+        sessionInfo.onStatusCallback('stopped');
+      }
+      this.activeSessions.delete(sessionId);
+    });
+
+    child.on('exit', (code) => {
+      this.cleanupSessionTimers(sessionInfo);
+    });
+
     child.on('close', (code) => {
       console.log(`[ProcessManager] Session ${sessionId} exited with code ${code}`);
-      if (sessionInfo.tailInterval) {
-        clearInterval(sessionInfo.tailInterval);
-      }
+      this.cleanupSessionTimers(sessionInfo);
       sessionInfo.status = 'stopped';
+
+      const finalReason = sessionInfo.exitReason || 'unknown';
+      console.log(`[ProcessManager] Final exit reason for session ${sessionId}: ${finalReason}`);
+
       if (sessionInfo.onStatusCallback) {
         sessionInfo.onStatusCallback('stopped');
       }
@@ -262,7 +303,7 @@ class ProcessManager {
 
       if (onBotStopCallback) {
         try {
-          onBotStopCallback({ sessionId });
+          onBotStopCallback({ sessionId, reason: finalReason });
         } catch (err) {
           console.error(`[ProcessManager] onBotStopCallback error:`, err.message);
         }
@@ -442,18 +483,17 @@ class ProcessManager {
   /**
    * Kills the requested bot process gracefully, then forcefully if needed.
    */
-  async killBot(sessionId) {
+  async killBot(sessionId, explicitReason = 'dashboard_leave') {
     const session = this.activeSessions.get(sessionId);
     if (!session) {
       console.warn(`[ProcessManager] Attempted to kill inactive session ${sessionId}`);
       return;
     }
 
-    console.log(`[ProcessManager] Terminating session ${sessionId}`);
-
-    if (session.tailInterval) {
-      clearInterval(session.tailInterval);
-    }
+    session.exitReason = explicitReason;
+    console.log(`[ProcessManager] Terminating session ${sessionId} (reason: ${explicitReason})`);
+    
+    this.cleanupSessionTimers(session);
 
     return new Promise((resolve) => {
       const child = session.childProcess;
@@ -462,6 +502,7 @@ class ProcessManager {
       // Handle process exit during kill
       child.once('exit', () => {
         killed = true;
+        this.cleanupSessionTimers(session);
         this.activeSessions.delete(sessionId);
         resolve();
       });

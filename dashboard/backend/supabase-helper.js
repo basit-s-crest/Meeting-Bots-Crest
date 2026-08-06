@@ -134,7 +134,7 @@ export async function downloadStorageFile(urlOrPath) {
  * @param {string} sessionId 
  * @param {string} botType 
  */
-export async function saveSessionEnd(sessionId, botType) {
+export async function saveSessionEnd(sessionId, botType, exitReason = 'unknown') {
   try {
     const transcriptFilename = `${botType}_${sessionId}.jsonl`;
     const localTranscriptPath = path.join(TRANSCRIPTS_DIR, transcriptFilename);
@@ -155,7 +155,8 @@ export async function saveSessionEnd(sessionId, botType) {
 
     const updateData = {
       status: 'completed',
-      transcript_file_url: publicUrl || null
+      transcript_file_url: publicUrl || null,
+      exit_reason: exitReason || 'unknown'
     };
 
     const { error } = await supabase

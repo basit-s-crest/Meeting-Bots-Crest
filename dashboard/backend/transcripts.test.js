@@ -94,6 +94,7 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
     if (server) {
       await new Promise((resolve) => server.close(resolve));
     }
+    setTimeout(() => process.exit(0), 100);
   });
 
   it("asserts project A's read returns project A's transcript and NEVER project B's data", async () => {
@@ -154,5 +155,93 @@ describe('Transcripts projectId Filtering Unit Tests', () => {
 
     assert.ok(sessionIds.includes(sessionAId), "Array of projectIds should include project A's data");
     assert.ok(sessionIds.includes(sessionBId), "Array of projectIds should include project B's data");
+  });
+});
+
+describe('authMiddleware Precedence & Validation Unit Tests', () => {
+  let server;
+  let baseUrl;
+  let jwtModule;
+  let validToken;
+  const JWT_SECRET = process.env.JWT_SECRET || 'antigravity-secret-key-change-in-production';
+
+  before(async () => {
+    jwtModule = await import('jsonwebtoken');
+    validToken = jwtModule.default.sign(
+      { id: 'auth-test-user-id', email: 'authtest@example.com', name: 'Auth Test User' },
+      JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    await new Promise((resolve) => {
+      server = app.listen(0, () => {
+        const port = server.address().port;
+        baseUrl = `http://localhost:${port}`;
+        resolve();
+      });
+    });
+  });
+
+  after(() => {
+    if (server) server.close();
+  });
+
+  it('allows access with a valid Bearer token', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${validToken}` }
+    });
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.user.id, 'auth-test-user-id');
+  });
+
+  it('rejects with 401 for an invalid Bearer token', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/me`, {
+      headers: { Authorization: 'Bearer invalid.jwt.token' }
+    });
+    assert.strictEqual(res.status, 401);
+  });
+
+  it('allows access with a valid Cookie token when Bearer is absent', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/me`, {
+      headers: { Cookie: `token=${validToken}` }
+    });
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.user.id, 'auth-test-user-id');
+  });
+
+  it('rejects with 401 for an invalid Cookie token when Bearer is absent', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/me`, {
+      headers: { Cookie: 'token=invalid.cookie.token' }
+    });
+    assert.strictEqual(res.status, 401);
+  });
+
+  it('prioritizes valid Bearer token over invalid Cookie token (Bearer precedence)', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/me`, {
+      headers: {
+        Authorization: `Bearer ${validToken}`,
+        Cookie: 'token=invalid.cookie.token'
+      }
+    });
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.user.id, 'auth-test-user-id');
+  });
+
+  it('rejects invalid Bearer token even if a valid Cookie token is present', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/me`, {
+      headers: {
+        Authorization: 'Bearer invalid.bearer.token',
+        Cookie: `token=${validToken}`
+      }
+    });
+    assert.strictEqual(res.status, 401);
+  });
+
+  it('rejects with 401 when neither Bearer nor Cookie token is present', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/me`);
+    assert.strictEqual(res.status, 401);
   });
 });

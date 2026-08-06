@@ -1,3 +1,4 @@
+from fastapi import HTTPException
 from supabase import create_client, Client
 
 from app.config import SUPABASE_URL, SUPABASE_KEY
@@ -11,11 +12,22 @@ def init_supabase():
         print("[MemoryService] Warning: SUPABASE_URL or SUPABASE_KEY not set")
         _client = None
         return
-    _client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    print("[MemoryService] Supabase client initialized")
+    try:
+        _client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("[MemoryService] Supabase client initialized")
+    except Exception as e:
+        print(f"[MemoryService] Error initializing Supabase client: {e}")
+        _client = None
+
+
+def is_db_connected() -> bool:
+    return _client is not None
 
 
 def get_db() -> Client:
     if _client is None:
-        raise RuntimeError("Supabase not initialized. Call init_supabase() first.")
+        raise HTTPException(
+            status_code=503,
+            detail="Database service unavailable: Supabase client is not initialized. Please check SUPABASE_URL and SUPABASE_KEY."
+        )
     return _client

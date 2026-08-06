@@ -42,13 +42,27 @@ const app = express();
 app.use(cors({ origin: 'http://localhost:3001', credentials: true }));
 app.use(express.json());
 
-const JWT_SECRET = process.env.JWT_SECRET || 'crest-meet-secure-secret-key-xyz-987';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('\x1b[31m[Server] FATAL ERROR: JWT_SECRET environment variable is missing in .env!\x1b[0m');
+  console.error('\x1b[31m[Server] Please set JWT_SECRET in your .env file to start the server securely.\x1b[0m');
+  process.exit(1);
+}
 
 // Middleware to verify JWT token
 const authMiddleware = (req, res, next) => {
-  let token = null;
+  // Test environment bypass ONLY if x-test-user-id header is explicitly provided
+  if (process.env.NODE_ENV === 'test' && req.headers['x-test-user-id']) {
+    req.user = { id: req.headers['x-test-user-id'], email: 'test@example.com', name: 'Test User' };
+    return next();
+  }
 
-  // Try parsing from Cookie header first
+  let bearerToken = null;
+  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+    bearerToken = req.headers.authorization.split(' ')[1];
+  }
+
+  let cookieToken = null;
   if (req.headers.cookie) {
     const cookies = req.headers.cookie.split(';').reduce((acc, c) => {
       const parts = c.trim().split('=');
@@ -57,35 +71,40 @@ const authMiddleware = (req, res, next) => {
       }
       return acc;
     }, {});
-    token = cookies['token'];
+    cookieToken = cookies['token'];
   }
 
-  // Fallback to Authorization header
-  if (!token && req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
-    token = req.headers.authorization.split(' ')[1];
+  // 1. Authorization: Bearer header takes primary precedence
+  if (bearerToken) {
+    try {
+      const decoded = jwt.verify(bearerToken, JWT_SECRET);
+      req.user = decoded;
+      return next();
+    } catch (err) {
+      return res.status(401).json({ error: 'Invalid or expired token. Please log in again.' });
+    }
   }
 
-  if (!token && (process.env.NODE_ENV === 'test' || process.env.NODE_ENV !== 'production')) {
+  // 2. Cookie takes secondary precedence if Bearer header is absent
+  if (cookieToken) {
+    try {
+      const decoded = jwt.verify(cookieToken, JWT_SECRET);
+      req.user = decoded;
+      return next();
+    } catch (err) {
+      return res.status(401).json({ error: 'Invalid or expired session. Please log in again.' });
+    }
+  }
+
+  // 3. Test fallback only for automated unit tests
+  if (process.env.NODE_ENV === 'test') {
     const testUserId = req.headers['x-test-user-id'] || 'test-user-id';
     req.user = { id: testUserId, email: 'dev@localhost', name: 'Dev User' };
     return next();
   }
 
-  if (!token) {
-    return res.status(401).json({ error: 'Authentication required. Please log in.' });
-  }
-
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded; // { id, email, name }
-    next();
-  } catch (err) {
-    if (process.env.NODE_ENV !== 'production') {
-      req.user = { id: 'dev-user', email: 'dev@localhost', name: 'Dev User' };
-      return next();
-    }
-    return res.status(401).json({ error: 'Invalid or expired session. Please log in again.' });
-  }
+  // 4. Reject if neither token is present
+  return res.status(401).json({ error: 'Authentication required. Please log in.' });
 };
 
 // Middleware to verify project ownership
@@ -322,8 +341,9 @@ setOnBotStartCallback(async (data) => {
 });
 
 setOnBotStopCallback((data) => {
-  console.log(`[EventStream] Emitting bot_stopped event for session ${data.sessionId}`);
-  broadcastGlobalEvent('bot_stopped', data);
+  const finalReason = data.reason || 'unknown';
+  console.log(`[EventStream] Emitting bot_stopped event for session ${data.sessionId} with reason: ${finalReason}`);
+  broadcastGlobalEvent('bot_stopped', { sessionId: data.sessionId, reason: finalReason });
 });
 
 
@@ -871,14 +891,16 @@ app.post('/api/sessions/start', authMiddleware, projectGuard, async (req, res) =
  * REST API: Stop a bot session
  */
 app.post('/api/sessions/stop', authMiddleware, async (req, res) => {
-  const { sessionId, projectId } = req.body;
+  const { sessionId, projectId, reason } = req.body;
 
   if (!sessionId) {
     return res.status(400).json({ error: 'Missing sessionId' });
   }
 
+  const finalReason = reason || 'dashboard_leave';
+
   try {
-    // Persist projectId to active session and Supabase before killing the bot
+    // Persist projectId and exit_reason to active session and Supabase before killing the bot
     if (projectId) {
       const active = processManager.activeSessions.get(sessionId);
       if (active) {
@@ -887,19 +909,19 @@ app.post('/api/sessions/stop', authMiddleware, async (req, res) => {
       if (supabase) {
         await supabase
           .from('meeting_sessions')
-          .update({ project_id: projectId })
+          .update({ project_id: projectId, exit_reason: finalReason })
           .eq('session_id', sessionId);
       }
     }
 
     deepgramProxyGoogle.closeSession(sessionId);
     deepgramProxyZoom.closeSession(sessionId);
-    await processManager.killBot(sessionId);
+    await processManager.killBot(sessionId, finalReason);
     sessionTranscripts.delete(sessionId);
     liveSchedulingDetector.clear(sessionId);
     // Trigger post-meeting extraction (fire-and-forget)
     processMeeting(sessionId);
-    res.json({ success: true, sessionId });
+    res.json({ success: true, sessionId, reason: finalReason });
   } catch (err) {
     res.status(500).json({ error: `Failed to stop bot session: ${err.message}` });
   }
@@ -938,10 +960,41 @@ app.get('/api/sessions', authMiddleware, async (req, res) => {
 });
 
 /**
+ * Helper to self-heal stale database session statuses left over from prior server runs or crashes
+ */
+export async function cleanupStaleSessions() {
+  if (!supabase) return;
+  try {
+    const activeIds = Array.from(processManager.activeSessions.keys());
+    const { data: staleSessions } = await supabase
+      .from('meeting_sessions')
+      .select('session_id')
+      .in('status', ['capturing', 'starting', 'joining', 'active', 'in_progress']);
+
+    if (staleSessions && staleSessions.length > 0) {
+      const staleIds = staleSessions
+        .map(s => s.session_id)
+        .filter(id => !activeIds.includes(id));
+
+      if (staleIds.length > 0) {
+        await supabase
+          .from('meeting_sessions')
+          .update({ status: 'completed' })
+          .in('session_id', staleIds);
+        console.log(`[Server] Self-healed ${staleIds.length} stale session statuses to 'completed'.`);
+      }
+    }
+  } catch (err) {
+    console.error('[Server] Error cleaning up stale sessions:', err.message);
+  }
+}
+
+/**
  * REST API: Get saved transcripts
  */
 app.get('/api/transcripts', authMiddleware, async (req, res) => {
   try {
+    await cleanupStaleSessions();
     let dbQuery = supabase
       .from('meeting_sessions')
       .select('*')
@@ -2043,11 +2096,7 @@ if (process.env.NODE_ENV !== 'test') {
     console.log(`Central Meeting Bot Dashboard is running at: http://localhost:${PORT}`);
     console.log(`==================================================================\n`);
     startCalendarPoller();
-    if (supabase) {
-      supabase.from('meeting_sessions').update({ status: 'completed' }).eq('status', 'empty').then(() => {
-        console.log('[Server] Migrated legacy empty session statuses to completed.');
-      }).catch(() => {});
-    }
+    cleanupStaleSessions().catch(() => {});
   });
 
 }

@@ -60,7 +60,8 @@ export class TeamsBot {
 
     console.log(`[TeamsBot] Launching browser (headless: ${this.headless}, channel: ${this.channel || 'default'}, guest: ${this.isGuest})`);
 
-    const loadSession = !this.isLoginMode && !this.isGuest;
+    const hasSavedSession = fs.existsSync(this.authPath);
+    const loadSession = !this.isLoginMode && (hasSavedSession || !this.isGuest);
 
     // Strict startup verification: fail early if credentials/session file is missing in normal mode
     if (loadSession) {
@@ -250,8 +251,8 @@ export class TeamsBot {
     const pageTitle = await this.page.title().catch(() => 'unknown');
     console.log(`[TeamsBot] [DEBUG] Pre-join load check - Resolved URL: "${resolvedUrl}" | Page Title: "${pageTitle}"`);
 
-    // If guest, wait for name input to load; otherwise wait for join now button
-    const selector = this.isGuest ? SELECTORS.join.nameInput : SELECTORS.join.joinNowBtn;
+    // Wait for either guest name input or join now button to load
+    const selector = `${SELECTORS.join.nameInput}, ${SELECTORS.join.joinNowBtn}`;
 
     const TOTAL_TIMEOUT_CEILING = 90000; // 90s final fallback ceiling
     const MAX_RETRIES = 2; // max 2 retries (3 total attempts)
@@ -599,6 +600,364 @@ export class TeamsBot {
     console.log(`[TeamsBot] Saving active session state to: ${this.authPath}`);
     await this.context.storageState({ path: this.authPath });
     console.log('[TeamsBot] Session saved successfully.');
+  }
+
+  async openChat() {
+    try {
+      // Check if chat panel input or chat pane is ALREADY open and visible
+      const existingInput = await this.page.$('div[role="textbox"], [data-tid="chat-pane-list"], .fui-ChatMessageList, [data-tid="chat-input-textbox"]');
+      if (existingInput && await existingInput.isVisible()) {
+        console.log('[TeamsBot] [CHAT LOG] Chat panel is ALREADY open.');
+        return true;
+      }
+
+      console.log('[TeamsBot] [CHAT LOG] Chat panel is closed. Searching for Chat toggle button via accessibility...');
+
+      // One-time diagnostic: log first 40 buttons/menuitems on page and frames
+      try {
+        let loggedCount = 0;
+        const diagFrames = [this.page, ...this.page.frames()];
+        for (const frame of diagFrames) {
+          if (loggedCount >= 40) break;
+          const roles = ['button', 'menuitem'];
+          for (const r of roles) {
+            if (loggedCount >= 40) break;
+            const elements = await frame.getByRole(r).all().catch(() => []);
+            for (const el of elements) {
+              if (loggedCount >= 40) break;
+              if (await el.isVisible().catch(() => false)) {
+                const name = (await el.textContent().catch(() => '')) || '';
+                const ariaLabel = (await el.getAttribute('aria-label').catch(() => '')) || '';
+                const cleanName = name.trim().replace(/\s+/g, ' ');
+                console.log(`[TeamsBot] [CHAT LOG][DIAGNOSTIC] role=${r} name="${cleanName}" aria-label="${ariaLabel}"`);
+                loggedCount++;
+              }
+            }
+          }
+        }
+      } catch (diagErr) {
+        console.warn('[TeamsBot] [CHAT LOG][DIAGNOSTIC] Error running diagnostic:', diagErr.message);
+      }
+      
+      // Zoom out viewport slightly so top controls fit without overflow truncation
+      await this.page.evaluate(() => {
+        document.body.style.zoom = '0.85';
+      }).catch(() => {});
+
+      // Fallback 1: Try Teams Chat keyboard shortcuts (Ctrl+Shift+C / Alt+Shift+C)
+      console.log('[TeamsBot] [CHAT LOG] openChat: trying Teams keyboard shortcuts (Ctrl+Shift+C)...');
+      await this.page.keyboard.press('Control+Shift+C').catch(() => {});
+      await this.page.waitForTimeout(800);
+      let checkInput = await this.page.$('div[role="textbox"], [data-tid="chat-pane-list"], .fui-ChatMessageList');
+      if (checkInput && await checkInput.isVisible().catch(() => false)) {
+        console.log('[TeamsBot] [CHAT LOG] openChat: Chat opened via Ctrl+Shift+C shortcut!');
+        return true;
+      }
+
+      const frames = [this.page, ...this.page.frames()];
+
+      // Step 1: Direct CSS selector match for Teams Chat button (#chat-button, button:has-text("Chat"), aria-label="*conversation*")
+      const directSelectors = [
+        '#chat-button',
+        '[data-tid="chat-button"]',
+        'button#chat-button',
+        'button:has-text("Chat")',
+        'button[aria-label*="conversation" i]',
+        'button[aria-label*="chat" i]'
+      ];
+
+      for (const frame of frames) {
+        for (const sel of directSelectors) {
+          try {
+            const btn = await frame.$(sel);
+            if (btn && await btn.isVisible().catch(() => false)) {
+              const textContent = (await btn.textContent().catch(() => '')) || '';
+              const ariaLabel = (await btn.getAttribute('aria-label').catch(() => '')) || '';
+              const nameText = (ariaLabel || textContent).trim();
+
+              if (/chat bubble/i.test(nameText) || /chat bubbles/i.test(nameText)) {
+                continue;
+              }
+
+              console.log(`[TeamsBot] [CHAT LOG] openChat: clicked Chat button via direct selector "${sel}" ("${nameText}")`);
+              await btn.click({ force: true }).catch(() => {});
+              await this.page.waitForTimeout(1500);
+              return true;
+            }
+          } catch {}
+        }
+      }
+      
+      // Step 2: Role locator match for /chat|conversation/i
+      for (const frame of frames) {
+        try {
+          const locators = frame.getByRole('button', { name: /chat|conversation/i });
+          const count = await locators.count().catch(() => 0);
+          
+          for (let i = 0; i < count; i++) {
+            const btn = locators.nth(i);
+            if (await btn.isVisible().catch(() => false)) {
+              const ariaLabel = (await btn.getAttribute('aria-label').catch(() => '')) || '';
+              const textContent = (await btn.textContent().catch(() => '')) || '';
+              const nameText = (ariaLabel || textContent).trim();
+
+              if (/chat bubble/i.test(nameText) || /chat bubbles/i.test(nameText)) {
+                continue;
+              }
+
+              console.log(`[TeamsBot] [CHAT LOG] openChat: matched button via role: "${nameText || 'Chat'}"`);
+              await btn.click({ force: true }).catch(() => {});
+              await this.page.waitForTimeout(1500);
+              return true;
+            }
+          }
+        } catch {}
+      }
+
+      console.warn('[TeamsBot] [CHAT LOG] openChat: no chat button found in any frame. Searching under More menu...');
+
+      // Fallback: Click "More" button and check menuitems for Chat
+      for (const frame of frames) {
+        try {
+          const moreLocators = frame.getByRole('button', { name: /^more$/i });
+          const moreCount = await moreLocators.count().catch(() => 0);
+
+          for (let i = 0; i < moreCount; i++) {
+            const moreBtn = moreLocators.nth(i);
+            if (await moreBtn.isVisible().catch(() => false)) {
+              console.log('[TeamsBot] [CHAT LOG] openChat: clicking More button...');
+              await moreBtn.click({ force: true }).catch(() => {});
+              await this.page.waitForTimeout(1000);
+
+              // Search for menuitem matching /chat/i excluding /chat bubble/i
+              for (const searchFrame of frames) {
+                try {
+                  const itemLocators = searchFrame.getByRole('menuitem', { name: /chat/i });
+                  const itemMatches = await itemLocators.count().catch(() => 0);
+
+                  for (let j = 0; j < itemMatches; j++) {
+                    const item = itemLocators.nth(j);
+                    if (await item.isVisible().catch(() => false)) {
+                      const ariaLabel = (await item.getAttribute('aria-label').catch(() => '')) || '';
+                      const textContent = (await item.textContent().catch(() => '')) || '';
+                      const nameText = (ariaLabel || textContent).trim();
+
+                      if (/chat bubble/i.test(nameText) || /chat bubbles/i.test(nameText)) {
+                        continue;
+                      }
+
+                      console.log('[TeamsBot] [CHAT LOG] openChat: found Chat under More menu');
+                      await item.click({ force: true }).catch(() => {});
+                      await this.page.waitForTimeout(1500);
+                      return true;
+                    }
+                  }
+                } catch {}
+              }
+              break;
+            }
+          }
+        } catch {}
+      }
+
+      console.warn('[TeamsBot] [CHAT LOG] openChat: no Chat option found in More menu either');
+    } catch (err) {
+      console.warn('[TeamsBot] [CHAT LOG] Failed to open chat panel:', err.message);
+    }
+    return false;
+  }
+
+  async findChatInput() {
+    const inputSelectors = [
+      '[data-tid="ck-editor-reply-input"]',
+      '[data-tid="chat-input-textbox"]',
+      '[data-tid="message-input"]',
+      'div[role="textbox"][aria-label*="Type a message" i]',
+      'div[role="textbox"][aria-label*="message" i]',
+      'div[role="textbox"]',
+      'div[contenteditable="true"][aria-label*="Type a message" i]',
+      'div[contenteditable="true"][aria-label*="message" i]',
+      'div[contenteditable="true"]',
+      'div.ck-content',
+      'div.ck-editor__editable',
+      '[data-tid="new-message-textarea"]',
+      'div[data-tid*="chat-input"]',
+      'div[data-tid*="message-input"]',
+      'p.ck-placeholder',
+      'textarea',
+      '.fui-ChatMessageInput'
+    ];
+
+    console.log('[TeamsBot] [CHAT LOG] Searching for chat input element across selectors (retrying up to 5s)...');
+    const frames = [this.page, ...this.page.frames()];
+
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      // Step 1: Check CSS selectors across page & frames
+      for (const frame of frames) {
+        for (const sel of inputSelectors) {
+          try {
+            const input = await frame.$(sel);
+            if (input && await input.isVisible().catch(() => false)) {
+              console.log(`[TeamsBot] [CHAT LOG] Found visible chat input via selector: "${sel}" (attempt ${attempt})`);
+              return { input, sel, frame: frame === this.page ? null : frame };
+            }
+          } catch {}
+        }
+      }
+
+      // Step 2: In-browser DOM evaluator to find ANY editable text input or chat textarea
+      for (const frame of frames) {
+        try {
+          const matchHandle = await frame.evaluateHandle(() => {
+            const all = Array.from(document.querySelectorAll('*'));
+            // Find visible editable or textbox element
+            const found = all.find(el => {
+              const isVis = el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0;
+              if (!isVis) return false;
+
+              const isEditable = el.isContentEditable || el.tagName === 'TEXTAREA';
+              const role = (el.getAttribute('role') || '').toLowerCase();
+              const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+              const tid = (el.getAttribute('data-tid') || '').toLowerCase();
+
+              return isEditable || role === 'textbox' || aria.includes('type a message') || tid.includes('reply-input') || tid.includes('chat-input');
+            });
+            return found || null;
+          }).catch(() => null);
+
+          if (matchHandle && matchHandle.asElement()) {
+            const el = matchHandle.asElement();
+            const tag = await el.evaluate(e => e.tagName).catch(() => '');
+            const aria = await el.getAttribute('aria-label').catch(() => '');
+            const tid = await el.getAttribute('data-tid').catch(() => '');
+            console.log(`[TeamsBot] [CHAT LOG] Found visible chat input via in-browser DOM evaluator: tag=${tag} data-tid="${tid}" aria-label="${aria}" (attempt ${attempt})`);
+            return { input: el, sel: `evaluator(tag=${tag},tid=${tid})`, frame: frame === this.page ? null : frame };
+          }
+        } catch {}
+      }
+
+      // Diagnostic dump on attempt 2 if input not yet matched
+      if (attempt === 2) {
+        try {
+          console.log('[TeamsBot] [CHAT LOG][DIAGNOSTIC] Scanning DOM for candidate input elements...');
+          for (const frame of frames) {
+            const report = await frame.evaluate(() => {
+              return Array.from(document.querySelectorAll('*'))
+                .filter(el => (el.offsetWidth > 0 || el.offsetHeight > 0) && (
+                  el.isContentEditable || el.tagName === 'TEXTAREA' || (el.getAttribute('role') || '') === 'textbox' ||
+                  (el.getAttribute('data-tid') || '').includes('chat') || (el.getAttribute('data-tid') || '').includes('message')
+                ))
+                .map(el => ({
+                  tag: el.tagName,
+                  dataTid: el.getAttribute('data-tid'),
+                  aria: el.getAttribute('aria-label'),
+                  cls: (el.className || '').toString().slice(0, 30),
+                  isEditable: el.isContentEditable
+                }));
+            }).catch(() => []);
+
+            for (const r of report) {
+              console.log(`[TeamsBot] [CHAT LOG][DIAGNOSTIC] candidate tag=${r.tag} aria="${r.aria}" tid="${r.dataTid}" editable=${r.isEditable} cls="${r.cls}"`);
+            }
+          }
+        } catch (dErr) {
+          console.warn('[TeamsBot] [CHAT LOG][DIAGNOSTIC] Error scanning input candidates:', dErr.message);
+        }
+      }
+
+      await this.page.waitForTimeout(800);
+    }
+    return null;
+  }
+
+  async findSendButton() {
+    const sendBtnSelectors = [
+      'button[data-tid="send-message-button"]',
+      'button[aria-label*="Send" i]',
+      'button[aria-label*="send message" i]',
+      'button[title*="Send" i]',
+      'button[aria-label*="submit" i]',
+      'button.fui-Button[aria-label*="Send" i]',
+      'button:has(svg[data-icon-name*="Send" i])',
+      'button[id*="send" i]',
+      '[data-tid="chat-input-send-button"]'
+    ];
+    for (const sel of sendBtnSelectors) {
+      try {
+        const btn = await this.page.$(sel);
+        if (btn && await btn.isVisible()) {
+          return { btn, sel, frame: null };
+        }
+      } catch {}
+      for (const frame of this.page.frames()) {
+        try {
+          const btn = await frame.$(sel);
+          if (btn && await btn.isVisible()) {
+            return { btn, sel, frame };
+          }
+        } catch {}
+      }
+    }
+    return null;
+  }
+
+  async sendChatMessage(text) {
+    try {
+      console.log('[TeamsBot] [CHAT LOG] Preparing to send chat message...');
+      await this.openChat();
+
+      const found = await this.findChatInput();
+      if (found) {
+        const { input, sel, frame } = found;
+        const pageOrFrame = frame || this.page;
+        console.log(`[TeamsBot] [CHAT LOG] Typing message text: "${text.slice(0, 60).replace(/\n/g, ' ')}..."`);
+
+        await input.scrollIntoViewIfNeeded().catch(() => {});
+        await input.click({ force: true }).catch(() => {});
+        await input.focus().catch(() => {});
+
+        // Clear any draft text
+        await input.evaluate(el => { el.textContent = ''; }).catch(() => {});
+
+        // Use insertText so multiline text pastes correctly without premature Enter submit
+        await pageOrFrame.keyboard.insertText(text);
+        await this.page.waitForTimeout(500);
+
+        // Find send button or press Control+Enter / Enter
+        const sendBtnFound = await this.findSendButton();
+        if (sendBtnFound) {
+          console.log(`[TeamsBot] [CHAT LOG] Clicking Send button via: "${sendBtnFound.sel}"`);
+          await sendBtnFound.btn.click({ force: true }).catch(() => {});
+          await this.page.waitForTimeout(300);
+        }
+        
+        console.log('[TeamsBot] [CHAT LOG] Dispatching Control+Enter and Enter submission keys...');
+        await pageOrFrame.keyboard.press('Control+Enter').catch(() => {});
+        await pageOrFrame.keyboard.press('Enter').catch(() => {});
+
+        await this.page.waitForTimeout(1000);
+        console.log('[TeamsBot] [CHAT LOG] Chat message dispatch sequence completed successfully.');
+        return true;
+      }
+
+      console.warn('[TeamsBot] [CHAT LOG] ERROR: Teams chat input field not found or not visible after 5s retry.');
+    } catch (err) {
+      console.warn('[TeamsBot] [CHAT LOG] Error sending chat message:', err.message);
+    }
+    return false;
+  }
+
+  async readLatestChatMessages() {
+    try {
+      if (!this.page) return [];
+      const selectors = '[data-tid="chat-pane-message"], .fui-ChatMessage, [data-tid="message-body"], div[role="listitem"] [data-tid="message-text"]';
+      const messages = await this.page.$$eval(selectors, els => {
+        return els.map(el => el.textContent?.trim()).filter(Boolean);
+      });
+      return messages;
+    } catch {
+      return [];
+    }
   }
 
   /**

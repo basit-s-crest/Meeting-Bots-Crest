@@ -3,6 +3,7 @@ import { AudioCapture } from '../audio/audio-capture.js';
 import { SpeakerDetector } from '../speaker/speaker-detector.js';
 import { AudioChunker } from '../chunker/audio-chunker.js';
 import { createOutput } from '../output/chunk-output.js';
+import { generateAnnouncementMessage, parseChatCommand } from '../config/chat-service.js';
 import { writeFile, readFile, unlink } from 'fs/promises';
 import { createWriteStream } from 'fs';
 import { join } from 'path';
@@ -23,6 +24,9 @@ export class BotLifecycle {
     this.chunker = null;
     this.output = null;
     this._state = 'idle';
+    this.isPaused = false;
+    this._chatMonitorInterval = null;
+    this.processedChatMessages = new Set();
   }
 
   async start() {
@@ -63,6 +67,10 @@ export class BotLifecycle {
     await this.initializeCapture();
 
     this.state = 'capturing';
+
+    // Auto-send chat announcement & start command listener immediately (non-blocking)
+    this.sendChatAnnouncement().catch(err => console.warn('[BotLifecycle] sendChatAnnouncement error:', err.message));
+    this.startChatCommandMonitor();
   }
 
   async verifyInCall() {
@@ -145,15 +153,19 @@ export class BotLifecycle {
 
     this.audioCapture.setCallbacks({
       onFrame: (frame) => {
-        this.chunker.addAudioFrame(frame);
+        if (!this.isPaused) {
+          this.chunker.addAudioFrame(frame);
+        }
       },
       onError: (err) => console.error('Audio error:', err),
     });
 
     this.speakerDetector.setCallback((data) => {
       console.log(`[BotLifecycle] Speaker event received: "${data.speaker}" at ${data.timestamp}`);
-      this.chunker.addSpeakerEvent(data);   // still used for the chunk-level fallback speaker field
-      this.output?.sendSpeakerEvent(data);  // NEW: precise, unquantized signal for the backend
+      if (!this.isPaused) {
+        this.chunker.addSpeakerEvent(data);   // still used for the chunk-level fallback speaker field
+        this.output?.sendSpeakerEvent(data);  // NEW: precise, unquantized signal for the backend
+      }
     });
 
     // Commented out auto-exit on empty meeting per user request.
@@ -169,6 +181,120 @@ export class BotLifecycle {
     // Start with retry logic for audio capture
     await this.startAudioWithRetry();
     await this.speakerDetector.start();
+  }
+
+  async sendChatAnnouncement() {
+    console.log('[BotLifecycle] [CHAT LOG] sendChatAnnouncement() invoked');
+    if (process.env.ENABLE_CHAT_ANNOUNCEMENT === 'false') {
+      console.log('[BotLifecycle] [CHAT LOG] ENABLE_CHAT_ANNOUNCEMENT is set to false. Skipping announcement.');
+      return;
+    }
+    const msg = generateAnnouncementMessage({
+      botName: this.botName,
+    });
+    console.log(`[BotLifecycle] [CHAT LOG] Sending draft announcement message:\n---\n${msg}\n---`);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const result = await this.bot?.sendChatMessage(msg);
+      if (result) {
+        console.log('[BotLifecycle] [CHAT LOG] Announcement draft message sent successfully!');
+        return;
+      }
+      if (attempt < 3) {
+        console.log(`[BotLifecycle] [CHAT LOG] Retrying chat announcement (Attempt ${attempt + 1}/3)...`);
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+    console.warn('[BotLifecycle] [CHAT LOG] Failed to send announcement draft message after retries.');
+  }
+
+  async checkMeetingEnded() {
+    try {
+      const page = this.bot?.getPage();
+      if (!page || page.isClosed()) return true;
+
+      return await page.evaluate(() => {
+        const text = document.body ? document.body.innerText : '';
+        return (
+          text.includes("ended the meeting for everyone") ||
+          text.includes("You left the meeting") ||
+          text.includes("Someone removed you from the meeting") ||
+          text.includes("Return to home screen")
+        );
+      });
+    } catch {
+      return true;
+    }
+  }
+
+  startChatCommandMonitor() {
+    if (this._chatMonitorInterval) return;
+    this.processedChatMessages = new Set();
+    console.log('[BotLifecycle] [CHAT LOG] In-call monitor started (polling every 1s).');
+
+    this._chatMonitorInterval = setInterval(async () => {
+      if (this.state !== 'capturing' && this.state !== 'in_call') return;
+      try {
+        const ended = await this.checkMeetingEnded();
+        if (ended) {
+          console.log('[BotLifecycle] Meeting end screen detected ("Return to home screen" or "ended the meeting for everyone"). Exiting bot...');
+          this.emitReason('host_ended');
+          await this.stop('host_ended');
+          return;
+        }
+
+        const messages = await this.bot?.readLatestChatMessages();
+        if (messages && messages.length > 0) {
+          for (const text of messages) {
+            if (this.processedChatMessages.has(text)) continue;
+            this.processedChatMessages.add(text);
+            console.log(`[BotLifecycle] [CHAT LOG] New chat message detected: "${text}"`);
+
+            const action = parseChatCommand(text);
+            if (action) {
+              console.log(`[BotLifecycle] [CHAT LOG] Matched slash command action: "${action}"`);
+              await this.handleChatCommand(action);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[BotLifecycle] Monitor error:', err.message);
+      }
+    }, 1000);
+  }
+
+  emitReason(reason) {
+    if (this._reasonEmitted) return;
+    this._reasonEmitted = true;
+    console.log(`REASON: ${reason}`);
+    if (typeof process !== 'undefined' && process.send) {
+      try {
+        process.send({ type: 'SESSION_REASON', reason });
+      } catch (err) {
+        console.warn('[BotLifecycle] Failed to send IPC reason:', err.message);
+      }
+    }
+  }
+
+  async handleChatCommand(action) {
+    if (action === 'pause') {
+      if (!this.isPaused) {
+        this.isPaused = true;
+        console.log('[BotLifecycle] Recording PAUSED via chat command.');
+        await this.bot?.sendChatMessage(`[${this.botName}] Recording paused.`);
+      }
+    } else if (action === 'resume') {
+      if (this.isPaused) {
+        this.isPaused = false;
+        console.log('[BotLifecycle] Recording RESUMED via chat command.');
+        await this.bot?.sendChatMessage(`[${this.botName}] Recording resumed.`);
+      }
+    } else if (action === 'leave') {
+      console.log('[BotLifecycle] LEAVE requested via chat command.');
+      this.emitReason('chat_command_leave');
+      await this.bot?.sendChatMessage(`[${this.botName}] Leaving meeting...`);
+      await new Promise(r => setTimeout(r, 1000));
+      await this.stop('chat_command_leave');
+    }
   }
 
   async startAudioWithRetry(maxRetries = 10, delayMs = 2000) {
@@ -188,8 +314,16 @@ export class BotLifecycle {
     throw new Error('Failed to start audio capture after retries');
   }
 
-  async stop() {
+  async stop(explicitReason) {
+    if (explicitReason) {
+      this.emitReason(explicitReason);
+    }
     this.state = 'ended';
+
+    if (this._chatMonitorInterval) {
+      clearInterval(this._chatMonitorInterval);
+      this._chatMonitorInterval = null;
+    }
     
     try {
       await this.audioCapture?.stop();
@@ -212,7 +346,6 @@ export class BotLifecycle {
       console.log('[BotLifecycle] Bot leave warning:', err.message);
     }
   }
-
 
   get state() {
     return this._state;
