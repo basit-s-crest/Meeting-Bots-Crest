@@ -273,7 +273,6 @@ export class BotLifecycle {
       }
     }
   }
-
   async handleChatCommand(action) {
     if (action === 'pause') {
       if (!this.isPaused) {

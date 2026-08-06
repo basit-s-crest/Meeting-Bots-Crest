@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import { useRouter, useParams } from "next/navigation";
 import {
@@ -30,9 +30,10 @@ interface TranscriptLine {
 
 import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
-export default function MeetingBotPage({ params }: { params: Promise<{ projectId: string }> | { projectId: string } }) {
+export default function MeetingBotPage({ params }: { params?: Promise<{ projectId: string }> | { projectId: string } }) {
+  const routeParams = useParams();
   const resolvedParams = params && typeof (params as any).then === 'function' ? use(params as Promise<{ projectId: string }>) : (params as { projectId: string });
-  const projectId = resolvedParams?.projectId;
+  const projectId = resolvedParams?.projectId || (typeof routeParams?.projectId === "string" ? routeParams.projectId : Array.isArray(routeParams?.projectId) ? routeParams.projectId[0] : "");
   const router = useRouter();
 
   const [botType, setBotType] = useState("google-meet");

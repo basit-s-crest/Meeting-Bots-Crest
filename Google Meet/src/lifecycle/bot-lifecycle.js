@@ -193,7 +193,6 @@ export class BotLifecycle {
       botName: this.botName,
     });
     console.log(`[BotLifecycle] [CHAT LOG] Sending draft announcement message:\n---\n${msg}\n---`);
-
     for (let attempt = 1; attempt <= 3; attempt++) {
       const result = await this.bot?.sendChatMessage(msg);
       if (result) {

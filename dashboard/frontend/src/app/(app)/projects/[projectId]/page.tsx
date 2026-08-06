@@ -72,9 +72,10 @@ interface SchedulingData {
 
 import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
-export default function ProjectWorkspacePage({ params }: { params: Promise<{ projectId: string }> | { projectId: string } }) {
+export default function ProjectWorkspacePage({ params }: { params?: Promise<{ projectId: string }> | { projectId: string } }) {
+  const routeParams = useParams();
   const resolvedParams = params && typeof (params as any).then === 'function' ? use(params as Promise<{ projectId: string }>) : (params as { projectId: string });
-  const projectId = resolvedParams?.projectId;
+  const projectId = resolvedParams?.projectId || (typeof routeParams?.projectId === "string" ? routeParams.projectId : Array.isArray(routeParams?.projectId) ? routeParams.projectId[0] : "");
   const router = useRouter();
 
   const [project, setProject] = useState<ProjectListItem | null>(null);

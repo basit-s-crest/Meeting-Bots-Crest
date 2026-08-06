@@ -17,7 +17,6 @@ View Realtime notes here: ${liveNotesUrl}`;
 
 export function parseChatCommand(text, options = {}) {
   if (!text || typeof text !== 'string') return null;
-  
   // Ignore lines that are part of the announcement or system instructions
   if (
     text.includes('invited') || 
