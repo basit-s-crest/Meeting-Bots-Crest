@@ -4,7 +4,7 @@ import { use, useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import { useRouter, useParams } from "next/navigation";
 import {
-  ArrowLeft, Play, Square, Volume2, Layers, Wifi, WifiOff
+  ArrowLeft, Play, Square, Volume2, Layers, Wifi, WifiOff, X, Plus, Mail
 } from "lucide-react";
 import { Container } from "@/components/ui/Container";
 import { Card } from "@/components/ui/Card";
@@ -30,8 +30,9 @@ interface TranscriptLine {
 
 import { BACKEND_URL, apiFetch } from "@/context/AuthContext";
 
-export default function MeetingBotPage({ params }: { params: Promise<{ projectId: string }> }) {
-  const { projectId } = use(params);
+export default function MeetingBotPage({ params }: { params: Promise<{ projectId: string }> | { projectId: string } }) {
+  const resolvedParams = params && typeof (params as any).then === 'function' ? use(params as Promise<{ projectId: string }>) : (params as { projectId: string });
+  const projectId = resolvedParams?.projectId;
   const router = useRouter();
 
   const [botType, setBotType] = useState("google-meet");
@@ -39,6 +40,9 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
   const [botName, setBotName] = useState("Antigravity Transcriber");
   const [folderUrl, setFolderUrl] = useState("");
   const [headless, setHeadless] = useState(true);
+  const [attendeeEmails, setAttendeeEmails] = useState<string[]>([]);
+  const [emailInput, setEmailInput] = useState("");
+  const [emailError, setEmailError] = useState<string | null>(null);
 
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [botStatus, setBotStatus] = useState<"idle" | "starting" | "joining" | "capturing" | "stopping" | "stopped">("idle");
@@ -60,6 +64,37 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
       case 'unknown':
       default:
         return "Session ended unexpectedly.";
+    }
+  };
+
+  const handleAddEmail = (rawEmail?: string) => {
+    const target = (rawEmail !== undefined ? rawEmail : emailInput).trim().toLowerCase();
+    if (!target) return;
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(target)) {
+      setEmailError("Invalid email format (e.g. name@example.com)");
+      return;
+    }
+
+    if (attendeeEmails.includes(target)) {
+      setEmailError("Email address already added");
+      return;
+    }
+
+    setAttendeeEmails(prev => [...prev, target]);
+    setEmailInput("");
+    setEmailError(null);
+  };
+
+  const handleRemoveEmail = (emailToRemove: string) => {
+    setAttendeeEmails(prev => prev.filter(e => e !== emailToRemove));
+  };
+
+  const handleEmailKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" || e.key === ",") {
+      e.preventDefault();
+      handleAddEmail();
     }
   };
 
@@ -222,7 +257,8 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
           botName,
           isHeadless: headless,
           googleDriveFolderId: folderUrl || null,
-          projectId
+          projectId,
+          attendeeEmails
         })
       });
 
@@ -504,6 +540,63 @@ export default function MeetingBotPage({ params }: { params: Promise<{ projectId
                 onChange={(e) => setFolderUrl(e.target.value)}
                 disabled={botStatus !== "idle"}
               />
+
+              {/* Attendee Emails (Additive) */}
+              <div className="space-y-1.5 pt-1">
+                <label htmlFor="attendee-email-input" className="block text-sm font-medium text-ink">
+                  Attendee report emails (optional)
+                </label>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Input
+                      id="attendee-email-input"
+                      type="email"
+                      placeholder="attendee@company.com"
+                      value={emailInput}
+                      onChange={(e) => {
+                        setEmailInput(e.target.value);
+                        if (emailError) setEmailError(null);
+                      }}
+                      onKeyDown={handleEmailKeyDown}
+                      disabled={botStatus !== "idle"}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => handleAddEmail()}
+                    disabled={botStatus !== "idle" || !emailInput.trim()}
+                    className="shrink-0"
+                  >
+                    <Plus className="h-4 w-4" /> Add
+                  </Button>
+                </div>
+                {emailError && (
+                  <p className="text-xs font-medium text-red-500">{emailError}</p>
+                )}
+                {attendeeEmails.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5 pt-1">
+                    {attendeeEmails.map((email) => (
+                      <span
+                        key={email}
+                        className="inline-flex items-center gap-1 rounded-md bg-brand-50 px-2.5 py-1 text-xs font-medium text-brand-700 border border-brand-200"
+                      >
+                        <Mail className="h-3 w-3 text-brand-500" />
+                        {email}
+                        {botStatus === "idle" && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveEmail(email)}
+                            className="ml-0.5 text-brand-400 hover:text-brand-700"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               <label className="flex items-center gap-3 pt-1">
                 <input

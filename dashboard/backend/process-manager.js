@@ -4,11 +4,12 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import net from 'net';
 import readline from 'readline';
-import { saveSessionStart, saveSessionEnd, uploadReport } from './supabase-helper.js';
+import { saveSessionStart, saveSessionEnd, uploadReport, getAttendeeEmailsForSession } from './supabase-helper.js';
 import { uploadTranscriptToGoogleDrive, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { generateReportWithFallback, saveSchedulingData } from './report-generator.js';
 import { saveMarkdownAsDocx } from './docx-generator.js';
 import { processMeeting } from './memory-client.js';
+import { sendReportEmailToAttendees } from './email-service.js';
 
 let onBotStartCallback = null;
 let onBotStopCallback = null;
@@ -63,7 +64,7 @@ function aggregateTranscriptFile(filePath) {
         const speaker = data.speaker || 'Unknown';
         const text = (data.text || '').trim();
         if (!text) continue;
-        
+
         const last = aggregated[aggregated.length - 1];
         if (last && last.speaker === speaker) {
           last.text += ' ' + text;
@@ -78,12 +79,12 @@ function aggregateTranscriptFile(filePath) {
         aggregated.push(line);
       }
     }
-    
+
     const outputContent = aggregated.map(item => {
       if (typeof item === 'string') return item;
       return JSON.stringify(item);
     }).join('\n') + '\n';
-    
+
     fs.writeFileSync(filePath, outputContent, 'utf8');
     console.log(`[ProcessManager] Successfully aggregated transcript file: ${filePath}`);
   } catch (err) {
@@ -109,7 +110,7 @@ class ProcessManager {
   /**
    * Spawns the requested meeting bot process.
    */
-  spawnBot(sessionId, { botType, meetingUrl, botName, isHeadless, wsPort, googleDriveFolderId, projectId }) {
+  spawnBot(sessionId, { botType, meetingUrl, botName, isHeadless, wsPort, googleDriveFolderId, projectId, attendeeEmails = [] }) {
     if (this.activeSessions.has(sessionId)) {
       throw new Error(`Session ${sessionId} is already active.`);
     }
@@ -195,7 +196,7 @@ class ProcessManager {
     });
 
     // Log active session startup to Supabase asynchronously
-    saveSessionStart(sessionId, botType, meetingUrl, botName, projectId).catch(err => {
+    saveSessionStart(sessionId, botType, meetingUrl, botName, projectId, attendeeEmails).catch(err => {
       console.error(`[ProcessManager] Supabase saveSessionStart error:`, err.message);
     });
 
@@ -216,6 +217,7 @@ class ProcessManager {
       meetingUrl: meetingUrl,
       botName: botName,
       projectId: projectId,
+      attendeeEmails: attendeeEmails,
       outputPath: outputPath,
       tailInterval: null,
       onTranscriptCallback: null,
@@ -338,7 +340,7 @@ class ProcessManager {
 
           console.log(`[ProcessManager] Auto-generating combined report and transcript for session ${sessionId}...`);
           const { markdown: reportMarkdown, scheduling } = await generateReportWithFallback(localTranscriptPath);
-          
+
           // Save markdown locally temporarily
           const reportFilename = `${botType}_${sessionId}_report.md`;
           const reportPath = path.join(TRANSCRIPTS_DIR, reportFilename);
@@ -350,7 +352,28 @@ class ProcessManager {
 
           // Await uploading report to Supabase Storage
           console.log(`[ProcessManager] Uploading report to Supabase for session: ${sessionId}`);
-          await uploadReport(sessionId, botType);
+          const publicUrl = await uploadReport(sessionId, botType);
+
+          // Automatically send report email to stored attendee list
+          try {
+            const emails = (sessionInfo && Array.isArray(sessionInfo.attendeeEmails) && sessionInfo.attendeeEmails.length > 0)
+              ? sessionInfo.attendeeEmails
+              : await getAttendeeEmailsForSession(sessionId);
+
+            if (emails && emails.length > 0) {
+              console.log(`[ProcessManager] Triggering bulk email report distribution for session ${sessionId}...`);
+              await sendReportEmailToAttendees({
+                sessionId,
+                meetingTitle: sessionInfo?.botName,
+                reportMarkdown,
+                reportUrl: publicUrl,
+                attendeeEmails: emails,
+                localReportPath: reportPath
+              });
+            }
+          } catch (emailErr) {
+            console.error(`[ProcessManager] Failed to distribute report emails for ${sessionId}:`, emailErr.message);
+          }
 
           // Upload to Google Drive if folder ID is configured
           let driveFolderId = sessionInfo.googleDriveFolderId;
@@ -360,7 +383,7 @@ class ProcessManager {
               try {
                 const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
                 driveFolderId = metadata.googleDriveFolderId;
-              } catch (e) {}
+              } catch (e) { }
             }
           }
 
@@ -385,11 +408,11 @@ class ProcessManager {
             if (fs.existsSync(localTranscriptPath)) fs.unlinkSync(localTranscriptPath);
             if (fs.existsSync(reportPath)) fs.unlinkSync(reportPath);
             if (fs.existsSync(schedulingPath)) fs.unlinkSync(schedulingPath);
-            
+
             const docxFilename = `${botType}_${sessionId}_report.docx`;
             const docxPath = path.join(TRANSCRIPTS_DIR, docxFilename);
             if (fs.existsSync(docxPath)) fs.unlinkSync(docxPath);
-            
+
             console.log(`[ProcessManager] Local storage successfully cleared for session ${sessionId}.`);
           } catch (cleanErr) {
             console.error(`[ProcessManager] Failed to clean up local files:`, cleanErr.message);
@@ -414,7 +437,7 @@ class ProcessManager {
    */
   startTeamsFileTail(sessionId, sessionInfo) {
     let lastSize = 0;
-    
+
     // Periodically poll file size changes
     sessionInfo.tailInterval = setInterval(() => {
       try {
@@ -425,12 +448,12 @@ class ProcessManager {
             start: lastSize,
             end: stats.size
           });
-          
+
           let data = '';
           stream.on('data', (chunk) => {
             data += chunk.toString();
           });
-          
+
           stream.on('end', () => {
             lastSize = stats.size;
             const lines = data.split('\n').filter(l => l.trim().length > 0);
@@ -486,7 +509,7 @@ class ProcessManager {
 
       if (session.type === 'teams') {
         console.log(`[ProcessManager] Sending graceful stop command to Teams session ${sessionId} stdin`);
-        
+
         if (child.stdin && child.stdin.writable) {
           child.stdin.write('stop\n');
         } else {
@@ -509,7 +532,7 @@ class ProcessManager {
             resolve();
           }
         }, 3000);
-        
+
       } else {
         // ORIGINAL BEHAVIOR FOR MEET/ZOOM
         if (process.platform === 'win32') {
@@ -534,7 +557,7 @@ class ProcessManager {
             console.log(`[ProcessManager] Graceful stop did not exit yet, sending SIGINT to ${sessionId}`);
             try {
               child.kill('SIGINT');
-            } catch {}
+            } catch { }
           }
         }, 1500);
 

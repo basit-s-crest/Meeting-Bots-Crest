@@ -111,7 +111,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       localStorage.setItem("auth_token", data.token);
       localStorage.setItem("token", data.token);
     }
-
     setUser(data.user);
     router.push("/projects");
   };
@@ -133,7 +132,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       localStorage.setItem("auth_token", data.token);
       localStorage.setItem("token", data.token);
     }
-
     setUser(data.user);
     router.push("/projects");
   };
