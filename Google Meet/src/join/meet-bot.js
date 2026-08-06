@@ -484,7 +484,6 @@ export class MeetBot {
       ).first();
 
       if (await inputLoc.isVisible().catch(() => false)) {
-        console.log('[MeetBot] [CHAT LOG] Google Meet chat panel is ALREADY open.');
         return true;
       }
 

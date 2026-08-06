@@ -150,6 +150,7 @@ class DeepgramProxy {
       currentSegment: null, // { segmentId, isFinal, lastSpeaker } — in-progress utterance
       lastResolvedSpeaker: null, // continuity fallback for provisional segments
       keepAliveInterval: null,
+      config: { apiKey, onTranscript, onError },
       onTranscript,
       onError
     };
@@ -294,9 +295,97 @@ class DeepgramProxy {
     if (!proxy) return;
 
     const socket = proxy.wsConnection;
-    if (socket.readyState === WebSocket.OPEN) {
+    if (socket && socket.readyState === WebSocket.OPEN) {
       // Direct raw binary write
       socket.send(audioBuffer);
+    } else if (proxy.config && (!socket || socket.readyState === WebSocket.CLOSED)) {
+      console.log(`[DeepgramProxy][${sessionId}] Reconnecting Deepgram WebSocket...`);
+      this.reconnectSocket(sessionId, proxy);
+    }
+  }
+
+  reconnectSocket(sessionId, proxy) {
+    if (proxy.isReconnecting) return;
+    proxy.isReconnecting = true;
+
+    try {
+      const url = 'wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=16000&channels=1&interim_results=true&smart_format=true&endpointing=100';
+      const headers = { 'Authorization': `Token ${proxy.config.apiKey}` };
+      const dgSocket = new WebSocket(url, { headers });
+      proxy.wsConnection = dgSocket;
+
+      dgSocket.on('open', () => {
+        console.log(`[DeepgramProxy] Reconnected to Deepgram for session ${sessionId}`);
+        proxy.isReconnecting = false;
+        if (proxy.keepAliveInterval) clearInterval(proxy.keepAliveInterval);
+        proxy.keepAliveInterval = setInterval(() => {
+          if (dgSocket.readyState === WebSocket.OPEN) {
+            dgSocket.send(JSON.stringify({ type: 'KeepAlive' }));
+          }
+        }, 3000);
+      });
+
+      dgSocket.on('message', (message) => {
+        try {
+          const response = JSON.parse(message.toString());
+          if (response.type === 'Metadata' || response.type === 'KeepAlive') return;
+          const channel = response.channel;
+          if (!channel) return;
+          const alternative = channel.alternatives?.[0];
+          const transcript = alternative?.transcript;
+
+          if (transcript && transcript.trim().length > 0) {
+            const isFinal = response.is_final || response.speech_final;
+            const relativeStart = response.start;
+            const relativeEnd = response.end ?? relativeStart;
+            const binder = proxy.binder;
+            const absoluteStartSec = (binder.firstChunkTs || (Date.now() / 1000)) + relativeStart;
+            const endPadSec = response.end !== undefined ? 0 : (isFinal ? 0 : 0.3);
+            const absoluteEndSec = (binder.firstChunkTs || (Date.now() / 1000)) + relativeEnd + endPadSec;
+
+            const resolved = binder.resolve(absoluteStartSec, absoluteEndSec);
+            const resolvedName = resolved.name;
+            const speakerName = resolvedName || proxy.lastResolvedSpeaker;
+            const provisional = resolvedName === null && proxy.lastResolvedSpeaker === null;
+            if (resolvedName) proxy.lastResolvedSpeaker = resolvedName;
+
+            let seg = proxy.currentSegment;
+            if (!seg || seg.isFinal) {
+              const segmentId = ++proxy.segmentId;
+              seg = { segmentId, isFinal: false, lastSpeaker: null };
+              proxy.currentSegment = seg;
+            }
+            seg.isFinal = isFinal;
+            const speaker = speakerName || `speaker_${seg.segmentId}`;
+            seg.lastSpeaker = speaker;
+
+            if (proxy.config.onTranscript) {
+              proxy.config.onTranscript({
+                segmentId: seg.segmentId,
+                speaker,
+                provisional,
+                text: transcript.trim(),
+                timestamp: new Date().toISOString(),
+                isFinal
+              });
+            }
+          }
+        } catch (err) {
+          console.error(`[DeepgramProxy][${sessionId}] Error processing message:`, err.message);
+        }
+      });
+
+      dgSocket.on('close', (code, reason) => {
+        console.log(`[DeepgramProxy][${sessionId}] Connection closed: Code ${code}, Reason: ${reason}`);
+        proxy.isReconnecting = false;
+      });
+
+      dgSocket.on('error', (err) => {
+        console.error(`[DeepgramProxy][${sessionId}] WebSocket error:`, err.message);
+        proxy.isReconnecting = false;
+      });
+    } catch (e) {
+      proxy.isReconnecting = false;
     }
   }
 
