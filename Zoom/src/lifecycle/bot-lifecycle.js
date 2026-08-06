@@ -241,6 +241,20 @@ export class BotLifecycle {
     this._chatMonitorInterval = setInterval(async () => {
       if (this.state !== 'capturing' && this.state !== 'in_call') return;
       try {
+        const page = this.bot?.getPage();
+        if (page) {
+          const endedElement = await page.locator(
+            'text=/meeting has ended|host has ended|this meeting has been ended/i'
+          ).first();
+
+          if (await endedElement.isVisible().catch(() => false)) {
+            console.log('[Lifecycle] Zoom meeting end screen detected. Exiting bot...');
+            this.emitReason('host_ended');
+            await this.stop('host_ended');
+            return;
+          }
+        }
+
         const messages = await this.bot?.readLatestChatMessages();
         if (messages && messages.length > 0) {
           for (const text of messages) {
@@ -258,7 +272,7 @@ export class BotLifecycle {
       } catch (err) {
         console.warn('[Lifecycle] [CHAT LOG] Chat monitor error:', err.message);
       }
-    }, 3000);
+    }, 2000);
   }
 
   emitReason(reason) {

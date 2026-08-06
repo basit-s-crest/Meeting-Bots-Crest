@@ -210,11 +210,25 @@ export class BotLifecycle {
   startChatCommandMonitor() {
     if (this._chatMonitorInterval) return;
     this.processedChatMessages = new Set();
-    console.log('[BotLifecycle] [CHAT LOG] In-call chat command monitor started (polling every 1s).');
+    console.log('[BotLifecycle] [CHAT LOG] In-call monitor started (polling every 1s).');
 
     this._chatMonitorInterval = setInterval(async () => {
       if (this.state !== 'capturing' && this.state !== 'in_call') return;
       try {
+        const page = this.bot?.getPage();
+        if (page) {
+          const endedElement = await page.locator(
+            'button:has-text("Return to home screen"), text=/ended the meeting for everyone/i, text=/you left the meeting/i, text=/removed you from the meeting/i, button:has-text("Rejoin")'
+          ).first();
+
+          if (await endedElement.isVisible().catch(() => false)) {
+            console.log('[BotLifecycle] Meeting end screen detected ("Return to home screen" or "Meeting ended"). Exiting bot...');
+            this.emitReason('host_ended');
+            await this.stop('host_ended');
+            return;
+          }
+        }
+
         const messages = await this.bot?.readLatestChatMessages();
         if (messages && messages.length > 0) {
           for (const text of messages) {
@@ -230,7 +244,7 @@ export class BotLifecycle {
           }
         }
       } catch (err) {
-        console.warn('[BotLifecycle] [CHAT LOG] Chat monitor error:', err.message);
+        console.warn('[BotLifecycle] Monitor error:', err.message);
       }
     }, 1000);
   }
