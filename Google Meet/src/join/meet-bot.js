@@ -523,11 +523,15 @@ export class MeetBot {
         await inputLoc.scrollIntoViewIfNeeded().catch(() => {});
         await inputLoc.click({ force: true }).catch(() => {});
         await inputLoc.focus().catch(() => {});
-        await this.page.keyboard.insertText(text);
+        
+        await inputLoc.fill(text).catch(async () => {
+          await this.page.keyboard.insertText(text);
+        });
+        await inputLoc.dispatchEvent('input').catch(() => {});
         await this.page.waitForTimeout(500);
 
         const sendBtnLoc = this.page.locator(
-          'button[aria-label*="Send a message" i], button[aria-label*="Send message" i], button[aria-label*="Send" i]'
+          'button[aria-label*="Send a message" i], button[aria-label*="Send message" i], button[aria-label*="Send" i], button:has([aria-label*="Send" i])'
         ).first();
 
         if (await sendBtnLoc.isVisible({ timeout: 2000 }).catch(() => false)) {
@@ -535,7 +539,7 @@ export class MeetBot {
           await sendBtnLoc.click({ force: true }).catch(() => {});
         } else {
           console.log('[MeetBot] [CHAT LOG] Send button not visible, pressing Enter...');
-          await this.page.keyboard.press('Enter');
+          await inputLoc.press('Enter').catch(() => this.page.keyboard.press('Enter'));
         }
         await this.page.waitForTimeout(1000);
         console.log('[MeetBot] [CHAT LOG] Chat message dispatched successfully.');
