@@ -207,6 +207,25 @@ export class BotLifecycle {
     console.warn('[BotLifecycle] [CHAT LOG] Failed to send announcement draft message after retries.');
   }
 
+  async checkMeetingEnded() {
+    try {
+      const page = this.bot?.getPage();
+      if (!page || page.isClosed()) return true;
+
+      return await page.evaluate(() => {
+        const text = document.body ? document.body.innerText : '';
+        return (
+          text.includes("ended the meeting for everyone") ||
+          text.includes("You left the meeting") ||
+          text.includes("Someone removed you from the meeting") ||
+          text.includes("Return to home screen")
+        );
+      });
+    } catch {
+      return true;
+    }
+  }
+
   startChatCommandMonitor() {
     if (this._chatMonitorInterval) return;
     this.processedChatMessages = new Set();
@@ -215,18 +234,12 @@ export class BotLifecycle {
     this._chatMonitorInterval = setInterval(async () => {
       if (this.state !== 'capturing' && this.state !== 'in_call') return;
       try {
-        const page = this.bot?.getPage();
-        if (page) {
-          const endedElement = await page.locator(
-            'button:has-text("Return to home screen"), text=/ended the meeting for everyone/i, text=/you left the meeting/i, text=/removed you from the meeting/i, button:has-text("Rejoin")'
-          ).first();
-
-          if (await endedElement.isVisible().catch(() => false)) {
-            console.log('[BotLifecycle] Meeting end screen detected ("Return to home screen" or "Meeting ended"). Exiting bot...');
-            this.emitReason('host_ended');
-            await this.stop('host_ended');
-            return;
-          }
+        const ended = await this.checkMeetingEnded();
+        if (ended) {
+          console.log('[BotLifecycle] Meeting end screen detected ("Return to home screen" or "ended the meeting for everyone"). Exiting bot...');
+          this.emitReason('host_ended');
+          await this.stop('host_ended');
+          return;
         }
 
         const messages = await this.bot?.readLatestChatMessages();

@@ -492,7 +492,7 @@ export class MeetBot {
         'button[aria-label*="Chat with everyone" i], button[aria-label*="In-call messages" i], button[aria-label*="chat" i], button[data-tooltip*="Chat" i], [aria-label*="Chat" i]'
       ).first();
 
-      if (await chatBtnLoc.isVisible({ timeout: 5000 }).catch(() => false)) {
+      if (await chatBtnLoc.isVisible({ timeout: 500 }).catch(() => false)) {
         const expanded = await chatBtnLoc.getAttribute('aria-expanded').catch(() => null);
         if (expanded !== 'true') {
           console.log('[MeetBot] [CHAT LOG] Clicking Google Meet Chat button to open panel...');
