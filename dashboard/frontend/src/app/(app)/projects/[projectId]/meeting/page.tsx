@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter, useParams } from "next/navigation";
 import {
   ArrowLeft, Play, Square, Volume2, Layers, Wifi, WifiOff, X, Plus, Mail,
-  Calendar, Check, AlertTriangle, Loader2, FlaskConical
+  Calendar, Check, AlertTriangle, Loader2
 } from "lucide-react";
 import { Container } from "@/components/ui/Container";
 import { Card } from "@/components/ui/Card";
@@ -157,34 +157,6 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
       alert(err instanceof Error ? err.message : "Failed to reject proposal");
     } finally {
       setApprovalLoading(false);
-    }
-  };
-
-  // TEMPORARY: manual test trigger — posts an approval link into the Meet chat
-  // without needing to speak a scheduling phrase. Will be removed later.
-  const [manualTriggerLoading, setManualTriggerLoading] = useState(false);
-  const handleManualTrigger = async () => {
-    if (!activeSessionId || manualTriggerLoading) return;
-    setManualTriggerLoading(true);
-    try {
-      const res = await fetch(`${BACKEND_URL}/api/approvals/manual/trigger`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          sessionId: activeSessionId,
-          title: "Test Follow-up Meeting"
-        })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.error || "Manual trigger failed");
-      }
-      alert(`Approval link posted to the Meet chat${data.approvalUrl ? `:\n${data.approvalUrl}` : ""}`);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Manual trigger failed");
-    } finally {
-      setManualTriggerLoading(false);
     }
   };
 
@@ -584,36 +556,18 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
           </div>
         </div>
         {botStatus !== "idle" && botStatus !== "stopped" ? (
-          <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={handleManualTrigger}
-              disabled={manualTriggerLoading || !activeSessionId}
-              className="border-amber-300 text-amber-700 hover:bg-amber-50"
-              title="Temporary: post an approval link into the Meet chat without speaking"
-            >
-              {manualTriggerLoading ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <FlaskConical className="h-3.5 w-3.5" />
-              )}
-              Send test approval link
-            </Button>
-            <Badge tone={botStatus === "capturing" ? "success" : "warning"}>
-              <Wifi className="h-3.5 w-3.5 animate-pulse" />{" "}
-              {botStatus === "capturing"
-                ? "Capturing Live Audio"
-                : botStatus === "joining"
-                ? "Bot Joining..."
-                : botStatus === "starting"
-                ? "Bot Starting..."
-                : botStatus === "stopping"
-                ? "Stopping Bot..."
-                : "Active connection"}
-            </Badge>
-          </div>
+          <Badge tone={botStatus === "capturing" ? "success" : "warning"}>
+            <Wifi className="h-3.5 w-3.5 animate-pulse" />{" "}
+            {botStatus === "capturing"
+              ? "Capturing Live Audio"
+              : botStatus === "joining"
+              ? "Bot Joining..."
+              : botStatus === "starting"
+              ? "Bot Starting..."
+              : botStatus === "stopping"
+              ? "Stopping Bot..."
+              : "Active connection"}
+          </Badge>
         ) : (
           <Badge tone="neutral">
             <WifiOff className="h-3.5 w-3.5" /> Disconnected

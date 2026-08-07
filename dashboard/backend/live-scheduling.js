@@ -168,3 +168,26 @@ Meeting timezone: ${tz}`;
 }
 
 export const liveSchedulingDetector = new LiveSchedulingDetector();
+
+// ---------------------------------------------------------------------------
+// Live participant roster (names only, bot excluded)
+// Populated from the bot's `roster` WebSocket events and served to the
+// approval page so attendees can pick their real name instead of demo names.
+// ---------------------------------------------------------------------------
+const sessionRosters = new Map();
+
+export function setSessionRoster(sessionId, names) {
+  if (!sessionId) return;
+  if (!Array.isArray(names)) return;
+  sessionRosters.set(sessionId, names);
+  console.log(`[LiveScheduler] Roster cached for session ${sessionId}: ${names.length} attendee(s)`);
+}
+
+export function getSessionRoster(sessionId) {
+  if (!sessionId) return [];
+  return sessionRosters.get(sessionId) || [];
+}
+
+export function clearSessionRoster(sessionId) {
+  sessionRosters.delete(sessionId);
+}

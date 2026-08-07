@@ -21,7 +21,7 @@ import { uploadReport, downloadStorageFile, getAttendeeEmailsForSession } from '
 import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
 import { getOAuth2Client, saveRefreshToken, loadRefreshToken, deleteRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { sendReportEmailToAttendees } from './email-service.js';
-import { liveSchedulingDetector } from './live-scheduling.js';
+import { liveSchedulingDetector, setSessionRoster, clearSessionRoster } from './live-scheduling.js';
 import { approvalRouter } from './approval/approval-router.js';
 import { calendarRouter } from './calendar/calendar-router.js';
 import { startCalendarPoller } from './calendar/calendar-poller.js';
@@ -916,8 +916,9 @@ app.post('/api/sessions/stop', authMiddleware, async (req, res) => {
 
     deepgramProxyGoogle.closeSession(sessionId);
     deepgramProxyZoom.closeSession(sessionId);
-    await processManager.killBot(sessionId, finalReason);
+    await processManager.killBot(sessionId);
     sessionTranscripts.delete(sessionId);
+    clearSessionRoster(sessionId);
     liveSchedulingDetector.clear(sessionId);
     // Trigger post-meeting extraction (fire-and-forget)
     processMeeting(sessionId);
@@ -1771,6 +1772,14 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
               timestamp: msg.timestamp_ts,
               speaker: msg.speaker
             });
+            return;
+          }
+
+          if (msg.type === 'roster') {
+            // Live participant roster (bot excluded) — populate approval dropdown.
+            if (Array.isArray(msg.names)) {
+              setSessionRoster(sessionId, msg.names);
+            }
             return;
           }
 

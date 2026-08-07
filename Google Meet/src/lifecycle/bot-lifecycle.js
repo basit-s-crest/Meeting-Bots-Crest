@@ -68,8 +68,8 @@ export class BotLifecycle {
 
     this.state = 'capturing';
 
-    // Auto-send chat announcement & start command listener immediately (non-blocking)
-    this.sendChatAnnouncement().catch(err => console.warn('[BotLifecycle] sendChatAnnouncement error:', err.message));
+    // Auto-send chat announcement disabled (bot joins silently, matching commit 671dfaa)
+    // this.sendChatAnnouncement().catch(err => console.warn('[BotLifecycle] sendChatAnnouncement error:', err.message));
     this.startChatCommandMonitor();
   }
 
@@ -181,6 +181,19 @@ export class BotLifecycle {
     // Start with retry logic for audio capture
     await this.startAudioWithRetry();
     await this.speakerDetector.start();
+
+    // Periodically broadcast the participant roster so the backend can populate
+    // the approval-page dropdown with real attendee names (bot excluded).
+    this.rosterInterval = setInterval(async () => {
+      try {
+        const names = await this.bot?.getParticipantNames?.();
+        if (Array.isArray(names) && names.length > 0) {
+          this.output?.sendRosterEvent(names);
+        }
+      } catch (err) {
+        console.warn('[BotLifecycle] Roster broadcast error:', err.message);
+      }
+    }, 15000);
   }
 
   async sendChatAnnouncement() {
@@ -323,6 +336,11 @@ export class BotLifecycle {
     if (this._chatMonitorInterval) {
       clearInterval(this._chatMonitorInterval);
       this._chatMonitorInterval = null;
+    }
+
+    if (this.rosterInterval) {
+      clearInterval(this.rosterInterval);
+      this.rosterInterval = null;
     }
     
     try {

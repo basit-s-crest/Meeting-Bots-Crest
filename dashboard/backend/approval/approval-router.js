@@ -2,6 +2,7 @@ import express from 'express';
 import crypto from 'crypto';
 import { supabase } from '../supabase-client.js';
 import { processManager } from '../process-manager.js';
+import { getSessionRoster } from '../live-scheduling.js';
 
 export const approvalRouter = express.Router();
 
@@ -86,65 +87,6 @@ function postProposalToMeetChat(proposal) {
   console.warn(`[ApprovalRouter] No live bot process for session ${proposal.session_id}; chat message skipped.`);
   return false;
 }
-
-/**
- * POST /api/approvals/manual/trigger
- * TEMPORARY test hook: creates a proposal directly (no LLM detection needed)
- * and posts the approval link into the live Google Meet chat.
- * Will be removed once live detection is verified.
- */
-approvalRouter.post('/manual/trigger', async (req, res) => {
-  const { sessionId, title, date, time, timezone, rawMention } = req.body;
-
-  const sessionInfo = processManager.getSession(sessionId);
-  if (!sessionInfo) {
-    return res.status(404).json({ error: 'No active bot session found for this sessionId. Start a bot first.' });
-  }
-
-  if (title === undefined && date === undefined && time === undefined) {
-    return res.status(400).json({ error: 'Provide at least title, date, or time to create the test proposal' });
-  }
-
-  // Reuse the current time for a sensible default date/time when not supplied.
-  const now = new Date();
-  const tz = timezone || process.env.CALENDAR_TIMEZONE || 'Asia/Kolkata';
-  const defaultDate = now.toLocaleDateString('en-CA', { timeZone: tz }); // YYYY-MM-DD
-  const defaultTime = now.toLocaleTimeString('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
-
-  const token = crypto.randomBytes(24).toString('hex');
-  const { data, error } = await supabase
-    .from('scheduling_approvals')
-    .insert({
-      session_id: sessionId,
-      title: title || 'Manual Test Meeting',
-      date: date || defaultDate,
-      time: time || defaultTime,
-      timezone: tz,
-      raw_mention: rawMention || 'Manual test trigger (no transcript)',
-      token,
-      status: 'approved_by_organizer',
-      approvals: []
-    })
-    .select()
-    .single();
-
-  if (error) {
-    console.error('[ApprovalRouter] Manual trigger insert failed:', error.message);
-    return res.status(500).json({ error: `Failed to create test proposal: ${error.message}` });
-  }
-
-  // Post the proposal + approval link into the live Meet chat immediately.
-  const posted = postProposalToMeetChat(data);
-
-  console.log(`[ApprovalRouter] Manual test trigger created proposal ${data.id} for session ${sessionId} (chat posted: ${posted})`);
-
-  return res.json({
-    success: true,
-    proposal: data,
-    approvalUrl: buildApprovalPageUrl(data.token),
-    chatPosted: posted
-  });
-});
 
 /**
  * POST /api/approvals/organizer/approve
@@ -239,6 +181,7 @@ approvalRouter.get('/live', async (req, res) => {
     success: true,
     proposal: {
       ...proposal,
+      roster: getSessionRoster(sessionId),
       organizer_approval_url: proposal.status === 'pending_organizer'
         ? buildApprovalPageUrl(proposal.token)
         : null
@@ -278,7 +221,9 @@ approvalRouter.get('/public/:token', async (req, res) => {
       time: proposal.time,
       timezone: proposal.timezone,
       raw_mention: proposal.raw_mention,
-      status: proposal.status
+      status: proposal.status,
+      // Real attendee names captured live from the Meet roster (bot excluded).
+      roster: getSessionRoster(proposal.session_id)
     }
   });
 });

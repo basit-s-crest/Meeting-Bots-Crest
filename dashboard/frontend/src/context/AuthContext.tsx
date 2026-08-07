@@ -41,8 +41,11 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
   if (res.status === 401) {
     localStorage.removeItem("auth_token");
     localStorage.removeItem("token");
-    if (typeof window !== "undefined" && window.location.pathname !== "/login" && window.location.pathname !== "/signup") {
-      window.location.href = "/login";
+    if (typeof window !== "undefined") {
+      const isProtected = window.location.pathname.startsWith("/projects") || window.location.pathname.startsWith("/dashboard");
+      if (isProtected) {
+        window.location.href = "/login";
+      }
     }
   }
 

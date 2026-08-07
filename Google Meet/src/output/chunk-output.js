@@ -120,6 +120,24 @@ export class ChunkOutput {
     }
   }
 
+  /**
+   * Broadcasts the current participant roster (names only, bot excluded).
+   * Used to populate the "pick your name" dropdown on the approval page.
+   */
+  sendRosterEvent(names) {
+    if (!Array.isArray(names)) return;
+    const message = JSON.stringify({ type: 'roster', names });
+    for (const client of this.clients) {
+      try {
+        if (client.readyState === WebSocket.OPEN || client.readyState === 1) {
+          client.send(message);
+        }
+      } catch (err) {
+        console.error('[ChunkOutput] Error sending roster event:', err.message);
+      }
+    }
+  }
+
   async stop() {
     console.log('Stopping ChunkOutput servers...');
     for (const client of this.clients) {
@@ -150,6 +168,10 @@ export class CallbackOutput {
 
   sendSpeakerEvent(event) {
     this.callback({ type: 'speaker_event', ...event });
+  }
+
+  sendRosterEvent(names) {
+    this.callback({ type: 'roster', names });
   }
 
   async stop() {}

@@ -99,8 +99,8 @@ export class BotLifecycle {
 
     this.transitionState('capturing');
 
-    // Auto-send chat announcement & start command listener immediately (non-blocking)
-    this.sendChatAnnouncement().catch(err => console.warn('[Lifecycle] sendChatAnnouncement error:', err.message));
+    // Auto-send chat announcement disabled (bot joins silently, matching commit 671dfaa)
+    // this.sendChatAnnouncement().catch(err => console.warn('[Lifecycle] sendChatAnnouncement error:', err.message));
     this.startChatCommandMonitor();
   }
 

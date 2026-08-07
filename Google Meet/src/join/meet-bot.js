@@ -547,6 +547,67 @@ export class MeetBot {
     }
   }
 
+  /**
+   * Collects the full participant roster from the Meet UI (all names visible in
+   * the tile grid / people panel). Excludes the bot's own tile so attendees
+   * don't see the bot in the approval dropdown.
+   * Returns an array of names, or [] if the roster can't be read yet.
+   */
+  async getParticipantNames() {
+    if (!this.page) return [];
+    try {
+      const names = await this.page.evaluate(() => {
+        const out = [];
+        const tiles = Array.from(document.querySelectorAll('[data-participant-id]'));
+
+        // Identify the bot's own tile via self-view controls.
+        const botTile = tiles.find(t =>
+          t.querySelector('[aria-label="Remove this tile"]') !== null ||
+          t.querySelector('[aria-label="Backgrounds and effects"]') !== null
+        );
+        const botId = botTile ? botTile.getAttribute('data-participant-id') : null;
+
+        for (const tile of tiles) {
+          if (botId && tile.getAttribute('data-participant-id') === botId) continue;
+
+          // Primary source: the "More options for <Name>" control on each tile.
+          const moreBtn = tile.querySelector('[aria-label^="More options for"]');
+          if (moreBtn) {
+            const name = moreBtn.getAttribute('aria-label')
+              .replace(/^More options for\s+/i, '')
+              .trim();
+            if (name) out.push(name);
+            continue;
+          }
+
+          // Fallback: the "Pin <Name> to your screen" control.
+          const pinBtn = tile.querySelector('[aria-label^="Pin "]');
+          if (pinBtn) {
+            const m = pinBtn.getAttribute('aria-label').match(/^Pin (.+?) to your/i);
+            if (m && m[1]) out.push(m[1].trim());
+          }
+        }
+        return out;
+      });
+
+      // Dedupe, drop empties, keep order.
+      const seen = new Set();
+      const unique = [];
+      for (const n of names || []) {
+        const clean = String(n).trim();
+        if (clean && !seen.has(clean)) {
+          seen.add(clean);
+          unique.push(clean);
+        }
+      }
+      console.log(`[MeetBot] Participant roster (${unique.length}): ${unique.join(', ')}`);
+      return unique;
+    } catch (err) {
+      console.warn('[MeetBot] Could not read participant roster:', err.message);
+      return [];
+    }
+  }
+
   async saveSession() {
     if (!this.context) {
       throw new Error('No browser context active to save session.');

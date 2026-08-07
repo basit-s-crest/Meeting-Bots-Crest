@@ -80,13 +80,13 @@ export class BotLifecycle {
     await this.capture.start();
     console.log('[BotLifecycle] Capture started. Streaming transcripts...');
 
-    // 2. Trigger chat announcement sequentially after call UI settles
-    try {
-      console.log('[BotLifecycle] [CHAT LOG] Triggering chat announcement...');
-      await this.sendChatAnnouncement();
-    } catch (err) {
-      console.error('[BotLifecycle] [CHAT LOG] Uncaught error in sendChatAnnouncement:', err.message);
-    }
+    // 2. Auto-send chat announcement disabled (bot joins silently, matching commit 671dfaa)
+    // try {
+    //   console.log('[BotLifecycle] [CHAT LOG] Triggering chat announcement...');
+    //   await this.sendChatAnnouncement();
+    // } catch (err) {
+    //   console.error('[BotLifecycle] [CHAT LOG] Uncaught error in sendChatAnnouncement:', err.message);
+    // }
 
     // 3. Start background chat command monitor
     this.startChatCommandMonitor();

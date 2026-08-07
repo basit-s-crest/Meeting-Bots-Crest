@@ -30,6 +30,7 @@ interface Proposal {
   timezone?: string;
   raw_mention?: string;
   status: string;
+  roster?: string[];
 }
 
 interface ApprovalEntry {
@@ -242,7 +243,10 @@ function ApprovalPageContent() {
                   className="w-full rounded-lg border border-border-strong bg-surface pl-9 pr-4 py-2.5 text-sm text-ink placeholder:text-ink-faint transition-colors focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
                 >
                   <option value="">Select your name...</option>
-                  {SUGGESTED_NAMES.map((n) => (
+                  {(proposal.roster && proposal.roster.length > 0
+                    ? proposal.roster
+                    : SUGGESTED_NAMES
+                  ).map((n) => (
                     <option key={n} value={n}>
                       {n}
                     </option>
@@ -311,8 +315,8 @@ function ApprovalPageContent() {
   );
 }
 
-// A reasonable starting list for "pick your name". In a real deployment this
-// would come from the calendar invite attendees / project members.
+// Fallback name list if the live Meet roster isn't available (e.g. the bot
+// already left). In normal operation the dropdown uses the real roster names.
 const SUGGESTED_NAMES = [
   "Alice Johnson",
   "Bob Smith",
