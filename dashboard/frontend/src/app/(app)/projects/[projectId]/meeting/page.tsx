@@ -764,7 +764,7 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
                     disabled={botStatus !== "idle" || !emailInput.trim()}
                     className="shrink-0"
                   >
-                    <Plus className="h-4 w-4" /> Add
+                    <Plus className="h-4 w-4" />
                   </Button>
                 </div>
                 {emailError && (
