@@ -46,11 +46,15 @@ async function getProposalByToken(token) {
  */
 async function getLiveProposal(sessionId) {
   if (!sessionId) return null;
+  // Multiple proposals can exist for a session (e.g. re-detection or manual tests).
+  // Return the most recent one instead of erroring out on duplicates.
   const { data, error } = await supabase
     .from('scheduling_approvals')
     .select('*')
     .eq('session_id', sessionId)
     .in('status', ['pending_organizer', 'approved_by_organizer'])
+    .order('created_at', { ascending: false })
+    .limit(1)
     .maybeSingle();
   if (error) {
     console.error('[ApprovalRouter] getLiveProposal error:', error.message);
@@ -95,7 +99,7 @@ function postProposalToMeetChat(proposal) {
  * message into the Google Meet central chat.
  */
 approvalRouter.post('/organizer/approve', async (req, res) => {
-  const { sessionId, token } = req.body;
+  const { sessionId, token, date, time } = req.body;
   if (!sessionId && !token) {
     return res.status(400).json({ error: 'Missing sessionId or token' });
   }
@@ -110,10 +114,18 @@ approvalRouter.post('/organizer/approve', async (req, res) => {
     return res.json({ success: true, proposal });
   }
 
+  // Allow the organizer to correct/fill in the date & time before it goes to chat.
+  const updateData = {
+    status: 'approved_by_organizer',
+    approved_by: req.user?.email || req.user?.id || null
+  };
+  if (date !== undefined) updateData.date = date || null;
+  if (time !== undefined) updateData.time = time || null;
+
   const sessionIdValue = proposal.session_id;
   const { data, error } = await supabase
     .from('scheduling_approvals')
-    .update({ status: 'approved_by_organizer', approved_by: req.user?.email || req.user?.id || null })
+    .update(updateData)
     .eq('id', proposal.id)
     .select()
     .single();

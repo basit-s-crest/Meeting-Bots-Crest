@@ -78,10 +78,11 @@ Respond with a JSON object with exactly these keys:
 }
 
 Rules:
-- Set scheduling_detected to true ONLY if someone explicitly asks to schedule/arrange a future meeting or event (e.g. "let's meet tomorrow at 4", "can we schedule a follow-up next Tuesday").
-- Resolve relative dates like "tomorrow", "next Monday" to absolute dates using the Reference Date below.
+- Set scheduling_detected to true if someone mentions scheduling/arranging/rescheduling a future meeting or event, OR any relative time like "in 5 days", "after 2 days", "next week" (e.g. "let's meet in 5 days", "can we schedule a follow-up next Tuesday", "we'll meet again in 2 days").
+- Resolve relative dates like "tomorrow", "in 5 days", "after 2 days", "next Monday" to absolute dates using the Reference Date below. Compute the exact calendar date.
+- If no specific date is mentioned (only a vague future reference like "let's schedule later"), set "date" to null and still set scheduling_detected to true.
 - If no specific time is mentioned, set "time" to null.
-- If no date is resolved, set "date" to null.
+- If no clean title can be inferred, set "title" to a generic label like "Follow-up Meeting".
 - If scheduling_detected is false, set "scheduling" to null.
 
 Reference Date (today, local meeting timezone): ${refDateStr}
@@ -103,7 +104,7 @@ Meeting timezone: ${tz}`;
       const raw = completion.choices?.[0]?.message?.content || '{}';
       const result = JSON.parse(raw);
 
-      if (result.scheduling_detected && result.scheduling?.date && result.scheduling?.title) {
+      if (result.scheduling_detected) {
         const nowMs = Date.now();
         // Cooldown: avoid duplicate proposals in quick succession.
         if (nowMs - buf.lastDetect < DETECT_COOLDOWN_MS) {
@@ -111,6 +112,22 @@ Meeting timezone: ${tz}`;
           return;
         }
         buf.lastDetect = nowMs;
+
+        // Dedupe: skip if this session already has a pending/organizer-approved proposal.
+        try {
+          const { data: existing, error: existingErr } = await supabase
+            .from('scheduling_approvals')
+            .select('id')
+            .eq('session_id', sessionId)
+            .in('status', ['pending_organizer', 'approved_by_organizer'])
+            .limit(1);
+          if (!existingErr && existing && existing.length > 0) {
+            console.log(`[LiveScheduler] Session ${sessionId} already has an open proposal; skipping duplicate.`);
+            return;
+          }
+        } catch (dedupeErr) {
+          console.warn(`[LiveScheduler] Dedupe check failed for session ${sessionId}:`, dedupeErr.message);
+        }
 
         await this._persistProposal(sessionId, result.scheduling, buf);
       }

@@ -39,10 +39,25 @@ async def list_meetings(project_id: str | None = None, include_archived: bool = 
     query = query.order("created_at", desc=True).limit(limit)
     res = query.execute()
     raw_data = res.data or []
-    # Filter out empty/cancelled meetings without transcripts (allow active/starting meetings)
+
+    # Determine which sessions have actual transcript content. A meeting is valid if it
+    # has a transcript file OR transcript segments in the DB, even if the storage upload
+    # was skipped/failed (transcript_file_url null). Only genuinely empty meetings are
+    # filtered out.
+    session_ids = [m.get("session_id") for m in raw_data if m.get("session_id")]
+    session_ids_with_segments: set[str] = set()
+    if session_ids:
+        try:
+            seg_res = db.table("transcript_segments").select("session_id").in_("session_id", session_ids).execute()
+            session_ids_with_segments = {r.get("session_id") for r in (seg_res.data or []) if r.get("session_id")}
+        except Exception as e:
+            print(f"[MeetingModel] Notice: segment check failed for empty-meeting filter: {e}")
+
     filtered = [
         m for m in raw_data
-        if m.get("status") in ("active", "starting") or (m.get("status") != "empty" and m.get("transcript_file_url"))
+        if m.get("status") in ("active", "starting")
+        or m.get("transcript_file_url")
+        or m.get("session_id") in session_ids_with_segments
     ]
     return filtered
 

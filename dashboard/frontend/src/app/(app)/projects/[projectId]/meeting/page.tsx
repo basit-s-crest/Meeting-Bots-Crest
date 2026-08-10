@@ -82,6 +82,10 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
     status: string;
   } | null>(null);
   const [approvalLoading, setApprovalLoading] = useState(false);
+  // Editable date/time for a detected proposal — the user (organizer) can correct
+  // or fill in the values before approving, since meetings often only say "in 5 days".
+  const [proposalDate, setProposalDate] = useState("");
+  const [proposalTime, setProposalTime] = useState("");
 
   // Poll for pending scheduling proposals while a session is live.
   useEffect(() => {
@@ -98,6 +102,8 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
         if (cancelled) return;
         if (data.proposal && data.proposal.status === "pending_organizer") {
           setPendingProposal(data.proposal);
+          setProposalDate(data.proposal.date || "");
+          setProposalTime(data.proposal.time || "");
         } else if (data.proposal && data.proposal.status !== "pending_organizer") {
           // Already handled; hide the banner.
           setPendingProposal(null);
@@ -123,7 +129,11 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ sessionId: activeSessionId })
+        body: JSON.stringify({
+          sessionId: activeSessionId,
+          date: proposalDate || null,
+          time: proposalTime || null
+        })
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -600,6 +610,26 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
                     &ldquo;{pendingProposal.raw_mention}&rdquo;
                   </p>
                 )}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <label className="flex items-center gap-1.5 text-xs text-ink-soft">
+                    Date
+                    <input
+                      type="date"
+                      value={proposalDate}
+                      onChange={(e) => setProposalDate(e.target.value)}
+                      className="rounded-lg border border-border-strong bg-surface px-2 py-1.5 text-sm text-ink"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs text-ink-soft">
+                    Time
+                    <input
+                      type="time"
+                      value={proposalTime}
+                      onChange={(e) => setProposalTime(e.target.value)}
+                      className="rounded-lg border border-border-strong bg-surface px-2 py-1.5 text-sm text-ink"
+                    />
+                  </label>
+                </div>
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">

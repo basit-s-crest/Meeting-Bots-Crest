@@ -515,11 +515,28 @@ app.get('/api/meetings', authMiddleware, projectGuard, async (req, res) => {
       }
     }
 
-    const filterValidMeetings = (meetings) => {
-      return (meetings || []).filter(m => {
+    const filterValidMeetings = async (meetings) => {
+      const candidates = meetings || [];
+      // A meeting is valid if it has transcript content — a storage URL OR transcript segments.
+      // Query segments in a batch so meetings with a failed/skipped upload still show up.
+      let sessionIdsWithSegments = new Set();
+      try {
+        if (candidates.length > 0) {
+          const { data: segData, error: segError } = await supabase
+            .from('transcript_segments')
+            .select('session_id')
+            .in('session_id', candidates.map(m => m.session_id).filter(Boolean));
+          if (!segError && segData) {
+            sessionIdsWithSegments = new Set(segData.map(r => r.session_id));
+          }
+        }
+      } catch (segErr) {
+        console.warn('[Server] Failed to query transcript_segments for empty-meeting check:', segErr.message);
+      }
+      return candidates.filter(m => {
         if (m.status === 'active' || m.status === 'starting') return true;
-        if (m.status === 'empty') return false;
-        return Boolean(m.transcript_file_url);
+        if (m.status === 'empty' && !sessionIdsWithSegments.has(m.session_id) && !m.transcript_file_url) return false;
+        return Boolean(m.transcript_file_url) || sessionIdsWithSegments.has(m.session_id);
       });
     };
 
@@ -529,7 +546,7 @@ app.get('/api/meetings', authMiddleware, projectGuard, async (req, res) => {
       if (!projectId) {
         filtered = filtered.filter(m => allowedProjectIds.includes(m.project_id));
       }
-      return res.json({ meetings: filterValidMeetings(filtered) });
+      return res.json({ meetings: await filterValidMeetings(filtered) });
     }
     // Direct Supabase fallback
     let query = supabase.from('meeting_sessions').select('*').order('created_at', { ascending: false });
@@ -541,7 +558,7 @@ app.get('/api/meetings', authMiddleware, projectGuard, async (req, res) => {
     if (!includeArchived) query = query.neq('status', 'archived');
     const { data, error } = await query;
     if (error) throw error;
-    res.json({ meetings: filterValidMeetings(data) });
+    res.json({ meetings: await filterValidMeetings(data) });
   } catch (err) {
     console.error('[Server] GET /api/meetings error:', err.message);
     res.status(500).json({ error: err.message });
@@ -1043,13 +1060,33 @@ app.get('/api/transcripts', authMiddleware, async (req, res) => {
     const { data: dbSessions, error } = await dbQuery;
     if (error) throw error;
 
-    // Keep all valid meeting sessions for the project except deleted ones
-    // and filter out completed sessions with no transcript file (empty/no-speech meetings)
-    const validDbSessions = (dbSessions || []).filter(s => {
+    // Determine which sessions are actually empty (no transcript content at all) by
+    // checking for transcript segments in the DB. A completed meeting with segments is
+    // valid even if the storage upload was skipped/failed (transcript_file_url is null).
+    const candidates = dbSessions || [];
+    let sessionIdsWithSegments = new Set();
+    try {
+      const segmentQuery = supabase
+        .from('transcript_segments')
+        .select('session_id')
+        .in('session_id', candidates.map(s => s.session_id).filter(Boolean));
+      if (candidates.length > 0) {
+        const { data: segData, error: segError } = await segmentQuery;
+        if (!segError && segData) {
+          sessionIdsWithSegments = new Set(segData.map(r => r.session_id));
+        }
+      }
+    } catch (segErr) {
+      console.warn('[Server] Failed to query transcript_segments for empty-meeting check:', segErr.message);
+    }
+
+    // Keep all valid meeting sessions for the project except deleted ones, and filter
+    // out genuinely empty meetings (no transcript file AND no transcript segments).
+    const validDbSessions = candidates.filter(s => {
       if (s.status === 'deleted') return false;
       if (s.status === 'active' || s.status === 'starting' || s.status === 'capturing') return true;
-      if (s.status === 'empty') return false;
-      if (s.status === 'completed' && !s.transcript_file_url) return false;
+      if (s.status === 'empty' && !sessionIdsWithSegments.has(s.session_id) && !s.transcript_file_url) return false;
+      if (s.status === 'completed' && !s.transcript_file_url && !sessionIdsWithSegments.has(s.session_id)) return false;
       return true;
     });
 
@@ -1141,6 +1178,22 @@ app.get('/api/transcripts/:filename', authMiddleware, projectGuard, async (req, 
     })).filter(l => l.text.trim().length > 0 || l.speaker !== 'Speaker');
   };
 
+  // Group consecutive transcript segments from the SAME speaker into one block,
+  // matching the live meeting view. A new block only starts when the speaker changes.
+  const mergeSpeakerTurns = (rawLines) => {
+    const normalized = normalizeLines(rawLines);
+    const merged = [];
+    for (const line of normalized) {
+      const last = merged[merged.length - 1];
+      if (last && last.speaker === line.speaker) {
+        last.text = (last.text + ' ' + line.text).trim();
+      } else {
+        merged.push({ ...line });
+      }
+    }
+    return merged;
+  };
+
   try {
     // 1. Try to fetch from Supabase storage URL
     if (match) {
@@ -1158,7 +1211,7 @@ app.get('/api/transcripts/:filename', authMiddleware, projectGuard, async (req, 
             const raw = content.split('\n').filter(l => l.trim().length > 0).map(l => {
               try { return JSON.parse(l); } catch { return null; }
             }).filter(Boolean);
-            return res.json({ lines: normalizeLines(raw) });
+            return res.json({ lines: mergeSpeakerTurns(raw) });
           }
         }
       } catch (dbErr) {
@@ -1172,7 +1225,7 @@ app.get('/api/transcripts/:filename', authMiddleware, projectGuard, async (req, 
       const raw = content.split('\n').filter(l => l.trim().length > 0).map(l => {
         try { return JSON.parse(l); } catch { return null; }
       }).filter(Boolean);
-      return res.json({ lines: normalizeLines(raw) });
+      return res.json({ lines: mergeSpeakerTurns(raw) });
     }
 
     // 3. Fallback to querying transcript_segments table directly from Supabase
@@ -1184,11 +1237,11 @@ app.get('/api/transcripts/:filename', authMiddleware, projectGuard, async (req, 
         .order('created_at', { ascending: true });
 
       if (!segErr && dbSegments && dbSegments.length > 0) {
-        const lines = dbSegments.map(s => ({
+        const lines = mergeSpeakerTurns(dbSegments.map(s => ({
           speaker: s.speaker_label || 'Speaker',
           text: s.text,
           timestamp: s.start_ts !== undefined ? `${s.start_ts}s` : undefined
-        }));
+        })));
         return res.json({ lines });
       }
     } catch (segFetchErr) {
@@ -1732,6 +1785,8 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
               isFinal: true,
               projectId: currentProjectId,
             });
+            // Feed the live scheduling-intent detector.
+            liveSchedulingDetector.ingest(sessionId, event);
           }
         },
         onError: (err) => {
