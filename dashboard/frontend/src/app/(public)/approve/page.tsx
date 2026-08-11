@@ -11,7 +11,6 @@ import {
   Loader2,
   AlertCircle,
   User,
-  Mail
 } from "lucide-react";
 import { Logo } from "@/components/ui/Logo";
 import { Button } from "@/components/ui/Button";
@@ -31,6 +30,8 @@ interface Proposal {
   raw_mention?: string;
   status: string;
   roster?: string[];
+  available_roster?: string[];
+  voting_complete?: boolean;
 }
 
 interface ApprovalEntry {
@@ -63,12 +64,10 @@ function ApprovalPageContent() {
   const [email, setEmail] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [voteError, setVoteError] = useState("");
+  const storageKey = token ? `approval-voted:${token}` : "";
 
   useEffect(() => {
-    if (!token) {
-      setState({ kind: "error", message: "Missing approval link. Please open the link from the meeting chat." });
-      return;
-    }
+    if (!token) return;
 
     (async () => {
       try {
@@ -98,18 +97,19 @@ function ApprovalPageContent() {
         const approvals: ApprovalEntry[] = Array.isArray(data.proposal?.approvals)
           ? data.proposal.approvals
           : [];
+        const alreadyVoted = window.sessionStorage.getItem(storageKey) === "1";
 
         setState({
           kind: "ready",
           proposal: data.proposal,
           approvals,
-          alreadyVoted: false
+          alreadyVoted
         });
       } catch {
         setState({ kind: "error", message: "Could not reach the server. Please try again." });
       }
     })();
-  }, [token]);
+  }, [storageKey, token]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -132,15 +132,18 @@ function ApprovalPageContent() {
       }
 
       const data = await res.json();
+      window.sessionStorage.setItem(storageKey, "1");
       setState((prev) =>
         prev.kind === "ready"
           ? {
               ...prev,
+              proposal: data.proposal || prev.proposal,
               approvals: Array.isArray(data.proposal?.approvals) ? data.proposal.approvals : prev.approvals,
               alreadyVoted: true
             }
           : prev
       );
+      window.setTimeout(() => window.close(), 1800);
     } catch (err) {
       setVoteError(err instanceof Error ? err.message : "Failed to record your approval");
     } finally {
@@ -151,6 +154,20 @@ function ApprovalPageContent() {
   // ----------------------------------------------------------------------
   // Loading
   // ----------------------------------------------------------------------
+  if (!token) {
+    return (
+      <Shell>
+        <Card className="w-full max-w-md p-8 text-center">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-warning-soft text-warning">
+            <AlertCircle className="h-7 w-7" />
+          </div>
+          <h2 className="font-display text-xl font-bold text-ink">Approval Unavailable</h2>
+          <p className="mt-2 text-sm text-ink-soft">Missing approval link. Please open the link from the meeting chat.</p>
+        </Card>
+      </Shell>
+    );
+  }
+
   if (state.kind === "loading") {
     return (
       <Shell>
@@ -224,71 +241,85 @@ function ApprovalPageContent() {
         </div>
 
         <div className="mt-6 border-t border-border pt-5">
-          <h3 className="mb-1 text-sm font-bold text-ink">Who are you?</h3>
-          <p className="mb-4 text-xs text-ink-mute">
-            Pick your name from the list below, then add your email so we can confirm your approval and notify you.
-          </p>
-
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="block text-xs font-semibold text-ink-soft uppercase tracking-wider">
-                Your name
-              </label>
-              <div className="relative">
-                <User className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-faint" />
-                <select
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  required
-                  className="w-full rounded-lg border border-border-strong bg-surface pl-9 pr-4 py-2.5 text-sm text-ink placeholder:text-ink-faint transition-colors focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
-                >
-                  <option value="">Select your name...</option>
-                  {(proposal.roster && proposal.roster.length > 0
-                    ? proposal.roster
-                    : SUGGESTED_NAMES
-                  ).map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
-              </div>
+          {alreadyVoted ? (
+            <div className="flex flex-col items-center rounded-xl bg-success-soft px-5 py-8 text-center">
+              <CheckCircle2 className="h-12 w-12 animate-pulse text-success" />
+              <h3 className="mt-4 font-display text-xl font-bold text-ink">Thank you!</h3>
+              <p className="mt-2 text-sm text-ink-soft">Your approval has been recorded. You can close this tab.</p>
             </div>
+          ) : proposal.voting_complete ? (
+            <div className="flex flex-col items-center rounded-xl bg-success-soft px-5 py-8 text-center">
+              <CheckCircle2 className="h-12 w-12 text-success" />
+              <h3 className="mt-4 font-display text-xl font-bold text-ink">Voting complete</h3>
+              <p className="mt-2 text-sm text-ink-soft">Everyone in the meeting has submitted their approval.</p>
+            </div>
+          ) : (
+            <>
+              <h3 className="mb-1 text-sm font-bold text-ink">Who are you?</h3>
+              <p className="mb-4 text-xs text-ink-mute">
+                Pick your name from the list below, then add your email so we can confirm your approval and notify you.
+              </p>
 
-            <Input
-              id="approval-email"
-              type="email"
-              label="Your email"
-              placeholder="you@company.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              className="pl-9"
-            />
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-semibold text-ink-soft uppercase tracking-wider">
+                    Your name
+                  </label>
+                  <div className="relative">
+                    <User className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-faint" />
+                    <select
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      required
+                      className="w-full rounded-lg border border-border-strong bg-surface pl-9 pr-4 py-2.5 text-sm text-ink placeholder:text-ink-faint transition-colors focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
+                    >
+                      <option value="">Select your name...</option>
+                      {(proposal.available_roster !== undefined
+                        ? proposal.available_roster
+                        : proposal.roster && proposal.roster.length > 0
+                          ? proposal.roster
+                          : SUGGESTED_NAMES
+                      ).map((n) => (
+                        <option key={n} value={n}>
+                          {n}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
 
-            {voteError && (
-              <div className="flex items-start gap-2.5 rounded-lg bg-danger-soft p-3.5 text-sm text-danger border border-danger/20">
-                <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
-                <span>{voteError}</span>
-              </div>
-            )}
+                <Input
+                  id="approval-email"
+                  type="email"
+                  label="Your email"
+                  placeholder="you@company.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                  className="pl-9"
+                />
 
-            <Button type="submit" size="lg" className="w-full" disabled={submitting || !name.trim() || !email.trim()}>
-              {submitting ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" /> Recording…
-                </>
-              ) : alreadyVoted ? (
-                <>
-                  <Check className="h-4 w-4" /> You have approved
-                </>
-              ) : (
-                <>
-                  <Check className="h-4 w-4" /> Approve this meeting
-                </>
-              )}
-            </Button>
-          </form>
+                {voteError && (
+                  <div className="flex items-start gap-2.5 rounded-lg bg-danger-soft p-3.5 text-sm text-danger border border-danger/20">
+                    <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                    <span>{voteError}</span>
+                  </div>
+                )}
+
+                <Button type="submit" size="lg" className="w-full" disabled={submitting || !name.trim() || !email.trim()}>
+                  {submitting ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" /> Recording…
+                    </>
+                  ) : (
+                    <>
+                      <Check className="h-4 w-4" /> Approve this meeting
+                    </>
+                  )}
+                </Button>
+              </form>
+            </>
+          )}
         </div>
 
         {/* Approval tally */}

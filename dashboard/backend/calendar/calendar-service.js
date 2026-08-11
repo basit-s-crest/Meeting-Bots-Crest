@@ -78,8 +78,10 @@ export function loadRefreshToken() {
  */
 export function deleteRefreshToken() {
   try {
-    if (fs.existsSync(CALENDAR_TOKEN_PATH)) {
-      fs.unlinkSync(CALENDAR_TOKEN_PATH);
+    for (const tokenPath of getCandidateTokenPaths()) {
+      if (fs.existsSync(tokenPath)) {
+        fs.unlinkSync(tokenPath);
+      }
     }
     delete process.env.GOOGLE_CALENDAR_REFRESH_TOKEN;
     console.log('[Calendar Service] Refresh token deleted successfully.');
@@ -213,7 +215,15 @@ export function parseInstruction(instruction) {
 /**
  * Creates Google Calendar event.
  */
-export async function createCalendarEvent(title, startIsoStr, endIsoStr, tz, description = null, location = null) {
+export async function createCalendarEvent(
+  title,
+  startIsoStr,
+  endIsoStr,
+  tz,
+  description = null,
+  location = null,
+  options = {}
+) {
   const calendar = await getCalendarClient();
   
   const requestBody = {
@@ -230,11 +240,26 @@ export async function createCalendarEvent(title, startIsoStr, endIsoStr, tz, des
 
   if (description) requestBody.description = description;
   if (location) requestBody.location = location;
-  
-  const response = await calendar.events.insert({
+
+  const attendees = Array.isArray(options.attendees)
+    ? options.attendees
+        .map((attendee) => ({
+          email: String(attendee?.email || '').trim().toLowerCase(),
+          ...(attendee?.displayName ? { displayName: String(attendee.displayName).trim() } : {})
+        }))
+        .filter((attendee) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(attendee.email))
+        .filter((attendee, index, list) => list.findIndex((item) => item.email === attendee.email) === index)
+    : [];
+
+  if (attendees.length > 0) requestBody.attendees = attendees;
+
+  const insertOptions = {
     calendarId: 'primary',
     requestBody
-  });
+  };
+  if (options.sendUpdates) insertOptions.sendUpdates = options.sendUpdates;
+
+  const response = await calendar.events.insert(insertOptions);
   
   return response.data;
 }

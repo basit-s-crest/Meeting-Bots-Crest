@@ -197,7 +197,8 @@ async function triggerBotJoin(eventId, meetingUrl, meetingTitle, botType) {
       botName: process.env.AUTO_JOIN_BOT_NAME || 'Meeting Assistant Bot',
       isHeadless: true,
       wsPort,
-      projectId
+      projectId,
+      joinMethod: 'automatic'
     });
 
     // Backfill the scheduled_meetings row so the calendar event traces to the session.

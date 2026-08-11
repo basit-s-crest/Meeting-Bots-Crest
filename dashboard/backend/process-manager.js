@@ -110,7 +110,7 @@ class ProcessManager {
   /**
    * Spawns the requested meeting bot process.
    */
-  spawnBot(sessionId, { botType, meetingUrl, botName, isHeadless, wsPort, googleDriveFolderId, projectId, attendeeEmails = [] }) {
+  spawnBot(sessionId, { botType, meetingUrl, botName, isHeadless, wsPort, googleDriveFolderId, projectId, attendeeEmails = [], joinMethod = 'manual' }) {
     if (this.activeSessions.has(sessionId)) {
       throw new Error(`Session ${sessionId} is already active.`);
     }
@@ -202,7 +202,7 @@ class ProcessManager {
 
     if (onBotStartCallback) {
       try {
-        onBotStartCallback({ sessionId, botType, meetingUrl, botName, projectId, wsPort });
+        onBotStartCallback({ sessionId, botType, meetingUrl, botName, projectId, wsPort, joinMethod });
       } catch (err) {
         console.error(`[ProcessManager] onBotStartCallback error:`, err.message);
       }
@@ -217,6 +217,7 @@ class ProcessManager {
       meetingUrl: meetingUrl,
       botName: botName,
       projectId: projectId,
+      joinMethod: joinMethod,
       attendeeEmails: attendeeEmails,
       outputPath: outputPath,
       tailInterval: null,

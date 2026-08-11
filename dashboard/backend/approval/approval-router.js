@@ -17,6 +17,40 @@ function normalizeEmail(raw) {
   return String(raw || '').trim().toLowerCase();
 }
 
+function normalizeName(raw) {
+  return String(raw || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function getApprovalState(proposal) {
+  const approvals = Array.isArray(proposal.approvals) ? proposal.approvals : [];
+  const roster = getSessionRoster(proposal.session_id)
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean);
+  const approvedNames = new Set(approvals.map((approval) => normalizeName(approval.name)));
+  const availableRoster = roster.filter((entry) => !approvedNames.has(normalizeName(entry)));
+  const votingComplete = roster.length > 0 && availableRoster.length === 0;
+
+  return { approvals, roster, availableRoster, votingComplete };
+}
+
+function getPublicProposal(proposal, includeApprovals = false) {
+  const { approvals, roster, availableRoster, votingComplete } = getApprovalState(proposal);
+  return {
+    id: proposal.id,
+    token: proposal.token,
+    title: proposal.title,
+    date: proposal.date,
+    time: proposal.time,
+    timezone: proposal.timezone,
+    raw_mention: proposal.raw_mention,
+    status: proposal.status,
+    roster,
+    available_roster: availableRoster,
+    voting_complete: votingComplete,
+    ...(includeApprovals ? { approvals } : {})
+  };
+}
+
 /**
  * Builds the public approval page URL for a proposal token.
  */
@@ -225,18 +259,7 @@ approvalRouter.get('/public/:token', async (req, res) => {
   // Approved by organizer — anyone with the link can cast an approval.
   res.json({
     success: true,
-    proposal: {
-      id: proposal.id,
-      token: proposal.token,
-      title: proposal.title,
-      date: proposal.date,
-      time: proposal.time,
-      timezone: proposal.timezone,
-      raw_mention: proposal.raw_mention,
-      status: proposal.status,
-      // Real attendee names captured live from the Meet roster (bot excluded).
-      roster: getSessionRoster(proposal.session_id)
-    }
+    proposal: getPublicProposal(proposal, true)
   });
 });
 
@@ -301,15 +324,7 @@ approvalRouter.post('/public/:token/vote', async (req, res) => {
 
   res.json({
     success: true,
-    proposal: {
-      id: data.id,
-      title: data.title,
-      date: data.date,
-      time: data.time,
-      timezone: data.timezone,
-      status: data.status,
-      approvals: data.approvals || []
-    }
+    proposal: getPublicProposal(data, true)
   });
 });
 
@@ -334,6 +349,12 @@ approvalRouter.post('/:token/finalize', async (req, res) => {
   const tz = proposal.timezone || process.env.CALENDAR_TIMEZONE || 'Asia/Kolkata';
   const duration = getDefaultDurationMinutes();
 
+  const approvals = Array.isArray(proposal.approvals) ? proposal.approvals : [];
+  const attendees = approvals.map((approval) => ({
+    email: normalizeEmail(approval.email),
+    displayName: String(approval.name || '').trim()
+  }));
+
   const [y, m, d] = String(proposal.date).split('-').map(Number);
   const [h, min] = String(proposal.time).split(':').map(Number);
   const pad = (num) => String(num).padStart(2, '0');
@@ -344,7 +365,15 @@ approvalRouter.post('/:token/finalize', async (req, res) => {
 
   let event;
   try {
-    event = await createCalendarEvent(proposal.title, startIsoStr, endIsoStr, tz, null, null);
+    event = await createCalendarEvent(
+      proposal.title,
+      startIsoStr,
+      endIsoStr,
+      tz,
+      null,
+      null,
+      { attendees, sendUpdates: 'all' }
+    );
   } catch (err) {
     const { handleGoogleApiError } = await import('../calendar/calendar-service.js');
     const normErr = handleGoogleApiError(err);
@@ -371,9 +400,9 @@ approvalRouter.post('/:token/finalize', async (req, res) => {
     return res.status(500).json({ error: 'Event created but failed to update approval state' });
   }
 
-  // Notify attendees (best-effort).
-  const approvals = Array.isArray(data.approvals) ? data.approvals : [];
-  const emails = approvals.map((a) => a.email).filter(Boolean);
+  // Notify attendees (best-effort). Google Calendar also sends native invitations.
+  const finalizedApprovals = Array.isArray(data.approvals) ? data.approvals : [];
+  const emails = [...new Set(finalizedApprovals.map((a) => normalizeEmail(a.email)).filter(Boolean))];
   if (emails.length > 0) {
     try {
       const { sendSchedulingNotification } = await import('../email-service.js');

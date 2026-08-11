@@ -861,7 +861,8 @@ app.post('/api/sessions/start', authMiddleware, projectGuard, async (req, res) =
       wsPort,
       googleDriveFolderId,
       projectId,
-      attendeeEmails: sanitizedAttendeeEmails
+      attendeeEmails: sanitizedAttendeeEmails,
+      joinMethod: 'manual'
     });
 
     // Handle process events/callbacks
