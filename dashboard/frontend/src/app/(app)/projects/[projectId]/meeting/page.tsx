@@ -17,6 +17,8 @@ import { LiveQAOverlay, QAPair } from "@/components/LiveQAOverlay";
 interface TranscriptLine {
   lineId?: string;
   segmentId?: number;
+  /** Stable per-participant channel id — the identity key for grouping boxes. */
+  channel?: number;
   speaker: string;
   text: string;
   timestamp?: string;
@@ -406,6 +408,12 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
           const text = msg.data.text || "";
           const isFinal = msg.data.isFinal !== false;
           const provisional = msg.data.provisional === true;
+          // Per-participant channel id — the stable identity for grouping. When a
+          // real name hasn't resolved yet, the speaker is "speaker_N" where N is a
+          // per-segment counter, so grouping by speaker alone would spawn a new box
+          // per segment. Grouping by channel keeps ALL of one participant's turns
+          // in ONE box (as soon as the name resolves, the box repaints in place).
+          const channel = typeof msg.data.channel === "number" ? msg.data.channel : undefined;
 
           // Before updating lines, set wasNearBottomRef based on container scroll state
           const container = transcriptContainerRef.current;
@@ -416,46 +424,79 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
           }
 
           setLiveLines(prev => {
-            const lastIdx = prev.length - 1;
-            const lastBlock = lastIdx >= 0 ? prev[lastIdx] : null;
+            const trimmed = text.trim();
 
-            // Group by speaker turn: if the incoming chunk belongs to the SAME
-            // speaker as the current (last) box, append to that one box instead
-            // of spawning a new one. Only start a new box when the speaker
-            // changes. Provisional "speaker_N" ids differ per segment, so they
-            // stay separate until a real name resolves — then same-name chunks
-            // merge into the one box (repaint by segmentId still applies).
-            const sameSpeaker = lastBlock && lastBlock.speaker === speaker;
+            // ── Find the box this utterance belongs to ─────────────────────────
+            // 1. By channel: the stable per-participant id. All of one speaker's
+            //    turns (even re-appearing later) accumulate into ONE box.
+            // 2. Fallback: by speaker name equality on the LAST box (Teams/Zoom,
+            //    or pre-channel events).
+            // 3. Also match a box whose RESOLVED name equals this speaker even if
+            //    this event is provisional — so a late-resolved name self-corrects
+            //    the same box rather than spawning a duplicate.
+            let idx = -1;
+            if (channel !== undefined) {
+              idx = prev.findIndex(b => b.channel === channel);
+            }
+            if (idx === -1) {
+              // Scan from the end: an exact speaker-name match is a continuation
+              // even if a different channel box was created in between.
+              for (let i = prev.length - 1; i >= 0; i--) {
+                if (prev[i].speaker === speaker) { idx = i; break; }
+              }
+            }
+            if (idx === -1) {
+              // Provisional event whose resolved name exists on an earlier box.
+              const lastIdx = prev.length - 1;
+              const lastBlock = lastIdx >= 0 ? prev[lastIdx] : null;
+              if (provisional && lastBlock && !lastBlock.provisional && lastBlock.speaker !== "Unknown") {
+                idx = lastIdx;
+              }
+            }
 
-            if (sameSpeaker) {
+            if (idx !== -1) {
               const updated = [...prev];
-              const currentBlock = { ...updated[lastIdx] };
+              const currentBlock = { ...updated[idx] };
               currentBlock.speaker = speaker;
               currentBlock.provisional = provisional;
               currentBlock.isFinal = isFinal;
+              if (channel !== undefined) currentBlock.channel = channel;
+
+              // Dedupe: Deepgram streams interim then final for the same utterance.
+              // If the new final text is already fully contained in the committed
+              // text (or exactly repeats the last committed chunk), don't append it
+              // again — the "word appears twice" symptom.
+              const committed = currentBlock.committedText || "";
+
               if (isFinal) {
-                currentBlock.committedText = currentBlock.committedText
-                  ? currentBlock.committedText + " " + text
-                  : text;
+                const already = committed.length > 0 &&
+                  (committed.endsWith(trimmed) ||
+                   (committed.includes(trimmed) &&
+                    committed.length >= trimmed.length + trimmed.length * 0.5));
+                if (!already) {
+                  currentBlock.committedText = committed ? committed + " " + trimmed : trimmed;
+                }
                 currentBlock.interimText = "";
               } else {
+                // Interim: if it equals what we already committed, skip the interim flash.
                 currentBlock.committedText = currentBlock.committedText || "";
-                currentBlock.interimText = text;
+                currentBlock.interimText = currentBlock.committedText.includes(trimmed) ? "" : text;
               }
               currentBlock.text = currentBlock.interimText
                 ? currentBlock.committedText + " " + currentBlock.interimText
                 : currentBlock.committedText;
               // Keep the resolved segmentId so later repaints land on this box.
               if (segmentId != null) currentBlock.segmentId = segmentId;
-              updated[lastIdx] = currentBlock;
+              updated[idx] = currentBlock;
               return updated;
             }
 
-            // Different speaker (or first block) — start a new box.
+            // No matching box — start a new one.
             const newBlock: TranscriptLine = {
               segmentId: segmentId ?? prev.length,
+              channel,
               speaker,
-              committedText: isFinal ? text : "",
+              committedText: isFinal ? trimmed : "",
               interimText: isFinal ? "" : text,
               text,
               isFinal,

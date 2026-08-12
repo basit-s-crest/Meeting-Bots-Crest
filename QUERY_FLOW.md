@@ -22,19 +22,22 @@
 | Step | File | Code | Database |
 |------|------|------|----------|
 | Monkey-patch RTCPeerConnection | `Google Meet/src/audio/audio-capture.js` (line ~286) | `AudioCapture.initialize()` → `page.addInitScript(AUDIO_CAPTURE_SCRIPT)` | — |
-| Intercept all remote audio tracks | `audio-capture.js` (line ~30, injected) | `findPeerConnection()` → `getReceivers()` → `addTrackToMixer()` → mixes all to AudioContext at 16kHz | — |
+| Capture each remote audio track on its OWN channel | `audio-capture.js` (injected) | `findPeerConnection()` → `getReceivers()` → `connectStream()` → one `AudioContext` + `AudioWorklet` per track at 16kHz; also rescans `<audio>/<video>` elements (per-participant MediaStreams) for late joiners | — |
+| Emit per-channel PCM frames | `audio-capture.js` (injected worklet) | `onAudioFrame({ channel, data, sampleRate, peak })` — stable channel index per stream, silence-gated | — |
 | Poll DOM for speaking indicator | `Google Meet/src/speaker/speaker-detector.js` (line ~46) | `SpeakerDetector.start()` → `setInterval(() => _poll(), 150)` | — |
 | Read KUNJSe class from DOM | `speaker-detector.js` (line ~121) | `_poll()` → `page.evaluate()` → `querySelectorAll('[jsname="QgSmzd"].KUNJSe')` → extracts name from `[aria-label^="More options for <Name>"]` | — |
-| Buffer 500ms PCM chunks | `Google Meet/src/chunker/audio-chunker.js` (line ~20) | `AudioChunker.addAudioFrame()` → appends Int16 samples → calls `emitChunk()` at `FRAMES_PER_CHUNK = 8000` | — |
-| Tag chunk with speaker | `audio-chunker.js` (line ~100) | `getSpeakerForWindow()` — overlap-weighted majority from `speakerHistory[]` | — |
+| Bind channel ↔ speaker (energy ↔ glow) | `speaker-detector.js` (`ChannelSpeakerBinder`) | `feedChannelFrame({ channel, rms })` + `_poll()` litNames → decayed correlation (tau 2500ms, floor 2.5, 1-tile↔1-channel) → emits `channel_speaker_event` on change | — |
+| Buffer 500ms PCM chunks per channel | `Google Meet/src/chunker/audio-chunker.js` (line ~20) | `AudioChunker.addAudioFrame({ channel, ... })` → per-channel buffer → `emitChunkForChannel()` at `FRAMES_PER_CHUNK = 8000` | — |
+| Chunk carries stable `channel` id | `audio-chunker.js` (line ~100) | Chunk has `channel` (the attribution key); `speaker` is NOT assigned here (comes from `channel_speaker_event`) | — |
 
 ### 3. Stream to backend
 
 | Step | File | Code |
 |------|------|------|
 | WebSocket server starts on port | `Google Meet/src/output/chunk-output.js` (line ~22) | `ChunkOutput.start()` → `new WebSocketServer({ port })` |
-| Send audio chunk | `chunk-output.js` (line ~80) | `send(chunk)` → `JSON.stringify(chunk)` → `ws.send()` |
+| Send audio chunk | `chunk-output.js` (line ~80) | `send(chunk)` → `JSON.stringify({ type: "audio_chunk", channel, start_ts, end_ts, audio_base64, ... })` → `ws.send()` |
 | Send speaker event | `chunk-output.js` (line ~119) | `sendSpeakerEvent({ speaker, timestamp })` → broadcasts `{ type: "speaker_event", speaker, timestamp_ts }` |
+| Send channel speaker event | `chunk-output.js` | `sendChannelSpeakerEvent({ channel, speaker, timestamp })` → broadcasts `{ type: "channel_speaker_event", channel, speaker, timestamp_ts }` |
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -47,11 +50,10 @@
 | Step | File | Code | Database |
 |------|------|------|----------|
 | Bot WebSocket connects | `dashboard/backend/server.js` (line ~840) | `connectToBotAudioStream(sessionId, wsPort, botType, projectId)` → `new WebSocket(url)` | — |
-| speaker_event → SpeakerBinder | `dashboard/backend/deepgram-proxy-google.js` (line ~258) | `deepgramProxyGoogle.logSpeakerBoundary()` → `binder.recordHint(speaker, timestamp)` — lag-corrects by 0.25s, stores as hint turn | — |
-| audio_chunk → Deepgram | `deepgram-proxy-google.js` (line ~270) | `sendAudio(sessionId, audioBuffer)` → `socket.send(audioBuffer)` to Deepgram WebSocket | — |
-| Deepgram returns text | `deepgram-proxy-google.js` (line ~170) | `dgSocket.on('message')` → `binder.resolve(absoluteStartSec, absoluteEndSec)` → overlap-window match + recency tie-break + flicker debounce | — |
-| SpeakerBinder confidence gates | `deepgram-proxy-google.js` (line ~90) | `resolve()` checks: `MIN_MATCH_COVERAGE >= 0.35`, `MIN_MATCH_SUPPORT_S >= 0.45`, `MIN_MATCH_CONFIDENCE >= 0.6` | — |
-| Final transcript emitted | `deepgram-proxy-google.js` (line ~200) | `onTranscript({ segmentId, speaker, provisional, text, timestamp, isFinal })` | — |
+| channel_speaker_event → per-channel binding | `dashboard/backend/deepgram-proxy-google.js` | `deepgramProxyGoogle.logChannelSpeakerBoundary({ channel, speaker, timestamp })` → sets channel's carried name (ground truth) | — |
+| audio_chunk → per-channel Deepgram stream | `deepgram-proxy-google.js` | Lazy `initializeChannel(sessionId, channel)` on first audio; `sendAudio(sessionId, channel, audioBuffer)` → that channel's Deepgram WebSocket | — |
+| Deepgram returns text (per channel) | `deepgram-proxy-google.js` | `dgSocket.on('message')` → attributed by `state.lastChannelSpeaker` (carried at capture); `SpeakerBinder` used only as fallback when no binding yet | — |
+| Final transcript emitted | `deepgram-proxy-google.js` | `onTranscript({ segmentId, channel, speaker, provisional, text, timestamp, isFinal })` | — |
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -238,10 +240,10 @@ No results from either search?
 |------|----------------------|---------------|
 | `src/index.js` | `main()` | Entry point, parses CLI args, creates BotLifecycle |
 | `src/join/meet-bot.js` | `MeetBot.launch()`, `join()`, `handlePreJoin()`, `turnOffCamera()`, `_replaceVideoWithBlack()` | Playwright browser launch, join meeting, camera/mic toggle |
-| `src/audio/audio-capture.js` | `AudioCapture.initialize()`, injected `AUDIO_CAPTURE_SCRIPT` with `findPeerConnection()`, `addTrackToMixer()`, `readLoop()` | Injects WebRTC monkey-patch, captures all remote audio, mixes to 16kHz PCM |
-| `src/speaker/speaker-detector.js` | `SpeakerDetector.start()`, `_poll()`, `_detectBotTile()` | Polls DOM for KUNJSe speaking indicator every 150ms |
-| `src/chunker/audio-chunker.js` | `AudioChunker.addAudioFrame()`, `addSpeakerEvent()`, `emitChunk()`, `getSpeakerForWindow()` | Buffers PCM into 500ms chunks, tags with speaker via timeline overlap |
-| `src/output/chunk-output.js` | `ChunkOutput.send()`, `sendSpeakerEvent()` | WebSocket server broadcasting audio chunks + speaker events |
+| `src/audio/audio-capture.js` | `AudioCapture.initialize()`, injected `AUDIO_CAPTURE_SCRIPT` with `findPeerConnection()`, `connectStream()`, `discoverMediaElements()`, `AudioWorklet` | Injects WebRTC monkey-patch, captures each remote audio track on its OWN channel (one AudioContext + worklet per track at 16kHz), rescans for late joiners |
+| `src/speaker/speaker-detector.js` | `SpeakerDetector.start()`, `_poll()`, `_detectBotTile()`, `ChannelSpeakerBinder` | Polls DOM for KUNJSe speaking indicator every 150ms; binds channel↔speaker via energy↔glow correlation; emits `channel_speaker_event` |
+| `src/chunker/audio-chunker.js` | `AudioChunker.addAudioFrame()`, `emitChunkForChannel()`, `flush()` | Buffers PCM into 500ms chunks PER CHANNEL (stable `channel` id; speaker comes from `channel_speaker_event`) |
+| `src/output/chunk-output.js` | `ChunkOutput.send()`, `sendSpeakerEvent()`, `sendChannelSpeakerEvent()` | WebSocket server broadcasting audio chunks + speaker events + channel speaker events |
 | `src/lifecycle/bot-lifecycle.js` | `BotLifecycle.start()`, `initializeCapture()` | Wires AudioCapture → Chunker → Output + SpeakerDetector |
 | `src/config/selectors.js` | `SELECTORS`, `TIMEOUTS`, `AUDIO_CONFIG` | DOM selectors, timeouts, audio config constants |
 
@@ -250,7 +252,7 @@ No results from either search?
 | File | Key functions | Responsibility |
 |------|---------------|---------------|
 | `server.js` | `app.post('/api/sessions/start')`, `connectToBotAudioStream()`, `app.post('/api/memory/query')`, `broadcastToClients()` | Express server: REST routes, WebSocket for live transcripts, bot audio stream listener |
-| `deepgram-proxy-google.js` | `DeepgramProxy.initializeSession()`, `sendAudio()`, `logSpeakerBoundary()`, `logStreamStart()` + `SpeakerBinder.recordHint()`, `resolve()` | Deepgram WebSocket + attribution logic (overlap-window, recency tie-break, flicker debounce) |
+| `deepgram-proxy-google.js` | `DeepgramProxy.initializeChannel()`, `sendAudio(sessionId, channel, buffer)`, `logChannelSpeakerBoundary()`, `logStreamStart()` + `SpeakerBinder` fallback | Per-channel Deepgram WebSocket streams — each channel attributed by its carried name (identity at capture); SpeakerBinder kept as fallback |
 | `deepgram-proxy-zoom.js` | Same pattern, different attribution (chunk-history based) | Separate Deepgram handler for Zoom |
 | `memory-client.js` | `ingestSegment()`, `queryMemory()`, `fallbackGroqQuery()`, `processMeeting()` | Proxy to Python memory service. Pushes live segments, sends questions, direct-to-Groq fallback |
 | `process-manager.js` | `ProcessManager.spawnBot()`, `killBot()`, `aggregateTranscriptFile()` | Spawns/kills bot processes, saves transcripts to Supabase Storage |

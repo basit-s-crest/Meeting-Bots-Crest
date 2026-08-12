@@ -154,17 +154,29 @@ export class BotLifecycle {
     this.audioCapture.setCallbacks({
       onFrame: (frame) => {
         if (!this.isPaused) {
+          // Per-channel frame: route into that channel's chunker buffer AND feed
+          // the energy into the speaker detector's channel↔name binder.
           this.chunker.addAudioFrame(frame);
+          if (this.speakerDetector.feedChannelFrame) {
+            this.speakerDetector.feedChannelFrame({ channel: frame.channel, rms: frame.peak ?? 0 });
+          }
         }
       },
       onError: (err) => console.error('Audio error:', err),
     });
 
     this.speakerDetector.setCallback((data) => {
-      console.log(`[BotLifecycle] Speaker event received: "${data.speaker}" at ${data.timestamp}`);
       if (!this.isPaused) {
-        this.chunker.addSpeakerEvent(data);   // still used for the chunk-level fallback speaker field
-        this.output?.sendSpeakerEvent(data);  // NEW: precise, unquantized signal for the backend
+        if (data && data.type === 'channel_speaker_event') {
+          // Precise, per-channel binding — the backend's ground truth for this
+          // channel's Deepgram stream.
+          console.log(`[BotLifecycle] Channel speaker event: ch${data.channel} -> "${data.speaker}" at ${data.timestamp}`);
+          this.output?.sendChannelSpeakerEvent(data);
+        } else {
+          console.log(`[BotLifecycle] Speaker event received: "${data.speaker}" at ${data.timestamp}`);
+          this.chunker.addSpeakerEvent(data);   // still used for the chunk-level fallback speaker field
+          this.output?.sendSpeakerEvent(data);  // legacy precise signal (Zoom/back-compat)
+        }
       }
     });
 

@@ -28,57 +28,82 @@ const AUDIO_CAPTURE_SCRIPT = `
   }
 })();
 
+// AudioWorklet module: echoes 16kHz input frames to the main thread as Float32 PCM.
+// The AudioContext is created at 16kHz, so Chrome resamples each participant's
+// audio (48kHz) down to 16kHz on the audio thread before the worklet runs.
+const PCM_WORKLET_SRC = \`
+class PcmCaptureProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const input = inputs[0];
+    if (!input || input.length === 0) return true;
+    const ch = input[0];
+    if (!ch || ch.length === 0) return true;
+    const pcm = new Float32Array(ch.length);
+    pcm.set(ch);
+    this.port.postMessage(pcm, [pcm.buffer]);
+    return true;
+  }
+}
+registerProcessor('pcm-capture', PcmCaptureProcessor);
+\`;
+
 window.audioCapture = {
-  audioCtx: null,
-  mixerDest: null,
-  processor: null,
-  reader: null,
+  targetRate: ${AUDIO_CONFIG.sampleRate},
+  silenceThreshold: 0.005,
+  holdOpenMs: 2000,
+  isRunning: false,
+  contexts: new Map(),            // streamId -> { ctx, sourceNode, workletNode }
+  connectedStreamIds: new Set(),  // streamId -> true
+  channelByStream: new Map(),     // streamId -> channel index
+  channelToStream: new Map(),     // channel index -> streamId
+  streamLastVoice: new Map(),     // streamId -> last voice timestamp (ms)
+  nextChannel: 0,
+  freedChannels: [],
+  rescanTimer: null,
+  workletUrl: null,
   onFrame: null,
   onError: null,
-  isRunning: false,
-  sources: new Set(), // Keep track of source nodes to prevent garbage collection
 
   async start(onFrameCallback, onErrorCallback) {
     this.onFrame = onFrameCallback;
     this.onError = onErrorCallback;
+    if (this.isRunning) return true;
     this.isRunning = true;
-    
+
     try {
-      console.log('[AudioCapture] Starting audio capture with Web Audio Mixer...');
+      this.workletUrl = URL.createObjectURL(new Blob([PCM_WORKLET_SRC], { type: 'application/javascript' }));
+
+      // Seed: capture every remote audio receiver on the active PeerConnection.
+      // Each receiver track IS one participant's channel (the per-speaker stream).
       const pc = await this.findPeerConnection();
-      if (!pc) throw new Error('RTCPeerConnection not found');
-
-      // Initialize Web Audio Context to mix all tracks natively in Chrome at 16000Hz
-      this.audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      this.mixerDest = this.audioCtx.createMediaStreamDestination();
-
-      // 1. Process all existing audio tracks
-      const receivers = pc.getReceivers();
-      console.log(\`[AudioCapture] Found \${receivers.length} receivers in PeerConnection\`);
-      for (const r of receivers) {
-        if (r.track && r.track.kind === 'audio') {
-          this.addTrackToMixer(r.track);
+      if (pc) {
+        const receivers = pc.getReceivers();
+        console.log('[AudioCapture] Found ' + receivers.length + ' receiver(s) in PeerConnection');
+        for (const r of receivers) {
+          if (r.track && r.track.kind === 'audio') {
+            this.connectStream(new MediaStream([r.track]));
+          }
         }
+        pc.addEventListener('track', (event) => {
+          if (event.track && event.track.kind === 'audio') {
+            console.log('[AudioCapture] New remote audio track: ' + event.track.id);
+            this.connectStream(new MediaStream([event.track]));
+          }
+        });
       }
 
-      // 2. Listen for dynamic new tracks
-      pc.addEventListener('track', (event) => {
-        if (event.track && event.track.kind === 'audio') {
-          console.log(\`[AudioCapture] New audio track added: id=\${event.track.id}\`);
-          this.addTrackToMixer(event.track);
-        }
-      });
+      // Ground truth: Google Meet renders each participant's audio as a separate
+      // <audio>/<video> element whose srcObject is a live MediaStream. Discover
+      // them and connect each into its own AudioContext → worklet, so every
+      // participant's audio rides its own channel (no mixing, no muddling).
+      this.discoverMediaElements();
 
-      // Get the single mixed audio track from our destination stream
-      const mixedTrack = this.mixerDest.stream.getAudioTracks()[0];
-      if (!mixedTrack) throw new Error('Failed to create mixed audio track');
+      // Rescan for late joiners / recycled elements.
+      this.rescanTimer = setInterval(() => {
+        if (this.isRunning) this.discoverMediaElements();
+      }, 5000);
 
-      console.log('[AudioCapture] Initializing processor for mixed track...');
-      this.processor = new MediaStreamTrackProcessor({ track: mixedTrack });
-      this.reader = this.processor.readable.getReader();
-
-      this.readLoop();
-      console.log('[AudioCapture] Audio capture initialized successfully');
+      console.log('[AudioCapture] Per-channel capture started');
       return true;
     } catch (e) {
       console.error('[AudioCapture] Start failed:', e.message);
@@ -87,127 +112,124 @@ window.audioCapture = {
     }
   },
 
-  addTrackToMixer(track) {
-    if (track.readyState !== 'live') return;
-    
-    console.log(\`[AudioCapture] Adding track to mixer: \${track.id}\`);
+  findMediaElements() {
+    return Array.from(document.querySelectorAll('audio, video')).filter((el) =>
+      !el.paused &&
+      el.srcObject instanceof MediaStream &&
+      el.srcObject.getAudioTracks().length > 0
+    );
+  },
 
-    // Force decoding via hidden local audio element
-    try {
-      const stream = new MediaStream([track]);
-      const audioEl = document.createElement('audio');
-      audioEl.srcObject = stream;
-      audioEl.autoplay = true;
-      audioEl.muted = false;
-      audioEl.volume = 0.01;
-      document.body.appendChild(audioEl);
-      audioEl.play().catch(() => {});
-    } catch (err) {
-      console.log('[AudioCapture] Helper audio play warning:', err.message);
-    }
-
-    // Connect to Web Audio mixer
-    try {
-      const sourceStream = new MediaStream([track]);
-      const sourceNode = this.audioCtx.createMediaStreamSource(sourceStream);
-      sourceNode.connect(this.mixerDest);
-      this.sources.add(sourceNode); // Prevent garbage collection
-      console.log(\`[AudioCapture] Successfully connected track \${track.id} to mixer\`);
-    } catch (err) {
-      console.error(\`[AudioCapture] Failed to connect track \${track.id} to mixer:\`, err.message);
+  discoverMediaElements() {
+    for (const el of this.findMediaElements()) {
+      const stream = el.srcObject;
+      if (stream && !this.connectedStreamIds.has(stream.id)) {
+        this.connectStream(stream);
+      }
     }
   },
 
-  async readLoop() {
-    console.log('[AudioCapture] Starting readLoop...');
-    let frameCount = 0;
+  async connectStream(stream) {
+    if (!stream) return;
+    const streamId = stream.id;
+    if (!streamId || this.connectedStreamIds.has(streamId)) return;
+
+    const channel = this.freedChannels.length > 0 ? this.freedChannels.shift() : this.nextChannel++;
+    this.connectedStreamIds.add(streamId);
+    this.channelByStream.set(streamId, channel);
+    this.channelToStream.set(channel, streamId);
+
     try {
-      while (this.isRunning) {
-        const { done, value } = await this.reader.read();
-        if (done) {
-          console.log('[AudioCapture] readLoop done');
-          break;
+      const ctx = new AudioContext({ sampleRate: this.targetRate });
+      // Chrome's autoplay policy can create the context SUSPENDED (no user gesture)
+      // → the worklet never runs → zero PCM. Resume it explicitly.
+      await ctx.resume().catch(() => {});
+      await ctx.audioWorklet.addModule(this.workletUrl);
+      const sourceNode = ctx.createMediaStreamSource(stream);
+      const workletNode = new AudioWorkletNode(ctx, 'pcm-capture');
+
+      workletNode.port.onmessage = (e) => {
+        if (!this.isRunning) return;
+        const pcm = e.data; // Float32Array @ 16kHz, 128 frames
+        let peak = 0;
+        for (let i = 0; i < pcm.length; i++) {
+          const a = Math.abs(pcm[i]);
+          if (a > peak) peak = a;
         }
 
-        frameCount++;
-        if (frameCount % 100 === 0) {
-          console.log(\`[AudioCapture] Received \${frameCount} mixed audio frames\`);
+        // Silence gate with hold-open: keep the channel streaming for a while after
+        // its last voice so quiet frames don't fragment a speaking turn, but a
+        // channel that has never spoken (or went quiet long ago) costs nothing.
+        const now = Date.now();
+        const lastVoice = this.streamLastVoice.get(streamId) || 0;
+        if (peak > this.silenceThreshold) this.streamLastVoice.set(streamId, now);
+        if (peak <= this.silenceThreshold && now - lastVoice > this.holdOpenMs) return;
+
+        const i16 = new Int16Array(pcm.length);
+        for (let i = 0; i < pcm.length; i++) {
+          const s = Math.max(-1, Math.min(1, pcm[i]));
+          i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
 
-        if (value instanceof AudioData) {
-          try {
-            const format = value.format;
-            const size = value.allocationSize({ planeIndex: 0 });
-            const arrayBuffer = new ArrayBuffer(size);
-            value.copyTo(arrayBuffer, { planeIndex: 0 });
+        this.onFrame?.({
+          channel,
+          timestamp: now,
+          sampleRate: this.targetRate,
+          numberOfFrames: i16.length,
+          numberOfChannels: 1,
+          data: Array.from(i16),
+          peak
+        });
+      };
 
-            let samples;
-            if (format.startsWith('f32')) {
-              const f32 = new Float32Array(arrayBuffer);
-              samples = new Int16Array(f32.length);
-              for (let i = 0; i < f32.length; i++) {
-                const s = Math.max(-1, Math.min(1, f32[i]));
-                samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-              }
-            } else {
-              samples = new Int16Array(arrayBuffer);
-            }
+      sourceNode.connect(workletNode);
+      workletNode.connect(ctx.destination);
 
-            let finalSamples = samples;
-            const incomingRate = value.sampleRate;
-            const targetRate = 16000;
-            if (incomingRate !== targetRate) {
-              const ratio = incomingRate / targetRate;
-              const newLength = Math.round(samples.length / ratio);
-              const resampled = new Int16Array(newLength);
-              for (let i = 0; i < newLength; i++) {
-                const pos = i * ratio;
-                const idx = Math.floor(pos);
-                const nextIdx = Math.min(samples.length - 1, idx + 1);
-                const weight = pos - idx;
-                resampled[i] = Math.round(samples[idx] * (1 - weight) + samples[nextIdx] * weight);
-              }
-              finalSamples = resampled;
-            }
+      this.contexts.set(streamId, { ctx, sourceNode, workletNode });
+      console.log('[AudioCapture] Connected stream ' + streamId.substring(0, 8) + ' -> channel ' + channel);
 
-            this.onFrame?.({
-              timestamp: value.timestamp,
-              sampleRate: targetRate,
-              numberOfFrames: finalSamples.length,
-              numberOfChannels: 1,
-              data: Array.from(finalSamples)
-            });
-          } catch (copyErr) {
-            console.error('[AudioCapture] Error processing frame:', copyErr.message);
-          } finally {
-            value.close();
-          }
-        }
+      const track = stream.getAudioTracks()[0];
+      if (track) {
+        track.addEventListener('ended', () => this.disconnectStream(streamId));
       }
-    } catch (e) {
-      console.error('[AudioCapture] readLoop error:', e.message);
-      this.onError?.(e.message);
+    } catch (err) {
+      console.error('[AudioCapture] connectStream error:', err.message);
+      this.disconnectStream(streamId);
     }
+  },
+
+  disconnectStream(streamId) {
+    const rec = this.contexts.get(streamId);
+    if (rec) {
+      try { rec.workletNode.disconnect(); } catch {}
+      try { rec.sourceNode.disconnect(); } catch {}
+      try { rec.ctx.close(); } catch {}
+      this.contexts.delete(streamId);
+    }
+    const channel = this.channelByStream.get(streamId);
+    if (channel !== undefined) {
+      this.channelToStream.delete(channel);
+      if (!this.freedChannels.includes(channel)) this.freedChannels.push(channel);
+    }
+    this.channelByStream.delete(streamId);
+    this.connectedStreamIds.delete(streamId);
+    this.streamLastVoice.delete(streamId);
+    console.log('[AudioCapture] Disconnected stream ' + streamId.substring(0, 8) + ' (freed channel ' + channel + ')');
   },
 
   async findPeerConnection() {
     console.log('[AudioCapture] Finding PeerConnection. Intercepted count: ' + (window.meetPeerConnections ? window.meetPeerConnections.length : 0));
-    
+
     if (window.meetPeerConnections && window.meetPeerConnections.length > 0) {
       for (let i = 0; i < window.meetPeerConnections.length; i++) {
         const pc = window.meetPeerConnections[i];
         try {
           const receivers = pc.getReceivers();
           const audioTracks = receivers.map(r => r.track).filter(t => t);
-          console.log(\`[AudioCapture] Intercepted PC index \${i}: signalingState=\${pc.signalingState}, connectionState=\${pc.connectionState}, iceConnectionState=\${pc.iceConnectionState}, audioTracksCount=\${audioTracks.length}\`);
-          
-          for (let j = 0; j < audioTracks.length; j++) {
-            const t = audioTracks[j];
-            console.log(\`[AudioCapture]   - Track \${j}: id=\${t.id}, kind=\${t.kind}, enabled=\${t.enabled}, readyState=\${t.readyState}\`);
-          }
+          console.log('[AudioCapture] Intercepted PC index ' + i + ': signalingState=' + pc.signalingState + ', connectionState=' + pc.connectionState + ', audioTracksCount=' + audioTracks.length);
 
           if (pc.signalingState !== 'closed' && audioTracks.some(t => t.kind === 'audio' && t.readyState === 'live')) {
-            console.log(\`[AudioCapture] Selecting intercepted PC index \${i} as active connection\`);
+            console.log('[AudioCapture] Selecting intercepted PC index ' + i + ' as active connection');
             return pc;
           }
         } catch (err) {
@@ -240,7 +262,7 @@ window.audioCapture = {
       'peerConnection', 'pc', 'rtcPeerConnection', 'webRTCPeerConnection',
       'googleMeetPc', 'meetPeerConnection', 'connection'
     ];
-    
+
     for (const key of candidates) {
       try {
         const obj = window[key];
@@ -275,22 +297,20 @@ window.audioCapture = {
   stop() {
     console.log('[AudioCapture] Stopping audio capture...');
     this.isRunning = false;
-    this.reader?.releaseLock();
-    this.processor = null;
-    this.reader = null;
-
-    for (const sourceNode of this.sources) {
-      try {
-        sourceNode.disconnect();
-      } catch {}
+    if (this.rescanTimer) {
+      clearInterval(this.rescanTimer);
+      this.rescanTimer = null;
     }
-    this.sources.clear();
-
-    if (this.audioCtx) {
-      this.audioCtx.close();
-      this.audioCtx = null;
+    for (const streamId of Array.from(this.contexts.keys())) {
+      this.disconnectStream(streamId);
     }
-    this.mixerDest = null;
+    this.nextChannel = 0;
+    this.freedChannels = [];
+    if (this.workletUrl) {
+      URL.revokeObjectURL(this.workletUrl);
+      this.workletUrl = null;
+    }
+    console.log('[AudioCapture] Per-channel capture stopped');
   }
 };
 `;
@@ -308,7 +328,7 @@ export class AudioCapture {
   }
 
   async start() {
-    return await this.page.evaluate(() => 
+    return await this.page.evaluate(() =>
       window.audioCapture.start(
         (frame) => window.onAudioFrame(frame),
         (err) => window.onAudioError(err)

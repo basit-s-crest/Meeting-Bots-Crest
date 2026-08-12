@@ -791,7 +791,9 @@ function broadcastToClients(sessionId, type, data) {
     sessionTranscripts.get(sessionId).push({
       speaker: data.speaker || 'Unknown',
       text: data.text.trim(),
-      timestamp: data.timestamp || new Date().toISOString()
+      timestamp: data.timestamp || new Date().toISOString(),
+      channel: data.channel,
+      segmentId: data.segmentId
     });
   }
 
@@ -1764,36 +1766,41 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
       // Set stable projectId for transcript routing
       sessionProjectIds.set(sessionId, projectId);
 
-      // Initialize Deepgram Proxy connection
-      dgProxy.initializeSession(sessionId, {
-        apiKey: DEEPGRAM_API_KEY,
-        onTranscript: (event) => {
-          // Send to UI clients
-          broadcastToClients(sessionId, 'transcript', event);
-          // Write to local jsonl file if final
-          if (event.isFinal) {
-            logStream.write(JSON.stringify(event) + '\n');
+      // Zoom: speaker info is embedded in chunks (no per-channel streams), so open
+      // the single Deepgram stream eagerly at WS-open.
+      // Google Meet: streams are lazy-initialized PER CHANNEL on first audio (see
+      // the message handler), so no eager socket here.
+      if (botType === 'zoom') {
+        dgProxy.initializeSession(sessionId, {
+          apiKey: DEEPGRAM_API_KEY,
+          onTranscript: (event) => {
+            // Send to UI clients
+            broadcastToClients(sessionId, 'transcript', event);
+            // Write to local jsonl file if final
+            if (event.isFinal) {
+              logStream.write(JSON.stringify(event) + '\n');
+            }
+            // Push to memory service for cross-meeting search (Supabase)
+            if (event.isFinal) {
+              // Use stable sessionProjectIds map — survives activeSessions cleanup on bot exit
+              const currentProjectId = sessionProjectIds.get(sessionId) || projectId;
+              ingestSegment(sessionId, {
+                speaker: event.speaker,
+                text: event.text,
+                startTs: 0,
+                endTs: 0,
+                isFinal: true,
+                projectId: currentProjectId,
+              });
+              // Feed the live scheduling-intent detector.
+              liveSchedulingDetector.ingest(sessionId, event);
+            }
+          },
+          onError: (err) => {
+            console.error(`[Server][Deepgram][${sessionId}] Error:`, err.message);
           }
-          // Push to memory service for cross-meeting search (Supabase)
-          if (event.isFinal) {
-            // Use stable sessionProjectIds map — survives activeSessions cleanup on bot exit
-            const currentProjectId = sessionProjectIds.get(sessionId) || projectId;
-            ingestSegment(sessionId, {
-              speaker: event.speaker,
-              text: event.text,
-              startTs: 0,
-              endTs: 0,
-              isFinal: true,
-              projectId: currentProjectId,
-            });
-            // Feed the live scheduling-intent detector.
-            liveSchedulingDetector.ingest(sessionId, event);
-          }
-        },
-        onError: (err) => {
-          console.error(`[Server][Deepgram][${sessionId}] Error:`, err.message);
-        }
-      });
+        });
+      }
     });
 
     botSocket.on('message', (data) => {
@@ -1822,7 +1829,19 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
           broadcastToClients(sessionId, 'visualizer', { rms, speaker: msg.speaker });
 
         } else {
-          // ── Google Meet path: speaker_event messages are ground truth ──
+          // ── Google Meet path: per-channel audio + channel↔speaker bindings ──
+          // Each participant's audio rides its own channel; the backend opens one
+          // Deepgram stream per channel and attributes by the bound name (identity
+          // carried at capture — no laggy cross-speaker time-matching).
+          if (msg.type === 'channel_speaker_event') {
+            dgProxy.logChannelSpeakerBoundary(sessionId, {
+              channel: msg.channel,
+              speaker: msg.speaker,
+              timestamp: msg.timestamp_ts
+            });
+            return;
+          }
+
           if (msg.type === 'speaker_event') {
             dgProxy.logSpeakerBoundary(sessionId, {
               timestamp: msg.timestamp_ts,
@@ -1840,14 +1859,47 @@ function connectToBotAudioStream(sessionId, wsPort, botType, projectId) {
           }
 
           const chunk = msg;
+          const channel = typeof chunk.channel === 'number' ? chunk.channel : 0;
 
-          // Anchor the binder's timeline to the FIRST audio chunk's start_ts
+          // Lazy-init the per-channel Deepgram stream the first time we see audio
+          // for this channel.
           if (typeof chunk.start_ts === 'number') {
-            dgProxy.logStreamStart(sessionId, chunk.start_ts);
+            dgProxy.logStreamStart(sessionId, channel, chunk.start_ts);
+          }
+          if (!dgProxy.channelInitialized(sessionId, channel)) {
+            dgProxy.initializeChannel(sessionId, channel, {
+              apiKey: DEEPGRAM_API_KEY,
+              onTranscript: (event) => {
+                // Send to UI clients
+                broadcastToClients(sessionId, 'transcript', event);
+                // Write to local jsonl file if final
+                if (event.isFinal) {
+                  logStream.write(JSON.stringify(event) + '\n');
+                }
+                // Push to memory service for cross-meeting search (Supabase)
+                if (event.isFinal) {
+                  // Use stable sessionProjectIds map — survives activeSessions cleanup on bot exit
+                  const currentProjectId = sessionProjectIds.get(sessionId) || projectId;
+                  ingestSegment(sessionId, {
+                    speaker: event.speaker,
+                    text: event.text,
+                    startTs: 0,
+                    endTs: 0,
+                    isFinal: true,
+                    projectId: currentProjectId,
+                  });
+                  // Feed the live scheduling-intent detector.
+                  liveSchedulingDetector.ingest(sessionId, event);
+                }
+              },
+              onError: (err) => {
+                console.error(`[Server][Deepgram][${sessionId}] Error:`, err.message);
+              }
+            });
           }
 
           const audioBuffer = Buffer.from(chunk.audio_base64, 'base64');
-          dgProxy.sendAudio(sessionId, audioBuffer);
+          dgProxy.sendAudio(sessionId, channel, audioBuffer);
 
           // Bubble up raw audio energy levels for frontend visualization
           const pcmSamples = new Int16Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.byteLength / 2);
@@ -1932,7 +1984,9 @@ wss.on('connection', (ws, request) => {
         speaker: line.speaker || 'Unknown',
         text: line.text || '',
         isFinal: true,
-        timestamp: line.timestamp || new Date().toISOString()
+        timestamp: line.timestamp || new Date().toISOString(),
+        channel: line.channel,
+        segmentId: line.segmentId
       }
     }));
   }

@@ -71,9 +71,10 @@ export class ChunkOutput {
     const message = JSON.stringify({
       type: 'audio_chunk',
       chunk_id: chunk.chunk_id,
+      channel: chunk.channel ?? 0, // stable per-participant channel (the attribution key)
       start_ts: chunk.start_ts,
       end_ts: chunk.end_ts,
-      speaker: chunk.speaker, // rough fallback only — NOT ground truth, see speaker_event
+      speaker: chunk.speaker, // rough fallback only — NOT ground truth, see channel_speaker_event / speaker_event
       sample_rate: chunk.sample_rate,
       channels: chunk.channels,
       format: chunk.format,
@@ -116,6 +117,32 @@ export class ChunkOutput {
         }
       } catch (err) {
         console.error('[ChunkOutput] Error sending speaker_event:', err.message);
+      }
+    }
+  }
+
+  /**
+   * Broadcasts a precise channel↔speaker binding the moment the correlation
+   * resolves a change. This is the GROUND TRUTH the backend should use for
+   * per-channel attribution — each Deepgram stream belongs to one channel, so
+   * identity is carried at capture instead of time-matched.
+   */
+  sendChannelSpeakerEvent({ channel, speaker, timestamp }) {
+    const message = JSON.stringify({
+      type: 'channel_speaker_event',
+      channel,
+      speaker,
+      timestamp_ts: timestamp / 1000, // epoch seconds, same unit as chunk start_ts/end_ts
+    });
+
+    console.log(`[ChunkOutput] Streaming channel_speaker_event ch${channel} -> "${speaker}" to ${this.clients.size} connected client(s)`);
+    for (const client of this.clients) {
+      try {
+        if (client.readyState === WebSocket.OPEN || client.readyState === 1) {
+          client.send(message);
+        }
+      } catch (err) {
+        console.error('[ChunkOutput] Error sending channel_speaker_event:', err.message);
       }
     }
   }
@@ -168,6 +195,10 @@ export class CallbackOutput {
 
   sendSpeakerEvent(event) {
     this.callback({ type: 'speaker_event', ...event });
+  }
+
+  sendChannelSpeakerEvent(event) {
+    this.callback({ type: 'channel_speaker_event', ...event });
   }
 
   sendRosterEvent(names) {

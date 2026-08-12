@@ -1,47 +1,42 @@
 import WebSocket from 'ws';
 
 // ---------------------------------------------------------------------------
-// SpeakerBinder — maps Deepgram transcript timestamps to speaker names using a
-// Vexa ClusterNameBinder-style approach (overlap-window match + recency
-// tie-break + lag correction + flicker debounce + provisional publish).
+// Per-channel Deepgram proxy for Google Meet.
 //
-// Why this replaces the old mapTimeToSpeaker point-lookup: Deepgram has 1-3s
-// of processing latency, so a transcript's `start` timestamp can land AFTER the
-// speaker boundary that produced it. A point-in-window lookup plus the old
-// "prefer upcoming speaker" bias let the PREVIOUS speaker's last words leak into
-// the NEXT speaker's block. This binder instead overlaps each hint turn against
-// the transcript's audio span and, on a near-tie, gives the MORE RECENT speaker
-// priority — the inverse of the old bias.
+// The Google Meet bot now captures each participant's audio on its OWN channel
+// (per-receiver AudioContext → 16kHz PCM) and binds channel↔speaker at capture
+// (channel_speaker_event). This proxy opens ONE Deepgram stream PER CHANNEL and
+// attributes each stream's transcripts by its channel's bound name — identity is
+// CARRIED at capture, so a new speaker's first words ride their own channel and
+// can never land in the previous speaker's block.
+//
+// The previous single-mixed-stream path (SpeakerBinder + laggy DOM hint matching)
+// remains as a fallback: if a session never sends channel bindings, we fall back
+// to one stream on channel 0 that uses the SpeakerBinder against speaker_event
+// hints — the exact behavior that shipped before.
 // ---------------------------------------------------------------------------
 
 // All binder time math is in EPOCH SECONDS, matching the bot's speaker_event
 // `timestamp_ts` (epoch seconds) and Deepgram's `response.start` (seconds from
 // stream start). Anchoring both to the bot's clock (via the first speaker_event)
-// keeps them on one timebase — mixing in Date.now() (server clock) was what made
-// hint turns and transcript windows never overlap.
-const HINT_LAG_S = 0.25;           // KUNJSe/DOM active-speaker hint ≈ dom-active; measure live
+// keeps them on one timebase.
+const HINT_LAG_S = 0.25;           // DOM active-speaker hint latency (s)
 const RECENCY_TIE_S = 1.0;         // near-tie → more recent hint wins
 const FLICKER_MIN_S = 1.0;         // ignore hint turns shorter than this
-const OPEN_TURN_GRACE_S = 4.0;      // open turn decays so new speaker wins
+const OPEN_TURN_GRACE_S = 4.0;     // open turn decays so new speaker wins
 const HINT_SUPPORT_SLACK_S = 0.5;  // slack added when measuring support
-const MIN_MATCH_COVERAGE = 0.35;    // hint must cover ≥35% of commit span
-const MIN_MATCH_SUPPORT_S = 0.45;    // and ≥0.45s of support to name a turn
-const MIN_MATCH_CONFIDENCE = 0.6;   // and ≥0.6 overlap-share confidence
-const HINT_LOG_LIMIT = 2000;        // max retained hint turns
+const MIN_MATCH_COVERAGE = 0.35;   // hint must cover ≥35% of commit span
+const MIN_MATCH_SUPPORT_S = 0.45;  // and ≥0.45s of support to name a turn
+const MIN_MATCH_CONFIDENCE = 0.6;  // and ≥0.6 overlap-share confidence
+const HINT_LOG_LIMIT = 2000;       // max retained hint turns
 
 class SpeakerBinder {
   constructor() {
-    /** @type {Array<{name: string, tStartMs: number, tEndMs?: number}>} */
+    /** @type {Array<{name: string, tStartSec: number, tEndSec?: number}>} */
     this.turns = [];
     this.firstChunkTs = null;
   }
 
-  /**
-   * Record a speaker-boundary hint (from logSpeakerBoundary). The hint timestamp
-   * is wall-clock ms; we lag-correct it back to the actual audio time, then close
-   * the previously-open turn for that speaker and open a fresh one. Other speakers'
-   * open turns are left untouched (concurrent speakers are possible).
-   */
   recordHint(speaker, tSec) {
     const t = tSec - HINT_LAG_S;
     for (let i = this.turns.length - 1; i >= 0; i--) {
@@ -57,12 +52,6 @@ class SpeakerBinder {
     }
   }
 
-  /**
-   * Resolve a Deepgram result to a speaker name.
-   * @param {number} absoluteStartSec - epoch seconds corresponding to response.start
-   * @param {number} absoluteEndSec - epoch seconds corresponding to response.end (or estimate)
-   * @returns {{ name: string|null, confidence: number }}
-   */
   resolve(absoluteStartSec, absoluteEndSec) {
     if (this.firstChunkTs === null || this.turns.length === 0) {
       return { name: null, confidence: 0 };
@@ -79,7 +68,6 @@ class SpeakerBinder {
     let totalSupportSec = 0;
 
     for (const turn of this.turns) {
-      // FLICKER DEBOUNCE: skip closed turns shorter than FLICKER_MIN_S (transient blips).
       if (turn.tEndSec !== undefined && turn.tEndSec - turn.tStartSec < FLICKER_MIN_S) continue;
       const turnEnd = turn.tEndSec !== undefined ? turn.tEndSec : turn.tStartSec + OPEN_TURN_GRACE_S;
 
@@ -98,9 +86,6 @@ class SpeakerBinder {
 
     if (agg.size === 0) return { name: null, confidence: 0 };
 
-    // Most overlap wins; on a near-tie (within RECENCY_TIE_S) the MORE RECENT
-    // hint wins — so a previous speaker's still-open turn can't out-vote the speaker
-    // who actually just started.
     let best = null;
     for (const [name, a] of agg) {
       if (!best) { best = { name, ...a }; continue; }
@@ -121,303 +106,315 @@ class SpeakerBinder {
   }
 }
 
+const DG_URL = 'wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=16000&channels=1&interim_results=true&smart_format=true&endpointing=100';
+
 class DeepgramProxy {
   constructor() {
-    this.activeProxies = new Map(); // sessionId -> { wsConnection, firstChunkTs, chunkHistory, keepAliveInterval }
+    /** @type {Map<string, { channels: Map<number, object> }>} sessionId -> { channels } */
+    this.activeProxies = new Map();
   }
 
-  /**
-   * Initialize a Deepgram streaming connection for a bot session.
-   */
-  initializeSession(sessionId, { apiKey, onTranscript, onError }) {
-    if (this.activeProxies.has(sessionId)) {
-      this.closeSession(sessionId);
-    }
-
-    const url = 'wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=16000&channels=1&interim_results=true&smart_format=true&endpointing=100';
-    console.log(`[DeepgramProxy] Connecting to Deepgram WebSocket for session ${sessionId}...`);
-
-    const headers = {
-      'Authorization': `Token ${apiKey}`
-    };
-
-    const dgSocket = new WebSocket(url, { headers });
-
-    const proxyState = {
-      wsConnection: dgSocket,
+  _newChannelState(sessionId, channel, onTranscript, onError) {
+    return {
+      channel,
+      wsConnection: null,
+      isReconnecting: false,
+      config: null,
       binder: new SpeakerBinder(),
       segmentId: 0,
-      currentSegment: null, // { segmentId, isFinal, lastSpeaker } — in-progress utterance
-      lastResolvedSpeaker: null, // continuity fallback for provisional segments
+      currentSegment: null, // { segmentId, isFinal, lastSpeaker }
+      lastResolvedSpeaker: null,
+      lastChannelSpeaker: null,
       keepAliveInterval: null,
-      config: { apiKey, onTranscript, onError },
       onTranscript,
       onError
     };
+  }
 
-    this.activeProxies.set(sessionId, proxyState);
+  _ensureSession(sessionId, onTranscript, onError) {
+    let entry = this.activeProxies.get(sessionId);
+    if (!entry) {
+      entry = { channels: new Map() };
+      this.activeProxies.set(sessionId, entry);
+    }
+    // Attach callbacks to the session for late channel creation.
+    entry.onTranscript = onTranscript;
+    entry.onError = onError;
+    return entry;
+  }
+
+  /**
+   * Initialize the Deepgram WebSocket for a (session, channel) pair.
+   * Each channel gets its own stream so transcripts are attributed by channel.
+   */
+  initializeChannel(sessionId, channel, { apiKey, onTranscript, onError }) {
+    const entry = this._ensureSession(sessionId, onTranscript, onError);
+    const existing = entry.channels.get(channel);
+    if (existing) {
+      this.closeChannel(sessionId, channel);
+    }
+
+    const state = this._newChannelState(sessionId, channel, onTranscript, onError);
+    state.config = { apiKey, onTranscript, onError };
+    console.log(`[DeepgramProxy][${sessionId}] Connecting Deepgram WebSocket for channel ${channel}...`);
+
+    const dgSocket = this._openSocket(sessionId, state, channel);
+    state.wsConnection = dgSocket;
+    entry.channels.set(channel, state);
+  }
+
+  _openSocket(sessionId, state, channel) {
+    const dgSocket = new WebSocket(DG_URL, { headers: { 'Authorization': `Token ${state.config.apiKey}` } });
 
     dgSocket.on('open', () => {
-      console.log(`[DeepgramProxy] Connected to Deepgram for session ${sessionId}`);
-
-      // Start keepalive ping loop every 3 seconds to prevent Deepgram idle timeout (10s limit)
-      proxyState.keepAliveInterval = setInterval(() => {
+      console.log(`[DeepgramProxy][${sessionId}] Connected to Deepgram for channel ${channel}`);
+      state.isReconnecting = false;
+      // Keepalive ping loop every 3s prevents Deepgram's idle timeout (10s limit) —
+      // this is what keeps a 5-min silence from closing the connection.
+      if (state.keepAliveInterval) clearInterval(state.keepAliveInterval);
+      state.keepAliveInterval = setInterval(() => {
         if (dgSocket.readyState === WebSocket.OPEN) {
           dgSocket.send(JSON.stringify({ type: 'KeepAlive' }));
         }
       }, 3000);
     });
 
-    dgSocket.on('message', (message) => {
-      try {
-        const response = JSON.parse(message.toString());
-
-        // Deepgram sends metadata and KeepAlive responses which we can filter out
-        if (response.type === 'Metadata' || response.type === 'KeepAlive') {
-          return;
-        }
-
-        const channel = response.channel;
-        if (!channel) return;
-
-        const alternative = channel.alternatives?.[0];
-        const transcript = alternative?.transcript;
-
-        if (transcript && transcript.trim().length > 0) {
-          const isFinal = response.is_final || response.speech_final;
-          const relativeStart = response.start;            // seconds from stream start
-          const relativeEnd = response.end ?? relativeStart; // seconds; DG omits end on partials
-
-          const binder = proxyState.binder;
-          const absoluteStartSec = binder.firstChunkTs + relativeStart;
-          // Pad partial/interim ends slightly so the window isn't a zero-width point.
-          const endPadSec = response.end !== undefined ? 0 : (isFinal ? 0 : 0.3);
-          const absoluteEndSec = binder.firstChunkTs + relativeEnd + endPadSec;
-
-          const resolved = binder.resolve(absoluteStartSec, absoluteEndSec);
-          const resolvedName = resolved.name; // null until confidently matched
-
-          // Continuity fallback: if the binder can't confidently name THIS segment yet
-          // but we've already resolved a speaker earlier in the call, inherit that
-          // name instead of emitting a bare "speaker_N". Avoids provisional sprawl
-          // during brief hint gaps while still letting a later resolve repaint.
-          const speakerName = resolvedName || proxyState.lastResolvedSpeaker;
-          const provisional = resolvedName === null && proxyState.lastResolvedSpeaker === null;
-          if (resolvedName) proxyState.lastResolvedSpeaker = resolvedName;
-
-          // Segment lifecycle: one stable segmentId per finalized utterance. Interim
-          // (non-final) results for the SAME in-progress utterance reuse the current
-          // segmentId so the frontend repaints in place instead of spawning a new
-          // block per partial. A final result closes the current segment and the next
-          // transcript (interim or final) opens a fresh one.
-          let seg = proxyState.currentSegment;
-          if (!seg || seg.isFinal) {
-            const segmentId = ++proxyState.segmentId;
-            seg = { segmentId, isFinal: false, lastSpeaker: null };
-            proxyState.currentSegment = seg;
-          }
-          seg.isFinal = isFinal;
-
-          // Emit under the stable segmentId; the frontend repaints in place.
-          const speaker = speakerName || `speaker_${seg.segmentId}`;
-          seg.lastSpeaker = speaker;
-
-          onTranscript({
-            segmentId: seg.segmentId,
-            speaker,
-            provisional,
-            text: transcript.trim(),
-            timestamp: new Date().toISOString(),
-            isFinal
-          });
-        }
-      } catch (err) {
-        console.error(`[DeepgramProxy][${sessionId}] Error processing message:`, err.message);
-      }
-    });
+    dgSocket.on('message', (message) => this._onMessage(sessionId, state, channel, message));
 
     dgSocket.on('close', (code, reason) => {
-      console.log(`[DeepgramProxy][${sessionId}] Connection closed: Code ${code}, Reason: ${reason}`);
-      this.cleanupSession(sessionId);
+      console.log(`[DeepgramProxy][${sessionId}] Channel ${channel} connection closed: Code ${code}, Reason: ${reason}`);
+      state.isReconnecting = false;
+      this.cleanupChannel(sessionId, channel);
     });
 
     dgSocket.on('error', (err) => {
-      console.error(`[DeepgramProxy][${sessionId}] WebSocket error:`, err.message);
-      if (onError) onError(err);
-      this.cleanupSession(sessionId);
+      console.error(`[DeepgramProxy][${sessionId}] Channel ${channel} WebSocket error:`, err.message);
+      if (state.config.onError) state.config.onError(err);
+      state.isReconnecting = false;
+      this.cleanupChannel(sessionId, channel);
     });
+
+    return dgSocket;
   }
 
-  /**
-   * Anchor the binder's timeline to the first audio chunk's start_ts (bot epoch
-   * seconds at stream start). This is the shared base for Deepgram's response.start
-   * (seconds from stream start) and speaker_event.timestamp_ts — anchoring here
-   * (rather than on the first speaker_event, which can arrive many seconds in)
-   * is what makes hint turns and transcript windows overlap.
-   */
-  logStreamStart(sessionId, startTsSec) {
-    const proxy = this.activeProxies.get(sessionId);
-    if (!proxy) return;
-    const binder = proxy.binder;
-    if (binder.firstChunkTs === null) {
-      binder.firstChunkTs = startTsSec;
-      console.log(`[DeepgramProxy][${sessionId}] Anchored stream epoch (from audio chunk): ${startTsSec}`);
+  _onMessage(sessionId, state, channel, message) {
+    try {
+      const response = JSON.parse(message.toString());
+      if (response.type === 'Metadata' || response.type === 'KeepAlive') return;
+      const channel_ = response.channel;
+      if (!channel_) return;
+      const alternative = channel_.alternatives?.[0];
+      const transcript = alternative?.transcript;
+
+      if (transcript && transcript.trim().length > 0) {
+        const isFinal = response.is_final || response.speech_final;
+        const relativeStart = response.start;
+        const relativeEnd = response.end ?? relativeStart;
+
+        const binder = state.binder;
+        const absoluteStartSec = (binder.firstChunkTs ?? (Date.now() / 1000)) + relativeStart;
+        const endPadSec = response.end !== undefined ? 0 : (isFinal ? 0 : 0.3);
+        const absoluteEndSec = (binder.firstChunkTs ?? (Date.now() / 1000)) + relativeEnd + endPadSec;
+
+        // PRIMARY: the channel's bound name (carried at capture). FALLBACK: if
+        // the binder can't resolve yet (no channel binding arrived), use the
+        // SpeakerBinder + legacy hints.
+        let speakerName = state.lastChannelSpeaker;
+        let provisional = !speakerName;
+
+        if (!speakerName) {
+          const resolved = binder.resolve(absoluteStartSec, absoluteEndSec);
+          const resolvedName = resolved.name;
+          speakerName = resolvedName || state.lastResolvedSpeaker;
+          provisional = !speakerName;
+          if (resolvedName) state.lastResolvedSpeaker = resolvedName;
+        }
+
+        let seg = state.currentSegment;
+        if (!seg || seg.isFinal) {
+          const segmentId = ++state.segmentId;
+          seg = { segmentId, isFinal: false, lastSpeaker: null };
+          state.currentSegment = seg;
+        }
+        seg.isFinal = isFinal;
+        const speaker = speakerName || `speaker_${seg.segmentId}`;
+        seg.lastSpeaker = speaker;
+
+        state.config.onTranscript({
+          segmentId: seg.segmentId,
+          channel,
+          speaker,
+          provisional,
+          text: transcript.trim(),
+          timestamp: new Date().toISOString(),
+          isFinal
+        });
+      }
+    } catch (err) {
+      console.error(`[DeepgramProxy][${sessionId}] Error processing message:`, err.message);
     }
   }
 
   /**
-   * Log a precise speaker-turn boundary (from the bot's speaker_event message).
-   * Feeds the SpeakerBinder as a lag-corrected hint turn. This is the ground-truth
-   * path — it closes the previous speaker's open turn at the exact moment the new
-   * speaker was detected. `timestamp` is bot epoch seconds.
-   * Only sets the timeline anchor if no audio chunk has anchored us yet.
+   * Reconnect a channel's Deepgram socket. Called from sendAudio when the socket
+   * isn't OPEN — restores the original auto-reconnect behavior that a hard socket
+   * drop (network blip, Deepgram-side close) would otherwise turn into silent
+   * audio loss.
    */
-  logSpeakerBoundary(sessionId, { timestamp, speaker }) {
-    const proxy = this.activeProxies.get(sessionId);
-    if (!proxy) return;
+  reconnectChannel(sessionId, state, channel) {
+    if (state.isReconnecting) return;
+    state.isReconnecting = true;
 
-    const binder = proxy.binder;
+    try {
+      const dgSocket = this._openSocket(sessionId, state, channel);
+      state.wsConnection = dgSocket;
+      // Keep the channel registered (cleanup on close/error already handles teardown).
+      const entry = this.activeProxies.get(sessionId);
+      if (entry) entry.channels.set(channel, state);
+    } catch (e) {
+      state.isReconnecting = false;
+    }
+  }
+
+  /**
+   * Whether a Deepgram stream already exists for the (session, channel) pair.
+   * The server lazy-inits a channel's stream on first audio.
+   */
+  channelInitialized(sessionId, channel = 0) {
+    const entry = this.activeProxies.get(sessionId);
+    if (!entry) return false;
+    const state = entry.channels.get(channel);
+    return !!(state && state.wsConnection);
+  }
+
+  /**
+   * Backward-compat entry: initialize the "session" (channel 0). Kept for callers
+   * that still use initializeSession() — the Google Meet server now calls
+   * initializeChannel() instead.
+   */
+  initializeSession(sessionId, opts) {
+    this.initializeChannel(sessionId, 0, opts);
+  }
+
+  logStreamStart(sessionId, channel = 0, startTsSec) {
+    const entry = this.activeProxies.get(sessionId);
+    if (!entry) return;
+    const state = entry.channels.get(channel);
+    if (!state) return;
+    if (state.binder.firstChunkTs === null) {
+      state.binder.firstChunkTs = startTsSec;
+      console.log(`[DeepgramProxy][${sessionId}] Anchored stream epoch (ch ${channel}) from audio chunk: ${startTsSec}`);
+    }
+  }
+
+  logSpeakerBoundary(sessionId, { timestamp, speaker }) {
+    const entry = this.activeProxies.get(sessionId);
+    if (!entry) return;
+    const state = entry.channels.get(0);
+    if (!state) return;
+    const binder = state.binder;
     if (binder.firstChunkTs === null) {
       binder.firstChunkTs = timestamp;
       console.log(`[DeepgramProxy][${sessionId}] Anchored stream epoch (from speaker_event fallback): ${timestamp}`);
     }
-
     if (speaker) {
       binder.recordHint(speaker, timestamp);
     }
   }
 
   /**
-   * Feeds raw binary audio data into the active Deepgram connection.
+   * Record a channel↔speaker binding (from channel_speaker_event). This is the
+   * per-channel ground truth: the channel's Deepgram stream is attributed to the
+   * bound name directly, no laggy cross-speaker matching.
    */
-  sendAudio(sessionId, audioBuffer) {
-    const proxy = this.activeProxies.get(sessionId);
-    if (!proxy) return;
+  logChannelSpeakerBoundary(sessionId, { channel = 0, speaker, timestamp }) {
+    const entry = this.activeProxies.get(sessionId);
+    if (!entry) return;
+    const state = entry.channels.get(channel);
+    if (!state) return;
+    if (speaker) {
+      state.lastChannelSpeaker = speaker;
+      console.log(`[DeepgramProxy][${sessionId}] Channel ${channel} speaker bound: "${speaker}"`);
+    }
+  }
 
-    const socket = proxy.wsConnection;
+  sendAudio(sessionId, channel = 0, audioBuffer) {
+    const entry = this.activeProxies.get(sessionId);
+    if (!entry) return;
+    const state = entry.channels.get(channel);
+    if (!state) return;
+
+    const socket = state.wsConnection;
     if (socket && socket.readyState === WebSocket.OPEN) {
       // Direct raw binary write
       socket.send(audioBuffer);
-    } else if (proxy.config && (!socket || socket.readyState === WebSocket.CLOSED)) {
-      console.log(`[DeepgramProxy][${sessionId}] Reconnecting Deepgram WebSocket...`);
-      this.reconnectSocket(sessionId, proxy);
+    } else if (socket && socket.readyState === WebSocket.CONNECTING) {
+      // Reconnect in flight — nothing to do, next audio will send once open.
+    } else if (state.config && (!socket || socket.readyState === WebSocket.CLOSED)) {
+      // Socket died (idle timeout / network blip / Deepgram-side close) — restore
+      // the original auto-reconnect instead of silently dropping audio.
+      console.log(`[DeepgramProxy][${sessionId}] Channel ${channel} socket not open, reconnecting...`);
+      this.reconnectChannel(sessionId, state, channel);
     }
   }
 
-  reconnectSocket(sessionId, proxy) {
-    if (proxy.isReconnecting) return;
-    proxy.isReconnecting = true;
+  closeChannel(sessionId, channel) {
+    const entry = this.activeProxies.get(sessionId);
+    if (!entry) return;
+    const state = entry.channels.get(channel);
+    if (!state) return;
 
-    try {
-      const url = 'wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=16000&channels=1&interim_results=true&smart_format=true&endpointing=100';
-      const headers = { 'Authorization': `Token ${proxy.config.apiKey}` };
-      const dgSocket = new WebSocket(url, { headers });
-      proxy.wsConnection = dgSocket;
+    console.log(`[DeepgramProxy][${sessionId}] Closing Deepgram channel ${channel}`);
 
-      dgSocket.on('open', () => {
-        console.log(`[DeepgramProxy] Reconnected to Deepgram for session ${sessionId}`);
-        proxy.isReconnecting = false;
-        if (proxy.keepAliveInterval) clearInterval(proxy.keepAliveInterval);
-        proxy.keepAliveInterval = setInterval(() => {
-          if (dgSocket.readyState === WebSocket.OPEN) {
-            dgSocket.send(JSON.stringify({ type: 'KeepAlive' }));
-          }
-        }, 3000);
-      });
-
-      dgSocket.on('message', (message) => {
-        try {
-          const response = JSON.parse(message.toString());
-          if (response.type === 'Metadata' || response.type === 'KeepAlive') return;
-          const channel = response.channel;
-          if (!channel) return;
-          const alternative = channel.alternatives?.[0];
-          const transcript = alternative?.transcript;
-
-          if (transcript && transcript.trim().length > 0) {
-            const isFinal = response.is_final || response.speech_final;
-            const relativeStart = response.start;
-            const relativeEnd = response.end ?? relativeStart;
-            const binder = proxy.binder;
-            const absoluteStartSec = (binder.firstChunkTs || (Date.now() / 1000)) + relativeStart;
-            const endPadSec = response.end !== undefined ? 0 : (isFinal ? 0 : 0.3);
-            const absoluteEndSec = (binder.firstChunkTs || (Date.now() / 1000)) + relativeEnd + endPadSec;
-
-            const resolved = binder.resolve(absoluteStartSec, absoluteEndSec);
-            const resolvedName = resolved.name;
-            const speakerName = resolvedName || proxy.lastResolvedSpeaker;
-            const provisional = resolvedName === null && proxy.lastResolvedSpeaker === null;
-            if (resolvedName) proxy.lastResolvedSpeaker = resolvedName;
-
-            let seg = proxy.currentSegment;
-            if (!seg || seg.isFinal) {
-              const segmentId = ++proxy.segmentId;
-              seg = { segmentId, isFinal: false, lastSpeaker: null };
-              proxy.currentSegment = seg;
-            }
-            seg.isFinal = isFinal;
-            const speaker = speakerName || `speaker_${seg.segmentId}`;
-            seg.lastSpeaker = speaker;
-
-            if (proxy.config.onTranscript) {
-              proxy.config.onTranscript({
-                segmentId: seg.segmentId,
-                speaker,
-                provisional,
-                text: transcript.trim(),
-                timestamp: new Date().toISOString(),
-                isFinal
-              });
-            }
-          }
-        } catch (err) {
-          console.error(`[DeepgramProxy][${sessionId}] Error processing message:`, err.message);
-        }
-      });
-
-      dgSocket.on('close', (code, reason) => {
-        console.log(`[DeepgramProxy][${sessionId}] Connection closed: Code ${code}, Reason: ${reason}`);
-        proxy.isReconnecting = false;
-      });
-
-      dgSocket.on('error', (err) => {
-        console.error(`[DeepgramProxy][${sessionId}] WebSocket error:`, err.message);
-        proxy.isReconnecting = false;
-      });
-    } catch (e) {
-      proxy.isReconnecting = false;
+    if (state.keepAliveInterval) {
+      clearInterval(state.keepAliveInterval);
+      state.keepAliveInterval = null;
     }
+    const socket = state.wsConnection;
+    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+      socket.close();
+    }
+    state.wsConnection = null;
+    entry.channels.delete(channel);
   }
 
   /**
-   * Closes the WebSocket and cleans up keepalive timers.
+   * Called when a channel's socket closes/errors unexpectedly. Unlike closeChannel,
+   * this KEEPS the channel state (binder timeline, carried speaker name, segment
+   * counter) so a later sendAudio can reconnect without losing attribution. Only
+   * clears the dead socket + keepalive.
    */
+  cleanupChannel(sessionId, channel) {
+    const entry = this.activeProxies.get(sessionId);
+    if (!entry) return;
+    const state = entry.channels.get(channel);
+    if (state) {
+      if (state.keepAliveInterval) {
+        clearInterval(state.keepAliveInterval);
+        state.keepAliveInterval = null;
+      }
+      state.wsConnection = null;
+      state.isReconnecting = false;
+    }
+  }
+
   closeSession(sessionId) {
-    const proxy = this.activeProxies.get(sessionId);
-    if (!proxy) return;
-
-    console.log(`[DeepgramProxy] Closing Deepgram session for ${sessionId}`);
-
-    if (proxy.keepAliveInterval) {
-      clearInterval(proxy.keepAliveInterval);
+    const entry = this.activeProxies.get(sessionId);
+    if (!entry) return;
+    console.log(`[DeepgramProxy] Closing all Deepgram channels for session ${sessionId}`);
+    for (const channel of Array.from(entry.channels.keys())) {
+      this.closeChannel(sessionId, channel);
     }
-
-    const socket = proxy.wsConnection;
-    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
-      socket.close();
-    }
-
     this.activeProxies.delete(sessionId);
   }
 
   cleanupSession(sessionId) {
-    const proxy = this.activeProxies.get(sessionId);
-    if (proxy) {
-      if (proxy.keepAliveInterval) {
-        clearInterval(proxy.keepAliveInterval);
-      }
-      this.activeProxies.delete(sessionId);
+    const entry = this.activeProxies.get(sessionId);
+    if (!entry) return;
+    for (const channel of Array.from(entry.channels.keys())) {
+      this.cleanupChannel(sessionId, channel);
     }
+    this.activeProxies.delete(sessionId);
   }
 }
 
