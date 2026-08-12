@@ -425,38 +425,24 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
 
           setLiveLines(prev => {
             const trimmed = text.trim();
+            const lastIdx = prev.length - 1;
+            const lastBlock = lastIdx >= 0 ? prev[lastIdx] : null;
 
-            // ── Find the box this utterance belongs to ─────────────────────────
-            // 1. By channel: the stable per-participant id. All of one speaker's
-            //    turns (even re-appearing later) accumulate into ONE box.
-            // 2. Fallback: by speaker name equality on the LAST box (Teams/Zoom,
-            //    or pre-channel events).
-            // 3. Also match a box whose RESOLVED name equals this speaker even if
-            //    this event is provisional — so a late-resolved name self-corrects
-            //    the same box rather than spawning a duplicate.
-            let idx = -1;
-            if (channel !== undefined) {
-              idx = prev.findIndex(b => b.channel === channel);
-            }
-            if (idx === -1) {
-              // Scan from the end: an exact speaker-name match is a continuation
-              // even if a different channel box was created in between.
-              for (let i = prev.length - 1; i >= 0; i--) {
-                if (prev[i].speaker === speaker) { idx = i; break; }
-              }
-            }
-            if (idx === -1) {
-              // Provisional event whose resolved name exists on an earlier box.
-              const lastIdx = prev.length - 1;
-              const lastBlock = lastIdx >= 0 ? prev[lastIdx] : null;
-              if (provisional && lastBlock && !lastBlock.provisional && lastBlock.speaker !== "Unknown") {
-                idx = lastIdx;
-              }
-            }
+            // ── Fireflies-style TURN boxes ────────────────────────────────────
+            // Each speaker change starts a NEW box. Consecutive utterances from
+            // the SAME speaker (same turn) append to the CURRENT (last) box —
+            // including interim→final progression.
+            // Identity for "same speaker": the stable per-participant channel id
+            // when present, else the speaker name (Teams/Zoom).
+            const sameTurn =
+              lastBlock &&
+              (channel !== undefined
+                ? lastBlock.channel === channel
+                : lastBlock.speaker === speaker);
 
-            if (idx !== -1) {
+            if (sameTurn) {
               const updated = [...prev];
-              const currentBlock = { ...updated[idx] };
+              const currentBlock = { ...updated[lastIdx] };
               currentBlock.speaker = speaker;
               currentBlock.provisional = provisional;
               currentBlock.isFinal = isFinal;
@@ -487,11 +473,11 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
                 : currentBlock.committedText;
               // Keep the resolved segmentId so later repaints land on this box.
               if (segmentId != null) currentBlock.segmentId = segmentId;
-              updated[idx] = currentBlock;
+              updated[lastIdx] = currentBlock;
               return updated;
             }
 
-            // No matching box — start a new one.
+            // Speaker changed (or first box) — start a NEW turn box.
             const newBlock: TranscriptLine = {
               segmentId: segmentId ?? prev.length,
               channel,

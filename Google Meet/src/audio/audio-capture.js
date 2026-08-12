@@ -52,11 +52,11 @@ window.audioCapture = {
   silenceThreshold: 0.005,
   holdOpenMs: 2000,
   isRunning: false,
-  contexts: new Map(),            // streamId -> { ctx, sourceNode, workletNode }
-  connectedStreamIds: new Set(),  // streamId -> true
-  channelByStream: new Map(),     // streamId -> channel index
-  channelToStream: new Map(),     // channel index -> streamId
-  streamLastVoice: new Map(),     // streamId -> last voice timestamp (ms)
+  contexts: new Map(),            // trackId -> { ctx, sourceNode, workletNode }
+  connectedTrackIds: new Set(),   // trackId -> true (dedup: receiver + <audio> element share the same track)
+  channelByTrack: new Map(),      // trackId -> channel index
+  channelToTrack: new Map(),      // channel index -> trackId
+  trackLastVoice: new Map(),      // trackId -> last voice timestamp (ms)
   nextChannel: 0,
   freedChannels: [],
   rescanTimer: null,
@@ -123,7 +123,11 @@ window.audioCapture = {
   discoverMediaElements() {
     for (const el of this.findMediaElements()) {
       const stream = el.srcObject;
-      if (stream && !this.connectedStreamIds.has(stream.id)) {
+      const track = stream && stream.getAudioTracks()[0];
+      // Dedup by TRACK id, not stream id: the receiver track and this <audio>
+      // element's stream are the SAME underlying track (same track.id), so keying
+      // by stream.id would capture the same person's audio twice.
+      if (track && !this.connectedTrackIds.has(track.id)) {
         this.connectStream(stream);
       }
     }
@@ -131,13 +135,15 @@ window.audioCapture = {
 
   async connectStream(stream) {
     if (!stream) return;
-    const streamId = stream.id;
-    if (!streamId || this.connectedStreamIds.has(streamId)) return;
+    const track = stream.getAudioTracks()[0];
+    if (!track) return;
+    const trackId = track.id;
+    if (!trackId || this.connectedTrackIds.has(trackId)) return;
 
     const channel = this.freedChannels.length > 0 ? this.freedChannels.shift() : this.nextChannel++;
-    this.connectedStreamIds.add(streamId);
-    this.channelByStream.set(streamId, channel);
-    this.channelToStream.set(channel, streamId);
+    this.connectedTrackIds.add(trackId);
+    this.channelByTrack.set(trackId, channel);
+    this.channelToTrack.set(channel, trackId);
 
     try {
       const ctx = new AudioContext({ sampleRate: this.targetRate });
@@ -161,8 +167,8 @@ window.audioCapture = {
         // its last voice so quiet frames don't fragment a speaking turn, but a
         // channel that has never spoken (or went quiet long ago) costs nothing.
         const now = Date.now();
-        const lastVoice = this.streamLastVoice.get(streamId) || 0;
-        if (peak > this.silenceThreshold) this.streamLastVoice.set(streamId, now);
+        const lastVoice = this.trackLastVoice.get(trackId) || 0;
+        if (peak > this.silenceThreshold) this.trackLastVoice.set(trackId, now);
         if (peak <= this.silenceThreshold && now - lastVoice > this.holdOpenMs) return;
 
         const i16 = new Int16Array(pcm.length);
@@ -185,36 +191,33 @@ window.audioCapture = {
       sourceNode.connect(workletNode);
       workletNode.connect(ctx.destination);
 
-      this.contexts.set(streamId, { ctx, sourceNode, workletNode });
-      console.log('[AudioCapture] Connected stream ' + streamId.substring(0, 8) + ' -> channel ' + channel);
+      this.contexts.set(trackId, { ctx, sourceNode, workletNode });
+      console.log('[AudioCapture] Connected track ' + trackId.substring(0, 8) + ' -> channel ' + channel);
 
-      const track = stream.getAudioTracks()[0];
-      if (track) {
-        track.addEventListener('ended', () => this.disconnectStream(streamId));
-      }
+      track.addEventListener('ended', () => this.disconnectStream(trackId));
     } catch (err) {
       console.error('[AudioCapture] connectStream error:', err.message);
-      this.disconnectStream(streamId);
+      this.disconnectStream(trackId);
     }
   },
 
-  disconnectStream(streamId) {
-    const rec = this.contexts.get(streamId);
+  disconnectStream(trackId) {
+    const rec = this.contexts.get(trackId);
     if (rec) {
       try { rec.workletNode.disconnect(); } catch {}
       try { rec.sourceNode.disconnect(); } catch {}
       try { rec.ctx.close(); } catch {}
-      this.contexts.delete(streamId);
+      this.contexts.delete(trackId);
     }
-    const channel = this.channelByStream.get(streamId);
+    const channel = this.channelByTrack.get(trackId);
     if (channel !== undefined) {
-      this.channelToStream.delete(channel);
+      this.channelToTrack.delete(channel);
       if (!this.freedChannels.includes(channel)) this.freedChannels.push(channel);
     }
-    this.channelByStream.delete(streamId);
-    this.connectedStreamIds.delete(streamId);
-    this.streamLastVoice.delete(streamId);
-    console.log('[AudioCapture] Disconnected stream ' + streamId.substring(0, 8) + ' (freed channel ' + channel + ')');
+    this.channelByTrack.delete(trackId);
+    this.connectedTrackIds.delete(trackId);
+    this.trackLastVoice.delete(trackId);
+    console.log('[AudioCapture] Disconnected track ' + trackId.substring(0, 8) + ' (freed channel ' + channel + ')');
   },
 
   async findPeerConnection() {
@@ -301,8 +304,8 @@ window.audioCapture = {
       clearInterval(this.rescanTimer);
       this.rescanTimer = null;
     }
-    for (const streamId of Array.from(this.contexts.keys())) {
-      this.disconnectStream(streamId);
+    for (const trackId of Array.from(this.contexts.keys())) {
+      this.disconnectStream(trackId);
     }
     this.nextChannel = 0;
     this.freedChannels = [];
