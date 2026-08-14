@@ -16,25 +16,17 @@ View Realtime notes here: ${liveNotesUrl}`;
 
 export function parseChatCommand(text, options = {}) {
   if (!text || typeof text !== 'string') return null;
-  // Ignore lines that are part of the announcement or system instructions
-  if (
-    text.includes('invited') || 
-    text.includes('agree to') || 
-    text.includes('stop recording & leave meeting') ||
-    text.includes('Realtime notes') ||
-    text.includes('Continuous chat')
-  ) {
-    return null;
-  }
-
   const trimmed = text.trim();
   const cmdPrefix = (options.cmdPrefix || process.env.CMD_PREFIX || 'bot').toLowerCase();
   
-  // Match /bot pause, /bot resume, /bot leave, /bot stop, bot leave, /leave, etc.
-  const pattern = new RegExp(`(?:^|\\s)\\/?(${cmdPrefix}|ff|bot)?\\s*(pause|resume|leave|stop)\\b`, 'i');
+  // Match explicit slash commands only: /bot pause, /bot resume, /bot leave,
+  // /bot stop, /ff resume, /leave, /pause, etc. Bare words in casual chat
+  // (e.g. "we should pause") must NEVER trigger a command — that previously
+  // stopped the live transcript when the scheduling proposal message was read.
+  const pattern = new RegExp(`^\\/(?:(?:${cmdPrefix}|ff|bot)\\s+)?(pause|resume|leave|stop)\\b`, 'i');
   const match = trimmed.match(pattern);
   if (match) {
-    const action = match[2].toLowerCase();
+    const action = match[1].toLowerCase();
     return action === 'stop' ? 'leave' : action;
   }
   return null;
