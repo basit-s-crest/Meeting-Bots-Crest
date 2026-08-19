@@ -60,3 +60,46 @@ CREATE INDEX IF NOT EXISTS scheduling_approvals_session_id_idx ON public.schedul
 -- Index for the public token lookup.
 CREATE INDEX IF NOT EXISTS scheduling_approvals_token_idx ON public.scheduling_approvals (token);
 
+-- ==============================================================================
+-- Speaker-Aware Action Item Assignment & Voice Fingerprinting
+-- ==============================================================================
+
+-- 1. Store audio profile JSON on meeting sessions
+ALTER TABLE public.meeting_sessions ADD COLUMN IF NOT EXISTS audio_profile jsonb;
+
+-- 2. User Speaker Fingerprints (Name aliases across meetings)
+CREATE TABLE IF NOT EXISTS public.user_speaker_fingerprints (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id text NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  display_name text NOT NULL,
+  display_name_normalized text NOT NULL,
+  seen_count integer NOT NULL DEFAULT 1,
+  last_seen_at timestamp with time zone NOT NULL DEFAULT now(),
+  source_session_id text,
+  UNIQUE (user_id, display_name_normalized)
+);
+
+-- 3. User Voice Profiles (Voice energy + optional vector embedding)
+CREATE TABLE IF NOT EXISTS public.user_voice_profiles (
+  user_id text PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
+  avg_rms double precision NOT NULL DEFAULT 0.0,
+  rms_stddev double precision NOT NULL DEFAULT 0.0,
+  voice_embedding vector(192),
+  sample_count integer NOT NULL DEFAULT 0,
+  last_updated timestamp with time zone NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_fingerprint_normalized ON public.user_speaker_fingerprints (display_name_normalized);
+CREATE INDEX IF NOT EXISTS idx_fingerprint_user ON public.user_speaker_fingerprints (user_id);
+
+-- 4. Assignee and deadline fields on meeting_events
+ALTER TABLE public.meeting_events
+  ADD COLUMN IF NOT EXISTS assignee_user_id text REFERENCES public.users(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS assignee_confidence real,
+  ADD COLUMN IF NOT EXISTS assignee_confirmed boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS deadline timestamp with time zone,
+  ADD COLUMN IF NOT EXISTS completed boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS completed_at timestamp with time zone;
+
+CREATE INDEX IF NOT EXISTS idx_meeting_events_assignee ON public.meeting_events (assignee_user_id);
+

@@ -17,7 +17,7 @@ import { deepgramProxyGoogle } from './deepgram-proxy-google.js';
 import { deepgramProxyZoom } from './deepgram-proxy-zoom.js';
 import { generateFirefliesReport, calculateSpeakerStats, saveSchedulingData } from './report-generator.js';
 import { supabase } from './supabase-client.js';
-import { uploadReport, downloadStorageFile, getAttendeeEmailsForSession } from './supabase-helper.js';
+import { uploadReport, downloadStorageFile, getAttendeeEmailsForSession, seedUserFingerprint, getUserFingerprints, getUserAssignedTasks, updateEventAssignee, saveAudioProfile } from './supabase-helper.js';
 import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
 import { getOAuth2Client, saveRefreshToken, loadRefreshToken, deleteRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { sendReportEmailToAttendees } from './email-service.js';
@@ -2206,6 +2206,71 @@ The team agreed to discuss the architecture on Friday.
     }
   }
 }
+
+// ==============================================================================
+// Speaker Fingerprints & User-Assigned Action Items Routes
+// ==============================================================================
+
+/**
+ * Get all speaker fingerprints for the authenticated user
+ */
+app.get('/api/fingerprints', authMiddleware, async (req, res) => {
+  try {
+    const fingerprints = await getUserFingerprints(req.user.id);
+    res.json({ fingerprints });
+  } catch (err) {
+    console.error('[Server] Failed to get fingerprints:', err.message);
+    res.status(500).json({ error: 'Failed to retrieve fingerprints' });
+  }
+});
+
+/**
+ * Seed a user's display name fingerprint from a meeting session confirmation
+ */
+app.post('/api/fingerprints/seed', authMiddleware, async (req, res) => {
+  try {
+    const { displayName, sessionId, voiceProfile } = req.body;
+    if (!displayName) {
+      return res.status(400).json({ error: 'displayName is required' });
+    }
+
+    const result = await seedUserFingerprint(req.user.id, displayName, sessionId, voiceProfile);
+    res.json({ success: true, message: 'Identity confirmed and fingerprint saved.', ...result });
+  } catch (err) {
+    console.error('[Server] Failed to seed fingerprint:', err.message);
+    res.status(500).json({ error: err.message || 'Failed to seed fingerprint' });
+  }
+});
+
+/**
+ * Get all tasks / action items assigned to the current user
+ */
+app.get('/api/users/me/tasks', authMiddleware, async (req, res) => {
+  try {
+    const { projectId } = req.query;
+    const tasks = await getUserAssignedTasks(req.user.id, projectId || null);
+    res.json({ tasks });
+  } catch (err) {
+    console.error('[Server] Failed to get user tasks:', err.message);
+    res.status(500).json({ error: 'Failed to retrieve assigned tasks' });
+  }
+});
+
+/**
+ * Update an action item / meeting event (assignee, confirm, complete)
+ */
+app.patch('/api/meeting-events/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { assigneeUserId, confirmed, completed } = req.body;
+
+    const updated = await updateEventAssignee(id, { assigneeUserId, confirmed, completed });
+    res.json({ success: true, event: updated });
+  } catch (err) {
+    console.error('[Server] Failed to update meeting event:', err.message);
+    res.status(500).json({ error: err.message || 'Failed to update event' });
+  }
+});
 
 // Port configuration
 if (process.env.NODE_ENV !== 'test') {

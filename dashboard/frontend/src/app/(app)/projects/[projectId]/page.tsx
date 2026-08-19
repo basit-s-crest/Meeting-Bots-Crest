@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Input } from "@/components/ui/Input";
 import { GoogleDriveStatusBadge } from "@/components/GoogleDriveStatusBadge";
+import { ParticipantIdentityModal } from "@/components/ParticipantIdentityModal";
 
 interface TranscriptLine {
   speaker: string;

@@ -21,6 +21,7 @@ from app.models.meetings import get_meeting, mark_meeting_completed, update_meet
 from app.models.segments import get_segments
 from app.models.events import insert_event
 from app.models.projects import get_project_memory, upsert_project_memory
+from app.resolver import resolve_assignee
 
 router = APIRouter()
 
@@ -40,6 +41,7 @@ Each object must have:
 - description: 2-3 sentence summary of what happened
 - detail: exact quote from the transcript if relevant, or null
 - assignee: person responsible (for ACTION_ITEM only, else null)
+- deadline: deadline date or time if mentioned (ISO format YYYY-MM-DD or descriptive string e.g. "by next Friday", or null)
 - priority: "High" | "Medium" | "Low"
 - significance: 0.0 to 1.0 (how important is this for future reference)
 
@@ -114,6 +116,10 @@ async def process_meeting(req: ProcessMeetingRequest):
         # Generate embedding
         embedding = embed(description)
 
+        # Resolve assignee to platform user_id if this is an action item
+        assignee_str = event.get("assignee")
+        resolved = await resolve_assignee(assignee_str, session_id, project_id)
+
         # Insert into meeting_events
         event_row = {
             "session_id": session_id,
@@ -121,7 +127,11 @@ async def process_meeting(req: ProcessMeetingRequest):
             "category": event.get("category", "KEY_TOPIC"),
             "description": description,
             "detail": event.get("detail"),
-            "assignee": event.get("assignee"),
+            "assignee": assignee_str,
+            "assignee_user_id": resolved.get("assignee_user_id"),
+            "assignee_confidence": resolved.get("assignee_confidence"),
+            "assignee_confirmed": resolved.get("assignee_confirmed", False),
+            "deadline": event.get("deadline"),
             "priority": event.get("priority"),
             "embedding": embedding,
             "meeting_date": meeting_date,

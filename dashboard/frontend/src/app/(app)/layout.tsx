@@ -9,6 +9,7 @@ import {
   LogOut,
   User,
   FolderKanban,
+  CheckSquare,
   HardDrive,
   CalendarDays,
   PanelLeftClose,
@@ -21,6 +22,7 @@ import { cn } from "@/lib/cn";
 
 const NAV_ITEMS = [
   { href: "/projects", label: "Projects", icon: FolderKanban },
+  { href: "/tasks", label: "My Tasks", icon: CheckSquare },
   { href: "/calendar", label: "Calendar", icon: CalendarDays }
 ];
 

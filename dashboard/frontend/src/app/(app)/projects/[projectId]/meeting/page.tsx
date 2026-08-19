@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/Input";
 import { LiveQAOverlay, QAPair } from "@/components/LiveQAOverlay";
+import { ParticipantIdentityModal } from "@/components/ParticipantIdentityModal";
 
 interface TranscriptLine {
   lineId?: string;
@@ -59,6 +60,7 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
   const [showJumpButton, setShowJumpButton] = useState(false);
   const [highlightedLineId, setHighlightedLineId] = useState<string | null>(null);
   const [exitReasonMessage, setExitReasonMessage] = useState<string | null>(null);
+  const [showIdentityModal, setShowIdentityModal] = useState(false);
 
   const getMeetingEndMessage = (reason?: string) => {
     switch (reason) {
@@ -225,7 +227,7 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
       withCredentials: true,
     });
 
-    eventSource.addEventListener("bot_stopped", (e: MessageEvent) => {
+    eventSource.addEventListener("bot_stopped", async (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data);
         if (activeSessionId && data.sessionId === activeSessionId) {
@@ -233,6 +235,17 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
           setExitReasonMessage(msg);
           setBotStatus("idle");
           disconnectWebSocket();
+
+          // Check if user needs identity bootstrap modal
+          try {
+            const fpRes = await apiFetch(`${BACKEND_URL}/api/fingerprints`);
+            if (fpRes.ok) {
+              const fpData = await fpRes.json();
+              if (!fpData.fingerprints || fpData.fingerprints.length === 0) {
+                setShowIdentityModal(true);
+              }
+            }
+          } catch {}
         }
       } catch (err) {
         console.error("Failed to parse bot_stopped SSE event:", err);
@@ -1033,6 +1046,19 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
           </div>
         </section>
       </div>
+
+      {/* Participant Identity Bootstrap Modal */}
+      {activeSessionId && (
+        <ParticipantIdentityModal
+          open={showIdentityModal}
+          onClose={() => setShowIdentityModal(false)}
+          sessionId={activeSessionId}
+          speakerNames={liveLines.map(l => l.speaker).filter(Boolean)}
+          onConfirmed={(name) => {
+            console.log(`[MeetingPage] Confirmed identity as: ${name}`);
+          }}
+        />
+      )}
     </Container>
   );
 }

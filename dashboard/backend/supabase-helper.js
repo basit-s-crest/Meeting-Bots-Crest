@@ -251,3 +251,171 @@ export async function getAttendeeEmailsForSession(sessionId) {
   }
 }
 
+/**
+ * Saves audio profile JSON for a meeting session.
+ */
+export async function saveAudioProfile(sessionId, audioProfile) {
+  try {
+    const { error } = await supabase
+      .from('meeting_sessions')
+      .update({ audio_profile: audioProfile })
+      .eq('session_id', sessionId);
+
+    if (error) throw error;
+    console.log(`[Supabase] Saved audio profile for session: ${sessionId}`);
+    return true;
+  } catch (err) {
+    console.error(`[Supabase] Failed to save audio profile for ${sessionId}:`, err.message);
+    return false;
+  }
+}
+
+/**
+ * Seeds a user's display name fingerprint and initial voice profile from a confirmed meeting.
+ */
+export async function seedUserFingerprint(userId, displayName, sessionId, voiceProfile = null) {
+  try {
+    if (!displayName || !userId) {
+      throw new Error('userId and displayName are required');
+    }
+
+    const normalized = displayName.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+
+    // 1. Upsert into user_speaker_fingerprints
+    const { data: fpData, error: fpError } = await supabase
+      .from('user_speaker_fingerprints')
+      .upsert({
+        user_id: userId,
+        display_name: displayName,
+        display_name_normalized: normalized,
+        source_session_id: sessionId,
+        last_seen_at: new Date().toISOString()
+      }, { onConflict: 'user_id,display_name_normalized' })
+      .select();
+
+    if (fpError) throw fpError;
+
+    // 2. Upsert voice profile if provided or initialize
+    if (voiceProfile) {
+      await supabase
+        .from('user_voice_profiles')
+        .upsert({
+          user_id: userId,
+          avg_rms: voiceProfile.avg_rms || 0.0,
+          rms_stddev: voiceProfile.rms_stddev || 0.0,
+          sample_count: voiceProfile.samples || 1,
+          last_updated: new Date().toISOString()
+        }, { onConflict: 'user_id' });
+    }
+
+    // 3. Re-assign any existing unconfirmed action items in this session with matching name
+    if (sessionId) {
+      await supabase
+        .from('meeting_events')
+        .update({
+          assignee_user_id: userId,
+          assignee_confirmed: true,
+          assignee_confidence: 1.0
+        })
+        .eq('session_id', sessionId)
+        .ilike('assignee', `%${displayName}%`);
+    }
+
+    console.log(`[Supabase] Successfully seeded fingerprint for user ${userId} -> "${displayName}"`);
+    return { success: true, fingerprint: fpData };
+  } catch (err) {
+    console.error(`[Supabase] Failed to seed fingerprint for user ${userId}:`, err.message);
+    throw err;
+  }
+}
+
+/**
+ * Gets all speaker fingerprints for a user.
+ */
+export async function getUserFingerprints(userId) {
+  try {
+    const { data, error } = await supabase
+      .from('user_speaker_fingerprints')
+      .select('*')
+      .eq('user_id', userId);
+
+    if (error) throw error;
+    return data || [];
+  } catch (err) {
+    console.error(`[Supabase] Failed to get fingerprints for user ${userId}:`, err.message);
+    return [];
+  }
+}
+
+/**
+ * Gets all action items assigned to a user (across all projects or for a specific project).
+ */
+export async function getUserAssignedTasks(userId, projectId = null) {
+  try {
+    let query = supabase
+      .from('meeting_events')
+      .select(`
+        id,
+        session_id,
+        project_id,
+        category,
+        description,
+        detail,
+        assignee,
+        assignee_user_id,
+        assignee_confidence,
+        assignee_confirmed,
+        deadline,
+        priority,
+        meeting_date,
+        completed,
+        created_at,
+        projects:project_id (
+          id,
+          name
+        )
+      `)
+      .eq('assignee_user_id', userId)
+      .eq('category', 'ACTION_ITEM')
+      .order('created_at', { ascending: false });
+
+    if (projectId) {
+      query = query.eq('project_id', projectId);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  } catch (err) {
+    console.error(`[Supabase] Failed to get assigned tasks for user ${userId}:`, err.message);
+    return [];
+  }
+}
+
+/**
+ * Updates an event's assignment, confirmation, or completion status.
+ */
+export async function updateEventAssignee(eventId, { assigneeUserId, confirmed, completed }) {
+  try {
+    const updates = {};
+    if (assigneeUserId !== undefined) updates.assignee_user_id = assigneeUserId;
+    if (confirmed !== undefined) updates.assignee_confirmed = confirmed;
+    if (completed !== undefined) {
+      updates.completed = completed;
+      updates.completed_at = completed ? new Date().toISOString() : null;
+    }
+
+    const { data, error } = await supabase
+      .from('meeting_events')
+      .update(updates)
+      .eq('id', eventId)
+      .select();
+
+    if (error) throw error;
+    return data && data[0];
+  } catch (err) {
+    console.error(`[Supabase] Failed to update event assignee for ${eventId}:`, err.message);
+    throw err;
+  }
+}
+
