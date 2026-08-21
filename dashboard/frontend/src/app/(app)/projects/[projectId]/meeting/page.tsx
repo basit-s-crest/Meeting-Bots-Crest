@@ -61,6 +61,8 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
   const [highlightedLineId, setHighlightedLineId] = useState<string | null>(null);
   const [exitReasonMessage, setExitReasonMessage] = useState<string | null>(null);
   const [showIdentityModal, setShowIdentityModal] = useState(false);
+  const [stoppingSessionId, setStoppingSessionId] = useState<string | null>(null);
+  const [sessionSpeakerNames, setSessionSpeakerNames] = useState<string[]>([]);
 
   const getMeetingEndMessage = (reason?: string) => {
     switch (reason) {
@@ -231,6 +233,10 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
       try {
         const data = JSON.parse(e.data);
         if (activeSessionId && data.sessionId === activeSessionId) {
+          const stoppingId = activeSessionId;
+          const speakers = Array.from(new Set(liveLines.map(l => l.speaker).filter(Boolean)));
+          setSessionSpeakerNames(speakers);
+          setStoppingSessionId(stoppingId);
           const msg = getMeetingEndMessage(data.reason);
           setExitReasonMessage(msg);
           setBotStatus("idle");
@@ -245,7 +251,9 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
                 setShowIdentityModal(true);
               }
             }
-          } catch {}
+          } catch (err) {
+            console.error("Failed to check fingerprints on bot_stopped:", err);
+          }
         }
       } catch (err) {
         console.error("Failed to parse bot_stopped SSE event:", err);
@@ -565,6 +573,10 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
 
   const handleStopBot = async () => {
     if (!activeSessionId) return;
+    const currentSessionId = activeSessionId;
+    const speakers = Array.from(new Set(liveLines.map(l => l.speaker).filter(Boolean)));
+    setSessionSpeakerNames(speakers);
+    setStoppingSessionId(currentSessionId);
     setBotStatus("stopping");
 
     try {
@@ -572,7 +584,7 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ sessionId: activeSessionId, projectId })
+        body: JSON.stringify({ sessionId: currentSessionId, projectId })
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -584,8 +596,26 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
       setBotStatus("idle");
       setActiveSpeaker("No active speaker");
 
-      alert("Session completed. AI summaries are generating in the background!");
-      router.push(`/projects/${projectId}`);
+      // Check if user needs identity bootstrap modal
+      let needsIdentity = false;
+      try {
+        const fpRes = await apiFetch(`${BACKEND_URL}/api/fingerprints`);
+        if (fpRes.ok) {
+          const fpData = await fpRes.json();
+          if (!fpData.fingerprints || fpData.fingerprints.length === 0) {
+            needsIdentity = true;
+          }
+        }
+      } catch (err) {
+        console.error("Failed to check fingerprints:", err);
+      }
+
+      if (needsIdentity) {
+        setShowIdentityModal(true);
+      } else {
+        alert("Session completed. AI summaries are generating in the background!");
+        router.push(`/projects/${projectId}`);
+      }
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : "Failed to stop bot");
       setBotStatus("capturing");
@@ -1048,14 +1078,19 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
       </div>
 
       {/* Participant Identity Bootstrap Modal */}
-      {activeSessionId && (
+      {(stoppingSessionId || activeSessionId) && (
         <ParticipantIdentityModal
           open={showIdentityModal}
-          onClose={() => setShowIdentityModal(false)}
-          sessionId={activeSessionId}
-          speakerNames={liveLines.map(l => l.speaker).filter(Boolean)}
+          onClose={() => {
+            setShowIdentityModal(false);
+            router.push(`/projects/${projectId}`);
+          }}
+          sessionId={stoppingSessionId || activeSessionId || ""}
+          speakerNames={sessionSpeakerNames.length > 0 ? sessionSpeakerNames : liveLines.map(l => l.speaker).filter(Boolean)}
           onConfirmed={(name) => {
             console.log(`[MeetingPage] Confirmed identity as: ${name}`);
+            setShowIdentityModal(false);
+            router.push(`/projects/${projectId}`);
           }}
         />
       )}

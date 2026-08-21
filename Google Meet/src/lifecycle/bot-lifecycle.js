@@ -174,7 +174,9 @@ export class BotLifecycle {
           this.output?.sendChannelSpeakerEvent(data);
         } else {
           console.log(`[BotLifecycle] Speaker event received: "${data.speaker}" at ${data.timestamp}`);
-          this.chunker.addSpeakerEvent(data);   // still used for the chunk-level fallback speaker field
+          if (typeof this.chunker?.addSpeakerEvent === 'function') {
+            this.chunker.addSpeakerEvent(data);
+          }
           this.output?.sendSpeakerEvent(data);  // legacy precise signal (Zoom/back-compat)
         }
       }

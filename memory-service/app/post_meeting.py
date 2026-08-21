@@ -30,7 +30,7 @@ class ProcessMeetingRequest(BaseModel):
     session_id: str
 
 
-_EXTRACTION_MODEL = "llama-3.3-70b-versatile"
+_EXTRACTION_MODEL = "openai/gpt-oss-120b"
 _SIGNIFICANCE_THRESHOLD = 0.6
 
 _EXTRACTION_PROMPT = """Extract key business events from this meeting transcript.

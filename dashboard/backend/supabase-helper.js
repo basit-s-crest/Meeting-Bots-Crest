@@ -295,18 +295,81 @@ export async function seedUserFingerprint(userId, displayName, sessionId, voiceP
 
     if (fpError) throw fpError;
 
-    // 2. Upsert voice profile if provided or initialize
-    if (voiceProfile) {
-      await supabase
-        .from('user_voice_profiles')
-        .upsert({
-          user_id: userId,
-          avg_rms: voiceProfile.avg_rms || 0.0,
-          rms_stddev: voiceProfile.rms_stddev || 0.0,
-          sample_count: voiceProfile.samples || 1,
-          last_updated: new Date().toISOString()
-        }, { onConflict: 'user_id' });
+    // 2. Upsert voice profile (using provided profile or fetch from session audio_profile or initialize baseline)
+    let avgRms = voiceProfile?.avg_rms ?? 0.045;
+    let rmsStddev = voiceProfile?.rms_stddev ?? 0.015;
+    let sampleCount = voiceProfile?.samples ?? 100;
+
+    if (sessionId && !voiceProfile) {
+      try {
+        const { data: sessionData } = await supabase
+          .from('meeting_sessions')
+          .select('audio_profile')
+          .eq('session_id', sessionId)
+          .maybeSingle();
+
+        if (sessionData?.audio_profile?.channels) {
+          const match = sessionData.audio_profile.channels.find(
+            (c) => c.name && c.name.toLowerCase().includes(normalized)
+          );
+          if (match) {
+            avgRms = match.rms_mean || avgRms;
+            rmsStddev = match.rms_stddev || rmsStddev;
+            sampleCount = match.samples || sampleCount;
+          }
+        }
+      } catch (err) {
+        console.warn(`[Supabase] Could not fetch session audio profile for ${sessionId}:`, err.message);
+      }
     }
+
+    // Generate normalized 192-dimensional acoustic embedding vector for pgvector
+    const generateAcousticVector = (rms, stddev) => {
+      const vec = new Array(192);
+      const b1 = Math.min(Math.max(rms, 0.001), 1.0);
+      const b2 = Math.min(Math.max(stddev, 0.001), 1.0);
+      for (let i = 0; i < 192; i++) {
+        const angle = (i * Math.PI) / 96;
+        vec[i] = b1 * Math.cos(angle) + b2 * Math.sin(angle) * ((i % 5) + 1) * 0.1;
+      }
+      const norm = Math.sqrt(vec.reduce((sum, v) => sum + v * v, 0)) || 1;
+      return vec.map((v) => parseFloat((v / norm).toFixed(6)));
+    };
+
+    let embeddingVector = voiceProfile?.voice_embedding;
+    if (!embeddingVector) {
+      try {
+        const memPort = process.env.MEMORY_SERVICE_PORT || 8001;
+        const memRes = await fetch(`http://127.0.0.1:${memPort}/api/memory/voice/encode`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rms: avgRms, stddev: rmsStddev })
+        });
+        if (memRes.ok) {
+          const memData = await memRes.json();
+          if (memData.embedding && memData.embedding.length === 192) {
+            embeddingVector = memData.embedding;
+          }
+        }
+      } catch (err) {
+        console.warn(`[Supabase] Could not encode neural voice vector via memory-service:`, err.message);
+      }
+    }
+
+    if (!embeddingVector) {
+      embeddingVector = generateAcousticVector(avgRms, rmsStddev);
+    }
+
+    await supabase
+      .from('user_voice_profiles')
+      .upsert({
+        user_id: userId,
+        avg_rms: avgRms,
+        rms_stddev: rmsStddev,
+        voice_embedding: embeddingVector,
+        sample_count: sampleCount,
+        last_updated: new Date().toISOString()
+      }, { onConflict: 'user_id' });
 
     // 3. Re-assign any existing unconfirmed action items in this session with matching name
     if (sessionId) {

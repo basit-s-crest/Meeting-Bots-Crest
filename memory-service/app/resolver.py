@@ -7,8 +7,9 @@ Resolves meeting action item assignees to platform user IDs using:
 """
 
 import re
-from typing import Optional
+from typing import Optional, List
 from app.database import get_db
+from app.voice_encoder import compute_voice_similarity
 
 
 def normalize_name(name: str) -> str:
@@ -24,6 +25,7 @@ async def resolve_assignee(
     assignee_str: Optional[str],
     session_id: str,
     project_id: Optional[str] = None,
+    voice_embedding: Optional[List[float]] = None,
 ) -> dict:
     """
     Resolve an assignee name to a platform user_id and confidence score.
@@ -69,6 +71,25 @@ async def resolve_assignee(
                         project_owner_name = user_res.data[0].get("name")
         except Exception as e:
             print(f"[Resolver] Error fetching project owner: {e}")
+
+    # 1.5. If voice_embedding is provided, perform biometric vector matching
+    if voice_embedding and len(voice_embedding) == 192:
+        try:
+            vp_res = db.table("user_voice_profiles").select("user_id, voice_embedding").execute()
+            for vp in (vp_res.data or []):
+                saved_vec = vp.get("voice_embedding")
+                if saved_vec and len(saved_vec) == 192:
+                    sim = compute_voice_similarity(voice_embedding, saved_vec)
+                    if sim >= 0.82:
+                        matched_user_id = vp.get("user_id")
+                        return {
+                            "assignee_user_id": matched_user_id,
+                            "assignee_confidence": round(sim, 4),
+                            "assignee_confirmed": True,
+                            "reason": f"neural_voice_biometric_match (sim={round(sim, 3)})"
+                        }
+        except Exception as e:
+            print(f"[Resolver] Error in voice biometric matching: {e}")
 
     # 2. Look up user_speaker_fingerprints for exact normalized match
     try:

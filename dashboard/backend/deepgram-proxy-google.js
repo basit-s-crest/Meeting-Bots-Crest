@@ -218,16 +218,19 @@ class DeepgramProxy {
 
         // PRIMARY: the channel's bound name (carried at capture). FALLBACK: if
         // the binder can't resolve yet (no channel binding arrived), use the
-        // SpeakerBinder + legacy hints.
-        let speakerName = state.lastChannelSpeaker;
+        // SpeakerBinder + last known speaker for this channel.
+        let speakerName = (state.lastChannelSpeaker && state.lastChannelSpeaker !== 'null') ? state.lastChannelSpeaker : null;
         let provisional = !speakerName;
 
         if (!speakerName) {
           const resolved = binder.resolve(absoluteStartSec, absoluteEndSec);
-          const resolvedName = resolved.name;
-          speakerName = resolvedName || state.lastResolvedSpeaker;
+          const resolvedName = (resolved.name && resolved.name !== 'null') ? resolved.name : null;
+          speakerName = resolvedName || state.lastKnownSpeaker || state.lastResolvedSpeaker;
           provisional = !speakerName;
-          if (resolvedName) state.lastResolvedSpeaker = resolvedName;
+          if (resolvedName) {
+            state.lastResolvedSpeaker = resolvedName;
+            state.lastKnownSpeaker = resolvedName;
+          }
         }
 
         let seg = state.currentSegment;
@@ -237,7 +240,7 @@ class DeepgramProxy {
           state.currentSegment = seg;
         }
         seg.isFinal = isFinal;
-        const speaker = speakerName || `speaker_${seg.segmentId}`;
+        const speaker = (speakerName && speakerName !== 'null') ? speakerName : (state.lastKnownSpeaker || `Speaker ${channel + 1}`);
         seg.lastSpeaker = speaker;
 
         state.config.onTranscript({
@@ -332,9 +335,12 @@ class DeepgramProxy {
     if (!entry) return;
     const state = entry.channels.get(channel);
     if (!state) return;
-    if (speaker) {
+    if (speaker && speaker !== 'null') {
       state.lastChannelSpeaker = speaker;
+      state.lastKnownSpeaker = speaker;
       console.log(`[DeepgramProxy][${sessionId}] Channel ${channel} speaker bound: "${speaker}"`);
+    } else {
+      state.lastChannelSpeaker = null;
     }
   }
 

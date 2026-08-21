@@ -56,27 +56,107 @@ function aggregateTranscriptFile(filePath) {
     const content = fs.readFileSync(filePath, 'utf8').trim();
     if (!content) return;
     const lines = content.split('\n');
-    const aggregated = [];
+    const parsed = [];
+
+    // Pass 1: collect lines and build channel -> confident speaker map
+    const channelSpeakerMap = new Map();
+    const allKnownSpeakers = new Set();
+
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
         const data = JSON.parse(line);
-        const speaker = data.speaker || 'Unknown';
-        const text = (data.text || '').trim();
-        if (!text) continue;
+        const channel = (typeof data.channel === 'number') ? data.channel : null;
+        let speaker = (data.speaker || '').trim();
 
-        const last = aggregated[aggregated.length - 1];
-        if (last && last.speaker === speaker) {
-          last.text += ' ' + text;
-        } else {
-          aggregated.push({
-            speaker,
-            text,
-            timestamp: data.timestamp
-          });
+        const isGeneric = !speaker ||
+          speaker === 'null' ||
+          speaker === 'Unknown' ||
+          speaker.toLowerCase().startsWith('speaker_') ||
+          speaker.toLowerCase().startsWith('speaker ');
+
+        if (!isGeneric) {
+          if (channel !== null && !channelSpeakerMap.has(channel)) {
+            channelSpeakerMap.set(channel, speaker);
+          }
+          allKnownSpeakers.add(speaker);
         }
+        parsed.push({ ...data, channel });
       } catch (e) {
-        aggregated.push(line);
+        parsed.push(line);
+      }
+    }
+
+    // Pass 2: backfill unknown/provisional channel speakers and normalize alias formatting
+    const normalizedList = [];
+    for (const item of parsed) {
+      if (typeof item === 'string') {
+        normalizedList.push(item);
+        continue;
+      }
+      let speaker = (item.speaker || '').trim();
+      const channel = item.channel;
+
+      const isGeneric = !speaker ||
+        speaker === 'null' ||
+        speaker === 'Unknown' ||
+        speaker.toLowerCase().startsWith('speaker_') ||
+        speaker.toLowerCase().startsWith('speaker ');
+
+      if (isGeneric && channel !== null && channelSpeakerMap.has(channel)) {
+        speaker = channelSpeakerMap.get(channel);
+      }
+
+      // If still generic and only 1 known remote speaker exists in the meeting, attribute to them
+      if (isGeneric && allKnownSpeakers.size === 1) {
+        speaker = Array.from(allKnownSpeakers)[0];
+      }
+
+      const text = (item.text || '').trim();
+      if (!text) continue;
+
+      normalizedList.push({
+        speaker: speaker || 'Speaker',
+        text,
+        timestamp: item.timestamp,
+        channel
+      });
+    }
+
+    // Pass 3: aggregate consecutive turns from the same speaker or matching alias into one clean block
+    const aggregated = [];
+    for (const item of normalizedList) {
+      if (typeof item === 'string') {
+        aggregated.push(item);
+        continue;
+      }
+      const last = aggregated[aggregated.length - 1];
+      const normCur = item.speaker.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+      const normLast = (last && last.speaker) ? last.speaker.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim() : '';
+
+      const isSameSpeaker = last && (
+        last.speaker === item.speaker ||
+        normCur === normLast ||
+        (normCur.includes(normLast) && normLast.length >= 4) ||
+        (normLast.includes(normCur) && normCur.length >= 4)
+      );
+
+      if (isSameSpeaker) {
+        // Prefer the cleaner human display name
+        if (item.speaker.length > last.speaker.length && !item.speaker.includes('0') && !item.speaker.includes('1')) {
+          last.speaker = item.speaker;
+        }
+        // Deduplicate words if the segment was repeated
+        const curText = item.text.trim();
+        if (!last.text.endsWith(curText)) {
+          last.text += ' ' + curText;
+        }
+      } else {
+        aggregated.push({
+          speaker: item.speaker,
+          text: item.text.trim(),
+          timestamp: item.timestamp
+        });
       }
     }
 

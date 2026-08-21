@@ -5,7 +5,7 @@ from groq import Groq
 from app.config import GROQ_API_KEY
 
 _client: Groq | None = None
-_SYNTHESIS_MODEL = "llama-3.3-70b-versatile"
+_SYNTHESIS_MODEL = "openai/gpt-oss-120b"
 
 
 def get_groq() -> Groq:

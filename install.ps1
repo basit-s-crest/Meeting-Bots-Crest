@@ -184,6 +184,14 @@ if ($hasUv) {
     }
 }
 
+Write-Host "  -> Pre-downloading ECAPA-TDNN Voice Model..." -ForegroundColor Gray
+& .\.venv\Scripts\python -c "from app.voice_encoder import init_voice_encoder; init_voice_encoder()"
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "  [OK] ECAPA-TDNN Voice Model cached successfully." -ForegroundColor Green
+} else {
+    Write-Host "  [WARN] Voice Model warm-up will run on first service startup." -ForegroundColor Yellow
+}
+
 # ------------------------------------------------------------------------------
 # Step 8: Return to Root & Display Summary
 # ------------------------------------------------------------------------------

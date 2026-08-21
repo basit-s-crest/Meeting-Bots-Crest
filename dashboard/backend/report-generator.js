@@ -215,7 +215,7 @@ Meeting Timezone: ${tz}`;
             { role: 'system', content: systemPrompt },
             { role: 'user', content: `Here is the meeting transcript to summarize:\n${formattedTranscript}` }
           ],
-          model: 'llama-3.3-70b-versatile',
+          model: 'openai/gpt-oss-120b',
           response_format: { type: "json_object" },
           temperature: 0.4,
           max_tokens: 4096,
