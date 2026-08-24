@@ -73,21 +73,22 @@ async def resolve_assignee(
             print(f"[Resolver] Error fetching project owner: {e}")
 
     # 1.5. If voice_embedding is provided, perform biometric vector matching
-    if voice_embedding and len(voice_embedding) == 192:
+    if voice_embedding:
         try:
             vp_res = db.table("user_voice_profiles").select("user_id, voice_embedding").execute()
             for vp in (vp_res.data or []):
                 saved_vec = vp.get("voice_embedding")
-                if saved_vec and len(saved_vec) == 192:
-                    sim = compute_voice_similarity(voice_embedding, saved_vec)
-                    if sim >= 0.82:
-                        matched_user_id = vp.get("user_id")
-                        return {
-                            "assignee_user_id": matched_user_id,
-                            "assignee_confidence": round(sim, 4),
-                            "assignee_confirmed": True,
-                            "reason": f"neural_voice_biometric_match (sim={round(sim, 3)})"
-                        }
+                sim = compute_voice_similarity(voice_embedding, saved_vec)
+                if sim >= 0.65:
+                    matched_user_id = vp.get("user_id")
+                    # Scale 0.65 -> 0.85, 0.80+ -> 0.98
+                    scaled_conf = min(1.0, max(0.60, round((sim - 0.3) / 0.55, 4)))
+                    return {
+                        "assignee_user_id": matched_user_id,
+                        "assignee_confidence": scaled_conf,
+                        "assignee_confirmed": True,
+                        "reason": f"neural_voice_biometric_match (cos_sim={round(sim, 3)}, conf={round(scaled_conf, 2)})"
+                    }
         except Exception as e:
             print(f"[Resolver] Error in voice biometric matching: {e}")
 

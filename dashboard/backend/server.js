@@ -17,7 +17,7 @@ import { deepgramProxyGoogle } from './deepgram-proxy-google.js';
 import { deepgramProxyZoom } from './deepgram-proxy-zoom.js';
 import { generateFirefliesReport, calculateSpeakerStats, saveSchedulingData } from './report-generator.js';
 import { supabase } from './supabase-client.js';
-import { uploadReport, downloadStorageFile, getAttendeeEmailsForSession, seedUserFingerprint, getUserFingerprints, getUserAssignedTasks, updateEventAssignee, saveAudioProfile } from './supabase-helper.js';
+import { uploadReport, downloadStorageFile, getAttendeeEmailsForSession, seedUserFingerprint, getUserFingerprints, getUserAssignedTasks, updateEventAssignee, saveAudioProfile, getUserVoiceProfile, enrollUserVoiceProfile, testUserVoiceMatch, deleteUserVoiceProfile, addUserFingerprintAlias, deleteUserFingerprint } from './supabase-helper.js';
 import { convertMarkdownToDocx, saveMarkdownAsDocx } from './docx-generator.js';
 import { getOAuth2Client, saveRefreshToken, loadRefreshToken, deleteRefreshToken, uploadReportToGoogleDrive } from './google-drive-helper.js';
 import { sendReportEmailToAttendees } from './email-service.js';
@@ -40,7 +40,8 @@ console.log(`[Server] Loaded Deepgram API Key: ${DEEPGRAM_API_KEY ? 'Present (Co
 
 const app = express();
 app.use(cors({ origin: 'http://localhost:3001', credentials: true }));
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -2239,6 +2240,101 @@ app.post('/api/fingerprints/seed', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('[Server] Failed to seed fingerprint:', err.message);
     res.status(500).json({ error: err.message || 'Failed to seed fingerprint' });
+  }
+});
+
+/**
+ * Get the current user's voice profile and fingerprints
+ */
+app.get('/api/voice/profile', authMiddleware, async (req, res) => {
+  try {
+    const profileData = await getUserVoiceProfile(req.user.id);
+    res.json(profileData);
+  } catch (err) {
+    console.error('[Server] Failed to get voice profile:', err.message);
+    res.status(500).json({ error: 'Failed to retrieve voice profile' });
+  }
+});
+
+/**
+ * Enroll or update a user's voice profile with audio samples
+ */
+app.post('/api/voice/enroll', authMiddleware, async (req, res) => {
+  try {
+    const { samples, sampleRate, rms, stddev, displayName } = req.body;
+    const result = await enrollUserVoiceProfile(req.user.id, {
+      samples: samples || [],
+      sampleRate: sampleRate || 16000,
+      rms,
+      stddev,
+      displayName: displayName || req.user.name
+    });
+    res.json({ success: true, message: 'Voice profile calibrated and saved successfully!', ...result });
+  } catch (err) {
+    console.error('[Server] Failed to enroll voice profile:', err.message);
+    res.status(500).json({ error: err.message || 'Failed to calibrate voice profile' });
+  }
+});
+
+/**
+ * Test a user's voice against their stored voice profile
+ */
+app.post('/api/voice/test', authMiddleware, async (req, res) => {
+  try {
+    const { samples, sampleRate, rms, stddev } = req.body;
+    const result = await testUserVoiceMatch(req.user.id, {
+      samples: samples || [],
+      sampleRate: sampleRate || 16000,
+      rms,
+      stddev
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[Server] Failed to test voice profile:', err.message);
+    res.status(500).json({ error: err.message || 'Failed to test voice' });
+  }
+});
+
+/**
+ * Reset / Delete the current user's voice profile
+ */
+app.delete('/api/voice/profile', authMiddleware, async (req, res) => {
+  try {
+    const result = await deleteUserVoiceProfile(req.user.id);
+    res.json({ success: true, message: 'Voice profile cleared.' });
+  } catch (err) {
+    console.error('[Server] Failed to delete voice profile:', err.message);
+    res.status(500).json({ error: 'Failed to reset voice profile' });
+  }
+});
+
+/**
+ * Add a display name alias for the user
+ */
+app.post('/api/voice/aliases', authMiddleware, async (req, res) => {
+  try {
+    const { displayName } = req.body;
+    if (!displayName || !displayName.trim()) {
+      return res.status(400).json({ error: 'displayName is required' });
+    }
+    const alias = await addUserFingerprintAlias(req.user.id, displayName);
+    res.json({ success: true, alias });
+  } catch (err) {
+    console.error('[Server] Failed to add voice alias:', err.message);
+    res.status(500).json({ error: err.message || 'Failed to add alias' });
+  }
+});
+
+/**
+ * Delete a display name alias for the user
+ */
+app.delete('/api/voice/aliases/:id', authMiddleware, async (req, res) => {
+  try {
+    await deleteUserFingerprint(req.user.id, req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Server] Failed to delete voice alias:', err.message);
+    res.status(500).json({ error: 'Failed to delete alias' });
   }
 });
 

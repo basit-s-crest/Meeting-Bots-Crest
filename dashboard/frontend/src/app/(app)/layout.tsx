@@ -15,7 +15,8 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Menu,
-  X
+  X,
+  Mic
 } from "lucide-react";
 import { LiveMeetingModal } from "@/components/LiveMeetingModal";
 import { cn } from "@/lib/cn";
@@ -23,6 +24,7 @@ import { cn } from "@/lib/cn";
 const NAV_ITEMS = [
   { href: "/projects", label: "Projects", icon: FolderKanban },
   { href: "/tasks", label: "My Tasks", icon: CheckSquare },
+  { href: "/voice-profile", label: "Voice Profile", icon: Mic },
   { href: "/calendar", label: "Calendar", icon: CalendarDays }
 ];
 

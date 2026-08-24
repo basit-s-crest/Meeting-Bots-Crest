@@ -18,7 +18,7 @@ class EncodeVoiceRequest(BaseModel):
 
 class IdentifyVoiceRequest(BaseModel):
     embedding: List[float]
-    threshold: float = 0.80
+    threshold: float = 0.65
 
 
 @router.post("/voice/encode")
@@ -55,7 +55,7 @@ async def identify_voice_endpoint(req: IdentifyVoiceRequest):
 
         for p in profiles:
             saved_vec = p.get("voice_embedding")
-            if saved_vec and len(saved_vec) == 192:
+            if saved_vec:
                 sim = compute_voice_similarity(req.embedding, saved_vec)
                 if sim > highest_similarity:
                     highest_similarity = sim

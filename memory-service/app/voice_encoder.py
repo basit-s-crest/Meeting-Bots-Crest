@@ -86,12 +86,38 @@ def _generate_fallback_embedding(rms: float, stddev: float) -> List[float]:
     return [round(float(x), 6) for x in vec.tolist()]
 
 
-def compute_voice_similarity(vec_a: List[float], vec_b: List[float]) -> float:
+def parse_embedding(raw) -> Optional[List[float]]:
+    """Normalizes vector input whether it is a List[float], JSON string, or pgvector string."""
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        return [float(x) for x in raw]
+    if isinstance(raw, str):
+        try:
+            import json
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [float(x) for x in parsed]
+        except Exception:
+            pass
+        cleaned = raw.replace("[", "").replace("]", "").replace("{", "").replace("}", "").strip()
+        if not cleaned:
+            return None
+        try:
+            return [float(x.strip()) for x in cleaned.split(",") if x.strip()]
+        except Exception:
+            return None
+    return None
+
+
+def compute_voice_similarity(vec_a, vec_b) -> float:
     """Computes cosine similarity between two 192-dimensional voice embeddings."""
-    if not vec_a or not vec_b or len(vec_a) != 192 or len(vec_b) != 192:
+    a_list = parse_embedding(vec_a)
+    b_list = parse_embedding(vec_b)
+    if not a_list or not b_list or len(a_list) != 192 or len(b_list) != 192:
         return 0.0
-    a = np.array(vec_a, dtype=np.float32)
-    b = np.array(vec_b, dtype=np.float32)
+    a = np.array(a_list, dtype=np.float32)
+    b = np.array(b_list, dtype=np.float32)
     norm_a = np.linalg.norm(a)
     norm_b = np.linalg.norm(b)
     if norm_a == 0 or norm_b == 0:
