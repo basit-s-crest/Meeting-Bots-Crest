@@ -432,13 +432,9 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
             // Each speaker change starts a NEW box. Consecutive utterances from
             // the SAME speaker (same turn) append to the CURRENT (last) box —
             // including interim→final progression.
-            // Identity for "same speaker": the stable per-participant channel id
-            // when present, else the speaker name (Teams/Zoom).
             const sameTurn =
-              lastBlock &&
-              (channel !== undefined
-                ? lastBlock.channel === channel
-                : lastBlock.speaker === speaker);
+              lastBlock !== null &&
+              lastBlock.speaker.trim().toLowerCase() === speaker.trim().toLowerCase();
 
             if (sameTurn) {
               const updated = [...prev];
@@ -448,30 +444,20 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
               currentBlock.isFinal = isFinal;
               if (channel !== undefined) currentBlock.channel = channel;
 
-              // Dedupe: Deepgram streams interim then final for the same utterance.
-              // If the new final text is already fully contained in the committed
-              // text (or exactly repeats the last committed chunk), don't append it
-              // again — the "word appears twice" symptom.
               const committed = currentBlock.committedText || "";
 
               if (isFinal) {
-                const already = committed.length > 0 &&
-                  (committed.endsWith(trimmed) ||
-                   (committed.includes(trimmed) &&
-                    committed.length >= trimmed.length + trimmed.length * 0.5));
-                if (!already) {
-                  currentBlock.committedText = committed ? committed + " " + trimmed : trimmed;
-                }
+                // Append final text to committed text
+                currentBlock.committedText = committed ? `${committed} ${trimmed}` : trimmed;
                 currentBlock.interimText = "";
               } else {
-                // Interim: if it equals what we already committed, skip the interim flash.
-                currentBlock.committedText = currentBlock.committedText || "";
-                currentBlock.interimText = currentBlock.committedText.includes(trimmed) ? "" : text;
+                currentBlock.interimText = trimmed;
               }
+
               currentBlock.text = currentBlock.interimText
-                ? currentBlock.committedText + " " + currentBlock.interimText
-                : currentBlock.committedText;
-              // Keep the resolved segmentId so later repaints land on this box.
+                ? (currentBlock.committedText ? `${currentBlock.committedText} ${currentBlock.interimText}` : currentBlock.interimText)
+                : (currentBlock.committedText || "");
+
               if (segmentId != null) currentBlock.segmentId = segmentId;
               updated[lastIdx] = currentBlock;
               return updated;

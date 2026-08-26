@@ -1189,7 +1189,7 @@ app.get('/api/transcripts/:filename', authMiddleware, projectGuard, async (req, 
     const merged = [];
     for (const line of normalized) {
       const last = merged[merged.length - 1];
-      if (last && last.speaker === line.speaker) {
+      if (last && last.speaker.trim().toLowerCase() === line.speaker.trim().toLowerCase()) {
         last.text = (last.text + ' ' + line.text).trim();
       } else {
         merged.push({ ...line });
