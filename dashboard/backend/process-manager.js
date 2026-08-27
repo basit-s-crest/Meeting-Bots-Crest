@@ -196,15 +196,6 @@ class ProcessManager {
       console.error(`[ProcessManager] Supabase saveSessionStart error:`, err.message);
     });
 
-    if (onBotStartCallback) {
-      try {
-        onBotStartCallback({ sessionId, botType, meetingUrl, botName, projectId, wsPort, joinMethod });
-      } catch (err) {
-        console.error(`[ProcessManager] onBotStartCallback error:`, err.message);
-      }
-    }
-
-
     const sessionInfo = {
       childProcess: child,
       type: botType,
@@ -224,6 +215,15 @@ class ProcessManager {
     };
 
     this.activeSessions.set(sessionId, sessionInfo);
+
+    // Fire onBotStartCallback AFTER sessionInfo is stored so server.js can look it up
+    if (onBotStartCallback) {
+      try {
+        onBotStartCallback({ sessionId, botType, meetingUrl, botName, projectId, wsPort, joinMethod });
+      } catch (err) {
+        console.error(`[ProcessManager] onBotStartCallback error:`, err.message);
+      }
+    }
 
 
     // Save session Google Drive folder metadata companion file
@@ -434,42 +434,45 @@ class ProcessManager {
    */
   startTeamsFileTail(sessionId, sessionInfo) {
     let lastSize = 0;
+    let remainder = '';
 
     // Periodically poll file size changes
     sessionInfo.tailInterval = setInterval(() => {
       try {
-        if (!fs.existsSync(sessionInfo.outputPath)) return;
+        if (!sessionInfo.outputPath || !fs.existsSync(sessionInfo.outputPath)) return;
         const stats = fs.statSync(sessionInfo.outputPath);
         if (stats.size > lastSize) {
-          const stream = fs.createReadStream(sessionInfo.outputPath, {
-            start: lastSize,
-            end: stats.size
-          });
+          const bufferSize = stats.size - lastSize;
+          const buffer = Buffer.alloc(bufferSize);
+          const fd = fs.openSync(sessionInfo.outputPath, 'r');
+          try {
+            fs.readSync(fd, buffer, 0, bufferSize, lastSize);
+          } finally {
+            fs.closeSync(fd);
+          }
 
-          let data = '';
-          stream.on('data', (chunk) => {
-            data += chunk.toString();
-          });
+          lastSize = stats.size;
+          const chunk = remainder + buffer.toString('utf8');
+          const lines = chunk.split('\n');
+          remainder = lines.pop() || '';
 
-          stream.on('end', () => {
-            lastSize = stats.size;
-            const lines = data.split('\n').filter(l => l.trim().length > 0);
-            for (const line of lines) {
-              try {
-                const event = JSON.parse(line);
-                if (sessionInfo.onTranscriptCallback) {
-                  sessionInfo.onTranscriptCallback({
-                    speaker: event.speaker || 'Unknown',
-                    text: event.text || '',
-                    timestamp: event.timestamp || new Date().toISOString(),
-                    isFinal: true
-                  });
-                }
-              } catch (err) {
-                console.error('[ProcessManager] Error parsing JSONL line:', err.message);
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const event = JSON.parse(trimmed);
+              if (sessionInfo.onTranscriptCallback) {
+                sessionInfo.onTranscriptCallback({
+                  speaker: event.speaker || 'Unknown',
+                  text: event.text || '',
+                  timestamp: event.timestamp || new Date().toISOString(),
+                  isFinal: true
+                });
               }
+            } catch (err) {
+              console.error('[ProcessManager] Error parsing JSONL line:', err.message);
             }
-          });
+          }
         }
       } catch (err) {
         console.error('[ProcessManager] Teams file tailing error:', err.message);

@@ -24,24 +24,45 @@ export function extractMeetingLink(event) {
   }
 
   // 2. Scan location and description text fields for platform URL patterns
-  const textToScan = `${event.location || ''} ${event.description || ''}`;
+  const rawText = `${event.location || ''} ${event.description || ''}`;
 
-  // Google Meet Regex
-  const meetMatch = textToScan.match(/https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/i);
+  // Extract URLs from any HTML href attributes first so <a href="...">Link</a> isn't lost
+  const hrefUrls = [];
+  const hrefRegex = /href=["']([^"']+)["']/gi;
+  let hrefMatch;
+  while ((hrefMatch = hrefRegex.exec(rawText)) !== null) {
+    hrefUrls.push(hrefMatch[1]);
+  }
+
+  // Also build cleaned plain text
+  const cleanText = rawText
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+
+  const textToScan = `${hrefUrls.join(' ')} ${cleanText} ${rawText}`
+    .replace(/&amp;/g, '&');
+
+  // Google Meet Regex (supports meet.google.com/xxx-yyyy-zzz with or without https and query params)
+  const meetMatch = textToScan.match(/(?:https?:\/\/)?meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:\?[^\s"<>]+)?/i);
   if (meetMatch) {
-    return { platform: 'google-meet', url: meetMatch[0].trim() };
+    const url = meetMatch[0].startsWith('http') ? meetMatch[0] : `https://${meetMatch[0]}`;
+    return { platform: 'google-meet', url: url.trim() };
   }
 
-  // Zoom Regex (Matches zoom.us/j/123456789 or zoom.us/my/room)
-  const zoomMatch = textToScan.match(/https:\/\/[a-z0-9\-]+\.zoom\.us\/(j|my)\/[0-9\?=\-_A-Za-z]+/i);
+  // Zoom Regex (Matches zoom.us/j/123456789 or zoom.us/my/room, subdomains, etc.)
+  const zoomMatch = textToScan.match(/(?:https?:\/\/)?[a-z0-9.\-]*zoom\.us\/(?:j|my|wc)\/[a-zA-Z0-9?=_&%-]+/i);
   if (zoomMatch) {
-    return { platform: 'zoom', url: zoomMatch[0].trim() };
+    const url = zoomMatch[0].startsWith('http') ? zoomMatch[0] : `https://${zoomMatch[0]}`;
+    return { platform: 'zoom', url: url.trim() };
   }
 
-  // Teams Regex (Matches teams.microsoft.com/l/meetup-join/...)
-  const teamsMatch = textToScan.match(/https:\/\/teams\.microsoft\.com\/l\/meetup-join\/[^\s"<>]+/i);
+  // Teams Regex (Matches teams.microsoft.com/meet/..., teams.microsoft.com/l/meetup-join/..., teams.live.com/meet/...)
+  const teamsMatch = textToScan.match(/(?:https?:\/\/)?(?:[a-z0-9\-]+\.)?teams\.(?:microsoft|live)\.com\/(?:l\/meetup-join|meet)\/[^\s"<>]+/i);
   if (teamsMatch) {
-    return { platform: 'teams', url: teamsMatch[0].trim() };
+    const url = teamsMatch[0].startsWith('http') ? teamsMatch[0] : `https://${teamsMatch[0]}`;
+    return { platform: 'teams', url: url.trim() };
   }
 
   return null;

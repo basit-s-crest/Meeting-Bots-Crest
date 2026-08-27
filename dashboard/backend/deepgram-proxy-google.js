@@ -112,9 +112,12 @@ class DeepgramProxy {
   constructor() {
     /** @type {Map<string, { channels: Map<number, object> }>} sessionId -> { channels } */
     this.activeProxies = new Map();
+    /** @type {Map<string, Map<number, string>>} sessionId -> channel -> speakerName */
+    this.sessionBindings = new Map();
   }
 
   _newChannelState(sessionId, channel, onTranscript, onError) {
+    const boundSpeaker = this.sessionBindings.get(sessionId)?.get(channel) || null;
     return {
       channel,
       wsConnection: null,
@@ -123,8 +126,9 @@ class DeepgramProxy {
       binder: new SpeakerBinder(),
       segmentId: 0,
       currentSegment: null, // { segmentId, isFinal, lastSpeaker }
-      lastResolvedSpeaker: null,
-      lastChannelSpeaker: null,
+      lastResolvedSpeaker: boundSpeaker,
+      lastChannelSpeaker: boundSpeaker,
+      lastKnownSpeaker: boundSpeaker,
       keepAliveInterval: null,
       onTranscript,
       onError
@@ -218,16 +222,23 @@ class DeepgramProxy {
 
         // PRIMARY: the channel's bound name (carried at capture). FALLBACK: if
         // the binder can't resolve yet (no channel binding arrived), use the
-        // SpeakerBinder + legacy hints.
-        let speakerName = state.lastChannelSpeaker;
+        // SpeakerBinder + last known speaker for this channel.
+        let speakerName = (state.lastChannelSpeaker && state.lastChannelSpeaker !== 'null') 
+          ? state.lastChannelSpeaker 
+          : (this.sessionBindings.get(sessionId)?.get(channel) || null);
         let provisional = !speakerName;
 
         if (!speakerName) {
           const resolved = binder.resolve(absoluteStartSec, absoluteEndSec);
-          const resolvedName = resolved.name;
-          speakerName = resolvedName || state.lastResolvedSpeaker;
+          const resolvedName = (resolved.name && resolved.name !== 'null') ? resolved.name : null;
+          speakerName = resolvedName || state.lastKnownSpeaker || state.lastResolvedSpeaker;
           provisional = !speakerName;
-          if (resolvedName) state.lastResolvedSpeaker = resolvedName;
+          if (resolvedName) {
+            state.lastResolvedSpeaker = resolvedName;
+            state.lastKnownSpeaker = resolvedName;
+          }
+        } else {
+          state.lastKnownSpeaker = speakerName;
         }
 
         let seg = state.currentSegment;
@@ -237,7 +248,9 @@ class DeepgramProxy {
           state.currentSegment = seg;
         }
         seg.isFinal = isFinal;
-        const speaker = speakerName || `speaker_${seg.segmentId}`;
+        const speaker = (speakerName && speakerName !== 'null') 
+          ? speakerName 
+          : (state.lastKnownSpeaker || `Speaker ${channel + 1}`);
         seg.lastSpeaker = speaker;
 
         state.config.onTranscript({
@@ -310,15 +323,14 @@ class DeepgramProxy {
   logSpeakerBoundary(sessionId, { timestamp, speaker }) {
     const entry = this.activeProxies.get(sessionId);
     if (!entry) return;
-    const state = entry.channels.get(0);
-    if (!state) return;
-    const binder = state.binder;
-    if (binder.firstChunkTs === null) {
-      binder.firstChunkTs = timestamp;
-      console.log(`[DeepgramProxy][${sessionId}] Anchored stream epoch (from speaker_event fallback): ${timestamp}`);
-    }
-    if (speaker) {
-      binder.recordHint(speaker, timestamp);
+    for (const state of entry.channels.values()) {
+      const binder = state.binder;
+      if (binder.firstChunkTs === null) {
+        binder.firstChunkTs = timestamp;
+      }
+      if (speaker && speaker !== 'null') {
+        binder.recordHint(speaker, timestamp);
+      }
     }
   }
 
@@ -328,13 +340,20 @@ class DeepgramProxy {
    * bound name directly, no laggy cross-speaker matching.
    */
   logChannelSpeakerBoundary(sessionId, { channel = 0, speaker, timestamp }) {
+    if (!this.sessionBindings.has(sessionId)) {
+      this.sessionBindings.set(sessionId, new Map());
+    }
+    if (speaker && speaker !== 'null') {
+      this.sessionBindings.get(sessionId).set(channel, speaker);
+      console.log(`[DeepgramProxy][${sessionId}] Channel ${channel} speaker bound: "${speaker}"`);
+    }
+
     const entry = this.activeProxies.get(sessionId);
     if (!entry) return;
     const state = entry.channels.get(channel);
-    if (!state) return;
-    if (speaker) {
+    if (state && speaker && speaker !== 'null') {
       state.lastChannelSpeaker = speaker;
-      console.log(`[DeepgramProxy][${sessionId}] Channel ${channel} speaker bound: "${speaker}"`);
+      state.lastKnownSpeaker = speaker;
     }
   }
 

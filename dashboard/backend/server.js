@@ -311,9 +311,35 @@ export function broadcastGlobalEvent(eventType, data) {
 setOnBotStartCallback(async (data) => {
   console.log(`[EventStream] Emitting bot_started event for session ${data.sessionId}`);
 
+  const sessionInfo = processManager.activeSessions.get(data.sessionId);
+  if (sessionInfo) {
+    if (!sessionInfo.onStatusCallback) {
+      sessionInfo.onStatusCallback = (status) => {
+        broadcastToClients(data.sessionId, 'status', { status });
+      };
+    }
+
+    if (!sessionInfo.onTranscriptCallback) {
+      sessionInfo.onTranscriptCallback = (transcriptEvent) => {
+        broadcastToClients(data.sessionId, 'transcript', transcriptEvent);
+        if (transcriptEvent.isFinal) {
+          ingestSegment(data.sessionId, {
+            speaker: transcriptEvent.speaker,
+            text: transcriptEvent.text,
+            startTs: 0,
+            endTs: 0,
+            isFinal: true,
+            projectId: sessionInfo.projectId || data.projectId,
+          });
+          liveSchedulingDetector.ingest(data.sessionId, transcriptEvent);
+        }
+      };
+    }
+  }
+
   // Automatically connect backend to bot audio stream for Deepgram transcription
-  if (data.sessionId && data.wsPort) {
-    connectToBotAudioStream(data.sessionId, data.wsPort, data.botType || 'google-meet', data.projectId);
+  if (data.sessionId && data.wsPort && (data.botType === 'google-meet' || data.botType === 'zoom')) {
+    connectToBotAudioStream(data.sessionId, data.wsPort, data.botType, data.projectId);
   }
 
   let targetUserId = null;

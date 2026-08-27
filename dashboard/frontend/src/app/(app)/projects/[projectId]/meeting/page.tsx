@@ -434,7 +434,9 @@ export default function MeetingBotPage({ params }: { params?: Promise<{ projectI
             // including interim→final progression.
             const sameTurn =
               lastBlock !== null &&
-              lastBlock.speaker.trim().toLowerCase() === speaker.trim().toLowerCase();
+              (channel !== undefined && lastBlock.channel !== undefined
+                ? lastBlock.channel === channel
+                : lastBlock.speaker.trim().toLowerCase() === speaker.trim().toLowerCase());
 
             if (sameTurn) {
               const updated = [...prev];
